@@ -1,0 +1,97 @@
+import { useEffect, useState } from "react";
+import Navbar from "../components/Navbar.jsx";
+import { getStrategies } from "../services/api.js";
+import {
+  useActiveStrategies, isActive, addStrategy, removeStrategy,
+} from "../services/strategiesStore.js";
+
+function defaultsFromSchema(schema) {
+  const out = {};
+  for (const s of schema || []) out[s.name] = s.default;
+  return out;
+}
+
+export default function Strategies() {
+  const [strategies, setStrategies] = useState([]);
+  const [error, setError] = useState(null);
+  const active = useActiveStrategies();
+
+  useEffect(() => {
+    getStrategies()
+      .then(setStrategies)
+      .catch((e) => setError(e?.response?.data?.error || e.message));
+  }, []);
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Navbar view="strategies" />
+
+      <main className="flex-1 p-6 max-w-6xl w-full mx-auto space-y-6">
+        <header>
+          <h1 className="text-2xl font-semibold tracking-tight">Strategies</h1>
+          <p className="text-sm text-muted mt-1">
+            Browse registered strategies. Add one or more to the dashboard
+            to see them run live or in backtest with editable params.
+          </p>
+        </header>
+
+        {error && (
+          <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{error}</div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {strategies.length === 0 && !error && (
+            <div className="text-sm text-muted">no strategies registered</div>
+          )}
+          {strategies.map((s) => {
+            const on = isActive(s.id);
+            return (
+              <div key={s.id} className="rounded-xl border border-line bg-bg-panel/60 p-5 flex flex-col gap-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-base font-semibold">{s.name}</div>
+                    <div className="text-xs text-muted font-mono mt-0.5">{s.id}</div>
+                  </div>
+                  <button
+                    onClick={() => on ? removeStrategy(s.id) : addStrategy(s.id, defaultsFromSchema(s.schema))}
+                    className={`px-3 py-1.5 text-xs uppercase tracking-wider rounded-md font-medium ${
+                      on ? "bg-loss/15 text-loss border border-loss/40" : "bg-accent-grad text-white"
+                    }`}
+                  >
+                    {on ? "Remove" : "Add to Dashboard"}
+                  </button>
+                </div>
+                <p className="text-sm text-muted">{s.description}</p>
+                <details className="text-xs">
+                  <summary className="text-muted cursor-pointer hover:text-text">Default params</summary>
+                  <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 font-mono">
+                    {s.schema.map((p) => (
+                      <div key={p.name} className="flex justify-between">
+                        <span className="text-muted truncate">{p.name}</span>
+                        <span className="text-text truncate ml-2">{formatDefault(p.default)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              </div>
+            );
+          })}
+        </div>
+
+        {active.length > 0 && (
+          <div className="text-xs text-muted text-center">
+            {active.length} strategy{active.length === 1 ? "" : "ies"} active —
+            {" "}<a href="#dashboard" className="text-accent-blue hover:underline">go to Dashboard →</a>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function formatDefault(v) {
+  if (typeof v === "object" && v !== null) {
+    return Object.entries(v).map(([k, val]) => `${k}:${val ? "✓" : "·"}`).join(" ");
+  }
+  return String(v);
+}

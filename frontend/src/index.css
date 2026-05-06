@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+body {
+  background: radial-gradient(1200px 800px at 80% -10%, rgba(139,92,246,0.08), transparent 60%),
+              radial-gradient(900px 600px at -10% 110%, rgba(59,130,246,0.06), transparent 60%),
+              #0a0a14;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+/* tiny scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #1f2030; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
