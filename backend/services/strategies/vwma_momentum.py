@@ -1,5 +1,5 @@
 """
-VWMA Momentum — trend-following with optional pullback / volume / RSI / session gates.
+VWMA Momentum — trend-following with optional volume / RSI / session gates.
 
 Long when close > VWMA AND slope > 0 AND filters pass.
 Short when close < VWMA AND slope < 0 AND filters pass.
@@ -94,9 +94,6 @@ class VwmaMomentumStrategy(Strategy):
         ParamSpec("vol_length",         ParamType.INT,   45,   min=5,  max=200, step=1, group="Volume"),
         ParamSpec("vol_mult",           ParamType.FLOAT, 1.05, min=0.5, max=5.0, step=0.05, group="Volume",
                   description="Bar volume must exceed avg × this multiplier."),
-        ParamSpec("use_pullback",       ParamType.BOOL,  False,                         group="Pullback"),
-        ParamSpec("pullback_buffer_pct",ParamType.FLOAT, 0.20, min=0.0, max=2.0, step=0.05, group="Pullback",
-                  description="Touch within this % of VWMA to qualify."),
         ParamSpec("trade_24_7", ParamType.BOOL, False, group="Sessions",
                   description="Trade any time of day; the session windows below are ignored."),
         ParamSpec("sessions", ParamType.SESSIONS,
@@ -116,9 +113,8 @@ class VwmaMomentumStrategy(Strategy):
     META = StrategyMeta(
         id="vwma_momentum",
         name="VWMA Momentum",
-        description=("Trend-follow VWMA with optional volume confirmation, RSI gate, "
-                     "and pullback. Exits when momentum stalls (close crosses VWMA "
-                     "with opposite slope)."),
+        description=("Trend-follow VWMA with optional volume confirmation and RSI gate. "
+                     "Exits when momentum stalls (close crosses VWMA with opposite slope)."),
         schema=PARAM_SCHEMA,
     )
 
@@ -131,8 +127,6 @@ class VwmaMomentumStrategy(Strategy):
         p = self.p
         out = df.copy()
         close = out["close"].astype(float)
-        high = out["high"].astype(float)
-        low = out["low"].astype(float)
         vol = out["volume"].astype(float) if "volume" in out.columns else pd.Series(1.0, index=out.index)
 
         vwma = _vwma(close, vol, int(p["vwma_length"]))
@@ -159,20 +153,12 @@ class VwmaMomentumStrategy(Strategy):
         else:
             vol_ok = pd.Series(True, index=out.index)
 
-        if bool(p["use_pullback"]):
-            buf = float(p["pullback_buffer_pct"]) / 100.0
-            long_pullback  = low  <= vwma * (1.0 + buf)
-            short_pullback = high >= vwma * (1.0 - buf)
-        else:
-            long_pullback  = pd.Series(True, index=out.index)
-            short_pullback = pd.Series(True, index=out.index)
-
         trend_up   = (close > vwma) & (slope > 0)
         trend_down = (close < vwma) & (slope < 0)
 
         sides = p["sides"]
-        long_cond  = (in_session & trend_up   & long_pullback  & rsi_long_ok  & vol_ok) if sides.get("long")  else pd.Series(False, index=out.index)
-        short_cond = (in_session & trend_down & short_pullback & rsi_short_ok & vol_ok) if sides.get("short") else pd.Series(False, index=out.index)
+        long_cond  = (in_session & trend_up   & rsi_long_ok  & vol_ok) if sides.get("long")  else pd.Series(False, index=out.index)
+        short_cond = (in_session & trend_down & rsi_short_ok & vol_ok) if sides.get("short") else pd.Series(False, index=out.index)
 
         # Walk-forward: exits when momentum flips against position.
         n = len(out)
