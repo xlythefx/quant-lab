@@ -227,6 +227,15 @@ class VwmaReversionStrategy(Strategy):
         out["exit_long"] = exit_long
         out["exit_short"] = exit_short
         out["stop_price"] = stop_price
+        # Raw per-bar conditions for the engine's pyramiding/MTM path.
+        # cond_*: bar-level entry condition independent of position state.
+        # bar_exit_*: bar-level mean-revert exit (price crossed back through VWMA).
+        # atr: per-bar ATR for per-tranche stop calculation in the engine.
+        out["cond_long"]      = long_cond.fillna(False).astype(bool)
+        out["cond_short"]     = short_cond.fillna(False).astype(bool)
+        out["bar_exit_long"]  = (close >= mean).fillna(False).astype(bool)
+        out["bar_exit_short"] = (close <= mean).fillna(False).astype(bool)
+        out["atr"]            = atr
         # Overlay columns referenced by OVERLAYS:
         out["vwma"] = mean
         out["upper_band"] = mean + std * p["z_threshold"]

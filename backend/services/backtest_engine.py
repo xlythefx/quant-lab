@@ -101,6 +101,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     fee_flat         = float(rc["fee_flat"])
     fee_pct          = float(rc["fee_pct"]) / 100.0
     slippage         = float(rc["slippage_bps"]) / 10000.0
+    max_tranches     = max(1, int(float(rc.get("pyramiding", 1))))
 
     cls = get_strategy_class(strategy_id)
     strategy = cls(params or {})
@@ -116,68 +117,163 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         return _empty_result(strategy_id, symbol, timeframe, rc)
 
     sig_df = strategy.vectorized(df)
-    time_a = sig_df["time"].to_numpy()
+    time_a  = sig_df["time"].to_numpy()
+    open_a  = sig_df["open"].to_numpy(dtype=float)
     close_a = sig_df["close"].to_numpy(dtype=float)
-    el = sig_df["entry_long"].to_numpy()
-    es = sig_df["entry_short"].to_numpy()
-    xl = sig_df["exit_long"].to_numpy()
-    xs = sig_df["exit_short"].to_numpy()
+
+    # Prefer raw bar-level conditions (pyramiding-capable) when the strategy
+    # exposes them. Otherwise fall back to one-shot entry/exit arrays.
+    cl_col = "cond_long"      if "cond_long"      in sig_df.columns else "entry_long"
+    cs_col = "cond_short"     if "cond_short"     in sig_df.columns else "entry_short"
+    el_col = "bar_exit_long"  if "bar_exit_long"  in sig_df.columns else "exit_long"
+    es_col = "bar_exit_short" if "bar_exit_short" in sig_df.columns else "exit_short"
+
+    cond_long_a  = sig_df[cl_col].fillna(False).astype(bool).to_numpy()
+    cond_short_a = sig_df[cs_col].fillna(False).astype(bool).to_numpy()
+    bxl_a        = sig_df[el_col].fillna(False).astype(bool).to_numpy()
+    bxs_a        = sig_df[es_col].fillna(False).astype(bool).to_numpy()
+
+    # Per-tranche ATR stop (optional — only if strategy exposes `atr` + `atr_mult`).
+    has_atr_stop = "atr" in sig_df.columns and "atr_mult" in getattr(strategy, "p", {})
+    atr_a    = sig_df["atr"].to_numpy(dtype=float) if has_atr_stop else None
+    atr_mult = float(strategy.p["atr_mult"]) if has_atr_stop else 0.0
 
     n = len(sig_df)
 
-    equity = float(starting_capital)
-    peak = equity
+    tranches_long: list[dict]  = []
+    tranches_short: list[dict] = []
+    realized_cum = 0.0
+    peak_eq      = float(starting_capital)
 
-    pos = 0
-    entry_price = np.nan
-    entry_time_ts = 0
-    position_units = 0.0
-    fees_paid_open = 0.0    # fees paid at open (deducted later from PnL)
-
-    equity_arr = np.full(n, np.nan)
+    equity_arr     = np.full(n, float(starting_capital))
     dd_dollars_arr = np.zeros(n)
     trades_list: list[dict] = []
 
+    def _unrealized(trs, side_sign, mark):
+        u = 0.0
+        for tr in trs:
+            u += (mark - tr["entry_price"]) * tr["units"] * side_sign
+        return u
+
     for t in range(n):
         ts = int(time_a[t])
-        c = close_a[t]
+        cl = close_a[t]
 
-        # exits first
-        if pos == 1 and xl[t]:
-            fill = c * (1.0 - slippage)             # adverse slippage on exit
-            notional_close = abs(fill * position_units)
+        # Act on bar `t` open using signals observed at close of bar `t-1`.
+        if t >= 1:
+            op = open_a[t]
+            prev_close = close_a[t - 1]
+
+            # ---- exits (close-first, then re-open new tranches) ----
+            still_long: list[dict] = []
+            for tr in tranches_long:
+                mean_revert = bool(bxl_a[t - 1])
+                stop_hit = False
+                if has_atr_stop and np.isfinite(tr["atr_at_entry"]):
+                    stop_hit = prev_close <= tr["entry_price"] - atr_mult * tr["atr_at_entry"]
+                if mean_revert or stop_hit:
+                    fill = op * (1.0 - slippage)
+                    notional_close = abs(fill * tr["units"])
+                    fee_close = fee_flat + notional_close * fee_pct
+                    pnl = (fill - tr["entry_price"]) * tr["units"] - fee_close
+                    realized_cum += pnl
+                    trades_list.append(_trade(
+                        "long", tr["entry_price"], fill, tr["entry_time"], ts,
+                        pnl, tr["units"], tr["fee_open"] + fee_close,
+                    ))
+                else:
+                    still_long.append(tr)
+            tranches_long = still_long
+
+            still_short: list[dict] = []
+            for tr in tranches_short:
+                mean_revert = bool(bxs_a[t - 1])
+                stop_hit = False
+                if has_atr_stop and np.isfinite(tr["atr_at_entry"]):
+                    stop_hit = prev_close >= tr["entry_price"] + atr_mult * tr["atr_at_entry"]
+                if mean_revert or stop_hit:
+                    fill = op * (1.0 + slippage)
+                    notional_close = abs(fill * tr["units"])
+                    fee_close = fee_flat + notional_close * fee_pct
+                    pnl = (tr["entry_price"] - fill) * tr["units"] - fee_close
+                    realized_cum += pnl
+                    trades_list.append(_trade(
+                        "short", tr["entry_price"], fill, tr["entry_time"], ts,
+                        pnl, tr["units"], tr["fee_open"] + fee_close,
+                    ))
+                else:
+                    still_short.append(tr)
+            tranches_short = still_short
+
+            # ---- entries (sized off MTM equity at previous close) ----
+            cur_eq = (starting_capital + realized_cum
+                      + _unrealized(tranches_long,  +1, prev_close)
+                      + _unrealized(tranches_short, -1, prev_close))
+
+            if cur_eq > 0 and cond_long_a[t - 1] and len(tranches_long) < max_tranches:
+                fill = op * (1.0 + slippage)
+                if fill > 0:
+                    units = (cur_eq * risk_frac) / fill
+                    fee_open = fee_flat + abs(fill * units) * fee_pct
+                    realized_cum -= fee_open
+                    tranches_long.append({
+                        "entry_price": fill,
+                        "units":       units,
+                        "fee_open":    fee_open,
+                        "atr_at_entry": float(atr_a[t - 1]) if (has_atr_stop and np.isfinite(atr_a[t - 1])) else float("nan"),
+                        "entry_time":  ts,
+                    })
+
+            if cur_eq > 0 and cond_short_a[t - 1] and len(tranches_short) < max_tranches:
+                fill = op * (1.0 - slippage)
+                if fill > 0:
+                    units = (cur_eq * risk_frac) / fill
+                    fee_open = fee_flat + abs(fill * units) * fee_pct
+                    realized_cum -= fee_open
+                    tranches_short.append({
+                        "entry_price": fill,
+                        "units":       units,
+                        "fee_open":    fee_open,
+                        "atr_at_entry": float(atr_a[t - 1]) if (has_atr_stop and np.isfinite(atr_a[t - 1])) else float("nan"),
+                        "entry_time":  ts,
+                    })
+
+        # ---- MTM equity at bar `t` close ----
+        equity_t = (starting_capital + realized_cum
+                    + _unrealized(tranches_long,  +1, cl)
+                    + _unrealized(tranches_short, -1, cl))
+        peak_eq = max(peak_eq, equity_t)
+        equity_arr[t]     = equity_t
+        dd_dollars_arr[t] = equity_t - peak_eq   # ≤ 0
+
+    # Force-close any tranches still open at the last bar's close so trades_list
+    # and final realized_cum are consistent. equity_arr already reflects their
+    # MTM at close[n-1], so realizing them now doesn't change the equity curve.
+    if n > 0 and (tranches_long or tranches_short):
+        final_close = close_a[-1]
+        final_ts = int(time_a[-1])
+        for tr in tranches_long:
+            notional_close = abs(final_close * tr["units"])
             fee_close = fee_flat + notional_close * fee_pct
-            pnl_dollars = (fill - entry_price) * position_units - fees_paid_open - fee_close
-            equity += pnl_dollars
-            trades_list.append(_trade("long", entry_price, fill, entry_time_ts, ts,
-                                      pnl_dollars, position_units, fees_paid_open + fee_close))
-            pos = 0; entry_price = np.nan; position_units = 0.0; fees_paid_open = 0.0
-        elif pos == -1 and xs[t]:
-            fill = c * (1.0 + slippage)
-            notional_close = abs(fill * position_units)
+            pnl = (final_close - tr["entry_price"]) * tr["units"] - fee_close
+            realized_cum += pnl
+            trades_list.append(_trade(
+                "long", tr["entry_price"], final_close, tr["entry_time"], final_ts,
+                pnl, tr["units"], tr["fee_open"] + fee_close,
+            ))
+        for tr in tranches_short:
+            notional_close = abs(final_close * tr["units"])
             fee_close = fee_flat + notional_close * fee_pct
-            pnl_dollars = (entry_price - fill) * position_units - fees_paid_open - fee_close
-            equity += pnl_dollars
-            trades_list.append(_trade("short", entry_price, fill, entry_time_ts, ts,
-                                      pnl_dollars, position_units, fees_paid_open + fee_close))
-            pos = 0; entry_price = np.nan; position_units = 0.0; fees_paid_open = 0.0
+            pnl = (tr["entry_price"] - final_close) * tr["units"] - fee_close
+            realized_cum += pnl
+            trades_list.append(_trade(
+                "short", tr["entry_price"], final_close, tr["entry_time"], final_ts,
+                pnl, tr["units"], tr["fee_open"] + fee_close,
+            ))
+        tranches_long = []
+        tranches_short = []
 
-        # entries
-        if pos == 0 and (el[t] or es[t]):
-            side = 1 if el[t] else -1
-            fill = c * (1.0 + slippage * side)      # adverse fill on entry
-            if fill <= 0:
-                continue
-            position_units = (equity * risk_frac) / fill
-            notional_open = fill * position_units
-            fees_paid_open = fee_flat + abs(notional_open) * fee_pct
-            entry_price = fill
-            entry_time_ts = ts
-            pos = side
-
-        peak = max(peak, equity)
-        equity_arr[t] = equity
-        dd_dollars_arr[t] = equity - peak  # ≤ 0
+    equity = float(starting_capital + realized_cum)
 
     equity_curve = []
     for t in range(n):

@@ -65,6 +65,8 @@ def get() -> dict:
 
 def update(patch: dict) -> dict:
     global _cache
+    if _cache is None:
+        get()   # populate cache from disk first so unrelated keys aren't reset
     with _LOCK:
         current = dict(_cache) if _cache is not None else dict(DEFAULTS)
         current.update(patch or {})
