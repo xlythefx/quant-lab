@@ -22,6 +22,9 @@ from config import CORS_ORIGINS, HOST, PORT, BACKTEST_DEFAULT_SPEED
 from routes.market_routes import market_bp
 from routes.strategy_routes import strategy_bp
 from routes.settings_routes import settings_bp
+from routes.walkforward_routes import walkforward_bp
+from routes.monte_carlo_routes import monte_carlo_bp
+from routes.ai_routes import ai_bp
 from services.socket_manager import SocketManager
 from services.strategy_manager import StrategyManager
 from services import event_bus
@@ -45,6 +48,9 @@ def create_app():
     app.register_blueprint(market_bp)
     app.register_blueprint(strategy_bp)
     app.register_blueprint(settings_bp)
+    app.register_blueprint(walkforward_bp)
+    app.register_blueprint(monte_carlo_bp)
+    app.register_blueprint(ai_bp)
 
     socketio = SocketIO(
         app,

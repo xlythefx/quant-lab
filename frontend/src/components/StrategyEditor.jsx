@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import TimePickerModal from "./TimePickerModal.jsx";
+import { getTz, convertUtcHHmm, tzShort } from "../services/timezone.js";
 
 const SESSION_LABELS = {
   tokyo:  "Tokyo",
@@ -81,27 +83,7 @@ function ParamInput({ spec, value, onChange }) {
     );
   }
   if (spec.type === "sessions") {
-    return (
-      <div>
-        {spec.description && <div className="text-[11px] text-muted mb-2">{spec.description}</div>}
-        <div className="space-y-2">
-          {Object.entries(SESSION_LABELS).map(([key, label]) => {
-            const cfg = (v && v[key]) || { enabled: false, start: "00:00", end: "00:00" };
-            const setSub = (patch) => onChange(spec.name, { ...v, [key]: { ...cfg, ...patch } });
-            return (
-              <div key={key} className="flex items-center gap-2 px-2 py-1.5 rounded-md border border-line/60 bg-bg-elev/30">
-                <Toggle checked={!!cfg.enabled} onChange={(b) => setSub({ enabled: b })} />
-                <span className="text-xs text-text w-24 truncate">{label}</span>
-                <TimeInput value={cfg.start} onChange={(v) => setSub({ start: v })} />
-                <span className="text-[10px] text-muted">→</span>
-                <TimeInput value={cfg.end}   onChange={(v) => setSub({ end: v })} />
-                <span className="text-[9px] text-muted ml-auto">UTC</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
+    return <SessionsField spec={spec} value={v} onChange={onChange} />;
   }
   if (spec.type === "sides") {
     return (
@@ -181,6 +163,85 @@ function Row({ label, hint, children }) {
       </div>
       {hint && <div className="text-[11px] text-muted/70 mt-0.5">{hint}</div>}
     </div>
+  );
+}
+
+/**
+ * Sessions group: one row per session with a toggle, a label, and two
+ * "HH:MM" chip-buttons that open the scroll-wheel TimePickerModal.
+ * Times are stored as UTC; the row footer shows live conversions in the
+ * user's selected display zone plus NY / PH for reference.
+ */
+function SessionsField({ spec, value, onChange }) {
+  const v = value || {};
+  const [picker, setPicker] = useState(null);  // { key, field: 'start' | 'end' } | null
+  const [tz, setTz] = useState(getTz());
+
+  useEffect(() => {
+    const onTz = () => setTz(getTz());
+    window.addEventListener("quantlab:tz-change", onTz);
+    window.addEventListener("storage", onTz);
+    return () => {
+      window.removeEventListener("quantlab:tz-change", onTz);
+      window.removeEventListener("storage", onTz);
+    };
+  }, []);
+
+  const userIsSpecial = tz === "Etc/UTC" || tz === "America/New_York" || tz === "Asia/Manila";
+
+  return (
+    <div>
+      {spec.description && <div className="text-[11px] text-muted mb-2">{spec.description}</div>}
+      <div className="space-y-2">
+        {Object.entries(SESSION_LABELS).map(([key, label]) => {
+          const cfg = v[key] || { enabled: false, start: "00:00", end: "00:00" };
+          const setSub = (patch) => onChange(spec.name, { ...v, [key]: { ...cfg, ...patch } });
+          return (
+            <div key={key} className="px-2 py-1.5 rounded-md border border-line/60 bg-bg-elev/30">
+              <div className="flex items-center gap-2">
+                <Toggle checked={!!cfg.enabled} onChange={(b) => setSub({ enabled: b })} />
+                <span className="text-xs text-text w-24 truncate">{label}</span>
+                <TimeChip value={cfg.start} onClick={() => setPicker({ key, field: "start", label: `${label} · Start` })} />
+                <span className="text-[10px] text-muted">→</span>
+                <TimeChip value={cfg.end}   onClick={() => setPicker({ key, field: "end",   label: `${label} · End`   })} />
+                <span className="text-[9px] text-muted ml-auto">UTC</span>
+              </div>
+              <div className="mt-1 pl-12 font-mono text-[10px] text-muted/70 flex flex-wrap gap-x-3">
+                {!userIsSpecial && (
+                  <span>{tzShort(tz)}: {convertUtcHHmm(cfg.start, tz)}–{convertUtcHHmm(cfg.end, tz)}</span>
+                )}
+                <span>NY: {convertUtcHHmm(cfg.start, "America/New_York")}–{convertUtcHHmm(cfg.end, "America/New_York")}</span>
+                <span>PH: {convertUtcHHmm(cfg.start, "Asia/Manila")}–{convertUtcHHmm(cfg.end, "Asia/Manila")}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <TimePickerModal
+        open={!!picker}
+        value={picker ? (v[picker.key]?.[picker.field] || "00:00") : "00:00"}
+        label={picker?.label}
+        onClose={() => setPicker(null)}
+        onChange={(hhmm) => {
+          if (!picker) return;
+          const cur = v[picker.key] || { enabled: false, start: "00:00", end: "00:00" };
+          onChange(spec.name, { ...v, [picker.key]: { ...cur, [picker.field]: hhmm } });
+        }}
+      />
+    </div>
+  );
+}
+
+function TimeChip({ value, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-2 py-0.5 text-xs font-mono rounded bg-bg border border-line text-text hover:border-accent-blue focus:outline-none focus:border-accent-blue w-16 text-center"
+    >
+      {value || "00:00"}
+    </button>
   );
 }
 

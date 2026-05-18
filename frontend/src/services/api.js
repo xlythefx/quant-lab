@@ -76,3 +76,72 @@ export async function updateRiskConfig(patch) {
   const { data } = await api.put("/api/risk-config", patch);
   return data;
 }
+
+// ---------------------------------------------------------------------------
+// Walk-Forward Optimization
+// ---------------------------------------------------------------------------
+
+export async function startWalkForward(spec) {
+  const { data } = await api.post("/api/walkforward/start", spec);
+  return data; // {job_id, ok}
+}
+
+export async function cancelWalkForward() {
+  const { data } = await api.post("/api/walkforward/cancel");
+  return data; // {ok}
+}
+
+export async function getWalkForwardStatus() {
+  const { data } = await api.get("/api/walkforward/status");
+  return data;
+}
+
+export async function getWalkForwardLastResult() {
+  const { data } = await api.get("/api/walkforward/last_result");
+  return data.result;
+}
+
+// ---------------------------------------------------------------------------
+// Monte Carlo
+// ---------------------------------------------------------------------------
+
+/** Run a Monte Carlo simulation against a strategy.
+ *  method = "trade_bootstrap" | "block_bootstrap" | "synthetic". */
+export async function runMonteCarlo({ strategy_id, symbol, timeframe, params,
+                                      start_time, end_time, method,
+                                      n_sims, block_size, seed }) {
+  const { data } = await api.post("/api/montecarlo/run", {
+    strategy_id, symbol, timeframe, params, start_time, end_time,
+    method, n_sims, block_size, seed,
+  });
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// AI Insights (Claude-powered, backend-proxied)
+// ---------------------------------------------------------------------------
+
+export async function aiAnalyzeMonteCarlo(mc_result) {
+  // AI calls can take ~30s with adaptive thinking, override default timeout.
+  const { data } = await api.post("/api/ai/insights/monte-carlo",
+    { mc_result }, { timeout: 180_000 });
+  return data; // {text, model, usage}
+}
+
+export async function aiAnalyzeWalkForward(wf_result) {
+  const { data } = await api.post("/api/ai/insights/walkforward",
+    { wf_result }, { timeout: 180_000 });
+  return data;
+}
+
+export async function aiAnalyzeBacktestSection(result, section) {
+  const { data } = await api.post("/api/ai/insights/backtest-section",
+    { result, section }, { timeout: 180_000 });
+  return data; // {text, model, usage}
+}
+
+export async function aiSuggestWalkForward(meta) {
+  const { data } = await api.post("/api/ai/suggest/walkforward",
+    meta, { timeout: 180_000 });
+  return data; // {suggestion: {is_bars, oos_bars, n_trials, metric, rationale, expected_windows}, ...}
+}

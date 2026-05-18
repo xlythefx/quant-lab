@@ -4,6 +4,7 @@ import Downloads from "./pages/Downloads.jsx";
 import Strategies from "./pages/Strategies.jsx";
 import RiskSettings from "./pages/RiskSettings.jsx";
 import Analytics from "./pages/Analytics.jsx";
+import WalkForward from "./pages/WalkForward.jsx";
 
 function getView() {
   // Hash like "#analytics?key=..." → strip query and route by base name.
@@ -24,5 +25,6 @@ export default function App() {
   if (view === "strategies") return <Strategies />;
   if (view === "settings")   return <RiskSettings />;
   if (view === "analytics")  return <Analytics />;
+  if (view === "walkforward") return <WalkForward />;
   return <Dashboard />;
 }

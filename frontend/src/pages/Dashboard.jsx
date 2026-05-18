@@ -367,17 +367,28 @@ export default function Dashboard() {
     }
   };
 
-  // Auto-run hindsight on input changes (debounced).
+  // Hydrate the chart from cached results whenever inputs change. NEVER
+  // auto-runs the backtest — the user must press "Run Backtest" explicitly.
   useEffect(() => {
     if (mode !== "backtest" || backtestKind !== "hindsight") return;
     if (!symbol || !datasetExists || active.length === 0) {
       setStaticData(null);
+      setEquityPoints({});
+      setMarkersByStrategy({});
+      setStatsById({});
       return;
     }
-    const t = setTimeout(() => { runHindsight(); }, 200);
-    return () => clearTimeout(t);
+    const restored = restoreFromCache(active, symbol, timeframe);
+    setStaticData(restored.staticData);
+    setEquityPoints(restored.equityPoints);
+    setMarkersByStrategy(restored.markersByStrategy);
+    setStatsById(restored.statsById);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, backtestKind, symbol, timeframe, active.length, datasetExists]);
+
+  const allCached = symbol && active.length > 0 && active.every(
+    (s) => getLastResult(`${s.id}|${symbol}|${timeframe}`) != null
+  );
 
   // Re-run a single strategy's hindsight (Apply & Re-run from editor).
   const reRunOneHindsight = async (id, params) => {
@@ -483,6 +494,16 @@ export default function Dashboard() {
           </>
         )}
         <div className="ml-auto flex items-center gap-2">
+          {mode === "backtest" && backtestKind === "hindsight" && (
+            <button
+              onClick={runHindsight}
+              disabled={!symbol || !datasetExists || active.length === 0 || hindsightLoading}
+              className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold uppercase tracking-wider disabled:opacity-40 disabled:cursor-not-allowed"
+              title={allCached ? "Re-run backtest (cached results shown)" : "Run backtest"}
+            >
+              {hindsightLoading ? "Running…" : allCached ? "↻ Re-run" : "▶ Run Backtest"}
+            </button>
+          )}
           {staticData && (
             <a
               href={analyticsHref}
@@ -548,7 +569,7 @@ export default function Dashboard() {
                   <a href="#downloads" className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-medium">Open Downloads →</a>
                 </>
               ) : !symbol ? (
-                <div className="text-sm text-muted">Pick a symbol above to auto-run a backtest.</div>
+                <div className="text-sm text-muted">Pick a symbol above, then press <span className="text-text">Run Backtest</span>.</div>
               ) : !datasetExists ? (
                 <>
                   <div className="text-text text-base">No dataset for <span className="font-mono text-accent-violet">{symbol} {timeframe}</span></div>
@@ -559,7 +580,15 @@ export default function Dashboard() {
                   <div className="text-sm text-muted">No strategies active.</div>
                   <a href="#strategies" className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm">Browse strategies →</a>
                 </>
-              ) : null}
+              ) : (
+                <>
+                  <div className="text-base text-text">Ready · <span className="font-mono text-accent-violet">{symbol} {timeframe}</span></div>
+                  <button onClick={runHindsight}
+                    className="mt-1 px-6 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold uppercase tracking-wider">
+                    ▶ Run Backtest
+                  </button>
+                </>
+              )}
             </div>
           )}
 

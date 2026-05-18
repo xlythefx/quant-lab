@@ -11,6 +11,7 @@ import {
   clear as clearAllResults,
   getCount as resultsCount,
 } from "../services/lastResultStore.js";
+import { TZ_PRESETS, getTz, setTz, convertUtcHHmm } from "../services/timezone.js";
 
 const FIELDS = [
   { key: "starting_capital", label: "Starting Capital",     unit: "$",   step: 1000, min: 1,
@@ -24,7 +25,7 @@ const FIELDS = [
   { key: "slippage_bps",     label: "Slippage",             unit: "bps", step: 0.5,  min: 0, max: 500,
     hint: "Adverse fill price applied to each entry & exit." },
   { key: "pyramiding",       label: "Pyramiding",           unit: "pos", step: 1,    min: 1, max: 100,
-    hint: "Max concurrent positions a strategy may stack. Current strategies cap at 1 — this is honored as the upper bound when strategies start using it." },
+    hint: "Max concurrent tranches per side. Each tranche is sized at Risk% of current equity at entry — set to 1 to disable stacking." },
 ];
 
 export default function RiskSettings() {
@@ -38,6 +39,10 @@ export default function RiskSettings() {
   const [stratN, setStratN] = useState(strategiesCount());
   const [resultN, setResultN] = useState(resultsCount());
   const refreshCounts = () => { setStratN(strategiesCount()); setResultN(resultsCount()); };
+
+  // Display timezone (browser-local). Conversions show UTC session times in this zone.
+  const [tz, setTzState] = useState(getTz());
+  const onTzChange = (next) => { setTz(next); setTzState(next); };
 
   useEffect(() => {
     getRiskConfig().then(setCfg).catch((e) => setErr(e.message));
@@ -116,6 +121,40 @@ export default function RiskSettings() {
             <div className="text-muted">Pyramiding</div>      <div className="text-text">{fmtNum(cfg.pyramiding)}</div>
           </div>
         </div>
+
+        {/* Display timezone (browser-local) */}
+        <section>
+          <h2 className="text-sm uppercase tracking-wider text-muted mb-2">Display timezone</h2>
+          <div className="rounded-xl border border-line bg-bg-panel/60 px-5 py-4 space-y-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-sm">Strategy session times</div>
+                <div className="text-xs text-muted/80 mt-0.5">
+                  Session windows are always stored as <span className="font-mono">UTC</span>.
+                  Pick a zone here and the strategy editor will show live conversions
+                  (plus NY and PH for reference). Browser-local — not synced.
+                </div>
+              </div>
+              <select
+                value={tz}
+                onChange={(e) => onTzChange(e.target.value)}
+                className="px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+              >
+                {TZ_PRESETS.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="rounded-lg border border-line/40 bg-bg-elev/30 px-3 py-2 font-mono text-xs flex flex-wrap gap-x-6 gap-y-1">
+              <span className="text-muted">e.g. <span className="text-text">12:30 UTC</span></span>
+              <span className="text-muted">= <span className="text-text">{convertUtcHHmm("12:30", "America/New_York")}</span> NY</span>
+              <span className="text-muted">= <span className="text-text">{convertUtcHHmm("12:30", "Asia/Manila")}</span> PH</span>
+              {tz !== "Etc/UTC" && tz !== "America/New_York" && tz !== "Asia/Manila" && (
+                <span className="text-muted">= <span className="text-text">{convertUtcHHmm("12:30", tz)}</span> {TZ_PRESETS.find(p => p.value === tz)?.short || tz}</span>
+              )}
+            </div>
+          </div>
+        </section>
 
         {/* Storage / cache */}
         <section>

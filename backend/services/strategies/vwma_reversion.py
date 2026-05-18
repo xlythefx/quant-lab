@@ -250,6 +250,12 @@ class VwmaReversionStrategy(Strategy):
           pos:        0 / 1 / -1
           entry_p:    float
           atr_at_entry: float
+
+        NOTE: Single-position only. The backtest engine supports pyramiding
+        (see backtest_engine.py — tranches list), but this live path holds
+        at most one position at a time. If you trade live with pyramiding>1
+        in risk_config, live behavior will NOT match the backtest equity
+        curve. Extend `state` to a tranches list to align them.
         """
         if not bool(candle.get("isClosed", False)):
             return None  # only act on closed bars

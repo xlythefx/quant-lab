@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import Navbar from "../components/Navbar.jsx";
 import ConfirmModal, { TrashIcon } from "../components/ConfirmModal.jsx";
-import { downloadDataset, listDatasets, deleteDataset } from "../services/api.js";
-import { socket, waitForSocketId } from "../services/socket.js";
+import { listDatasets, deleteDataset } from "../services/api.js";
+import { waitForSocketId } from "../services/socket.js";
+import { getState as getDlState, subscribe as subscribeDl,
+         startDownload, clearResult as clearDlResult } from "../services/downloadStore.js";
 
 const TFS = ["1m", "5m", "15m", "1h"];
 const SUGGESTED = ["BTCUSDT", "FETUSDT", "ETHUSDT", "SOLUSDT"];
@@ -37,56 +39,36 @@ export default function Downloads() {
   const [start, setStart] = useState(isoDaysAgo(180));
   const [end, setEnd] = useState(todayIso());
 
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState(null); // {fetched, expected, cursor_ms, status, ...}
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
+  // Download lifecycle lives in a module-level store so it survives navigation.
+  // useSyncExternalStore re-renders us whenever the store changes.
+  const dl = useSyncExternalStore(subscribeDl, getDlState);
+  const { busy, progress, result, error } = dl;
+
   const [datasets, setDatasets] = useState([]);
-
   const [confirmDel, setConfirmDel] = useState(null); // {symbol, timeframe} | null
-
-  const jobIdRef = useRef(null);
 
   const refresh = () => listDatasets().then(setDatasets).catch(() => {});
 
   useEffect(() => { refresh(); }, []);
 
-  // Socket.IO progress listener — filtered to our active job_id.
+  // When a background download finishes while we were on another page, the
+  // dataset list shown here is stale — refresh once on (re-)mount-and-idle.
   useEffect(() => {
-    const onProgress = (p) => {
-      if (!jobIdRef.current || p.job_id !== jobIdRef.current) return;
-      setProgress(p);
-    };
-    socket.on("download_progress", onProgress);
-    return () => socket.off("download_progress", onProgress);
-  }, []);
+    if (!busy && result) refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, result]);
 
   const onDownload = async (e) => {
     e?.preventDefault?.();
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    setProgress(null);
-
     const sym = symbol.trim().toUpperCase();
     const jobId = `${sym}_${timeframe}_${Date.now()}`;
-    jobIdRef.current = jobId;
+
+    let sid = null;
+    try { sid = await waitForSocketId(2000); } catch { /* progress just won't stream */ }
 
     try {
-      let sid = null;
-      try { sid = await waitForSocketId(2000); } catch { /* progress just won't stream */ }
-
-      const r = await downloadDataset({
-        symbol: sym, timeframe, start, end, sid, jobId,
-      });
-      setResult(r);
-      refresh();
-    } catch (err) {
-      setError(err?.response?.data?.error || err.message || "download failed");
-    } finally {
-      setBusy(false);
-      jobIdRef.current = null;
-    }
+      await startDownload({ symbol: sym, timeframe, start, end, sid, jobId });
+    } catch { /* error already on the store */ }
   };
 
   const performDelete = async () => {
@@ -200,7 +182,8 @@ export default function Downloads() {
                   {!progress && "preparing…"}
                 </span>
                 <span>
-                  {start} → {end}
+                  {busy && dl.symbol ? `${dl.symbol} ${dl.timeframe} · ` : ""}
+                  {(busy ? dl.start : start)} → {(busy ? dl.end : end)}
                 </span>
               </div>
 

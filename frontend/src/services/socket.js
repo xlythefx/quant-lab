@@ -127,6 +127,38 @@ export function clearAllStrategySubscriptions() {
   activeStrategyStarts.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Walk-Forward Optimization events
+// ---------------------------------------------------------------------------
+/**
+ * Subscribe to walk-forward job events. Returns an unsubscribe fn.
+ *
+ * Handlers (all optional):
+ *   onProgress({job_id, window_idx, total_windows, trial_idx, n_trials, current_score})
+ *   onWindowDone({job_id, window})
+ *   onComplete({job_id, result})
+ *   onCancelled({job_id})
+ *   onError({job_id, message})
+ */
+export function subscribeWalkForward({ onProgress, onWindowDone, onComplete, onCancelled, onError } = {}) {
+  const wrap = (fn) => (fn ? (p) => fn(p) : null);
+  const h = {
+    wf_progress:    wrap(onProgress),
+    wf_window_done: wrap(onWindowDone),
+    wf_complete:    wrap(onComplete),
+    wf_cancelled:   wrap(onCancelled),
+    wf_error:       wrap(onError),
+  };
+  for (const [evt, fn] of Object.entries(h)) {
+    if (fn) socket.on(evt, fn);
+  }
+  return () => {
+    for (const [evt, fn] of Object.entries(h)) {
+      if (fn) socket.off(evt, fn);
+    }
+  };
+}
+
 export function waitForSocketId(timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     if (socket.connected && socket.id) return resolve(socket.id);

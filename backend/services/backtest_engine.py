@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from services import market_data, risk_config
+from services import market_data, quant_metrics, risk_config
 from services.strategy_registry import get_strategy_class
 
 log = logging.getLogger(__name__)
@@ -119,6 +119,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     sig_df = strategy.vectorized(df)
     time_a  = sig_df["time"].to_numpy()
     open_a  = sig_df["open"].to_numpy(dtype=float)
+    high_a  = sig_df["high"].to_numpy(dtype=float)
+    low_a   = sig_df["low"].to_numpy(dtype=float)
     close_a = sig_df["close"].to_numpy(dtype=float)
 
     # Prefer raw bar-level conditions (pyramiding-capable) when the strategy
@@ -180,6 +182,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                     trades_list.append(_trade(
                         "long", tr["entry_price"], fill, tr["entry_time"], ts,
                         pnl, tr["units"], tr["fee_open"] + fee_close,
+                        starting_capital=starting_capital,
+                        mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
                     ))
                 else:
                     still_long.append(tr)
@@ -200,6 +204,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                     trades_list.append(_trade(
                         "short", tr["entry_price"], fill, tr["entry_time"], ts,
                         pnl, tr["units"], tr["fee_open"] + fee_close,
+                        starting_capital=starting_capital,
+                        mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
                     ))
                 else:
                     still_short.append(tr)
@@ -222,6 +228,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                         "fee_open":    fee_open,
                         "atr_at_entry": float(atr_a[t - 1]) if (has_atr_stop and np.isfinite(atr_a[t - 1])) else float("nan"),
                         "entry_time":  ts,
+                        "mae_price":   fill,
+                        "mfe_price":   fill,
                     })
 
             if cur_eq > 0 and cond_short_a[t - 1] and len(tranches_short) < max_tranches:
@@ -236,7 +244,24 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                         "fee_open":    fee_open,
                         "atr_at_entry": float(atr_a[t - 1]) if (has_atr_stop and np.isfinite(atr_a[t - 1])) else float("nan"),
                         "entry_time":  ts,
+                        "mae_price":   fill,
+                        "mfe_price":   fill,
                     })
+
+        # ---- Update MAE/MFE for all currently-open tranches using bar t's
+        # range. Longs: high = favorable, low = adverse. Shorts: inverted.
+        hi_t = high_a[t]
+        lo_t = low_a[t]
+        for tr in tranches_long:
+            if hi_t > tr["mfe_price"]:
+                tr["mfe_price"] = float(hi_t)
+            if lo_t < tr["mae_price"]:
+                tr["mae_price"] = float(lo_t)
+        for tr in tranches_short:
+            if lo_t < tr["mfe_price"]:
+                tr["mfe_price"] = float(lo_t)
+            if hi_t > tr["mae_price"]:
+                tr["mae_price"] = float(hi_t)
 
         # ---- MTM equity at bar `t` close ----
         equity_t = (starting_capital + realized_cum
@@ -260,6 +285,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             trades_list.append(_trade(
                 "long", tr["entry_price"], final_close, tr["entry_time"], final_ts,
                 pnl, tr["units"], tr["fee_open"] + fee_close,
+                starting_capital=starting_capital,
+                mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
             ))
         for tr in tranches_short:
             notional_close = abs(final_close * tr["units"])
@@ -269,6 +296,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             trades_list.append(_trade(
                 "short", tr["entry_price"], final_close, tr["entry_time"], final_ts,
                 pnl, tr["units"], tr["fee_open"] + fee_close,
+                starting_capital=starting_capital,
+                mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
             ))
         tranches_long = []
         tranches_short = []
@@ -286,7 +315,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             "drawdown_dollars": float(dd_dollars_arr[t]),
         })
 
-    stats = _compute_stats(trades_list, equity, dd_dollars_arr, time_a, starting_capital)
+    stats = _compute_stats(trades_list, equity, dd_dollars_arr, time_a,
+                            starting_capital, equity_arr)
     analytics = _compute_analytics(trades_list, equity_curve, sig_df, strategy, starting_capital)
 
     log.info("[hindsight %s/%s/%s] %d bars, %d trades, final $%s (%.2f%%)",
@@ -312,11 +342,28 @@ def run(strategy_id: str, symbol: str, timeframe: str,
 # Trade record
 # ---------------------------------------------------------------------------
 
-def _trade(side, entry_p, exit_p, entry_t, exit_t, pnl_dollars, units, fees):
-    pnl_pct_price = (exit_p - entry_p) / entry_p * 100.0
+def _trade(side, entry_p, exit_p, entry_t, exit_t, pnl_dollars, units, fees,
+           starting_capital=0.0, mae_price=None, mfe_price=None):
+    # `pnl_pct` here is the underlying asset's price-move %, not the account
+    # impact. With pyramiding/leverage these diverge sharply, so we also emit
+    # `pnl_pct_equity` (= % of starting capital) for distribution + best/worst.
+    pnl_pct_price = (exit_p - entry_p) / entry_p * 100.0 if entry_p else 0.0
     if side == "short":
         pnl_pct_price = -pnl_pct_price
+    pnl_pct_equity = (pnl_dollars / starting_capital * 100.0) if starting_capital else 0.0
     duration_min = max(0, int((exit_t - entry_t) / 60))
+
+    # Maximum Adverse/Favorable Excursion as % of entry price (signed).
+    mae_pct = 0.0
+    mfe_pct = 0.0
+    if entry_p and mae_price is not None and mfe_price is not None:
+        if side == "long":
+            mae_pct = (float(mae_price) - entry_p) / entry_p * 100.0  # ≤ 0
+            mfe_pct = (float(mfe_price) - entry_p) / entry_p * 100.0  # ≥ 0
+        else:
+            mae_pct = (entry_p - float(mae_price)) / entry_p * 100.0  # ≤ 0
+            mfe_pct = (entry_p - float(mfe_price)) / entry_p * 100.0  # ≥ 0
+
     return {
         "side": side,
         "entry_price": float(entry_p),
@@ -325,10 +372,13 @@ def _trade(side, entry_p, exit_p, entry_t, exit_t, pnl_dollars, units, fees):
         "exit_time": int(exit_t),
         "pnl_dollars": float(pnl_dollars),
         "pnl_pct": float(pnl_pct_price),
+        "pnl_pct_equity": float(pnl_pct_equity),
         "units": float(units),
         "fees": float(fees),
         "duration_min": duration_min,
-        "win": bool(pnl_dollars >= 0),
+        "mae_pct": float(mae_pct),
+        "mfe_pct": float(mfe_pct),
+        "win": bool(pnl_dollars > 0),
     }
 
 
@@ -336,7 +386,8 @@ def _trade(side, entry_p, exit_p, entry_t, exit_t, pnl_dollars, units, fees):
 # Stats (overview)
 # ---------------------------------------------------------------------------
 
-def _compute_stats(trades, final_equity, dd_dollars_arr, time_a, starting_capital) -> dict:
+def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
+                    starting_capital, equity_arr=None) -> dict:
     n_trades = len(trades)
     wins = sum(1 for t in trades if t["win"])
     losses = n_trades - wins
@@ -348,10 +399,22 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a, starting_capita
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (None if gross_profit > 0 else 0.0)
 
     pct_arr = np.array([t["pnl_pct"] for t in trades]) if trades else np.array([])
-    if len(pct_arr) >= 2 and pct_arr.std(ddof=1) > 0:
-        sharpe = float(pct_arr.mean() / pct_arr.std(ddof=1) * math.sqrt(len(pct_arr)))
-    else:
-        sharpe = 0.0
+
+    # Sharpe from per-bar MTM equity returns, annualized using the bar interval
+    # (inferred from time_a). This reflects intra-trade drawdowns — the per-trade
+    # Sharpe was misleading because pyramiding-stacked trades each report just
+    # the price-move %, hiding leveraged risk.
+    sharpe = 0.0
+    if equity_arr is not None and len(equity_arr) >= 3 and len(time_a) >= 3:
+        eq = np.asarray(equity_arr, dtype=float)
+        # simple per-bar returns of equity (clip denom to avoid /0 if equity hits 0)
+        denom = np.where(np.abs(eq[:-1]) < 1e-9, 1e-9, eq[:-1])
+        r = (eq[1:] - eq[:-1]) / denom
+        r = r[np.isfinite(r)]
+        if r.size >= 2 and r.std(ddof=1) > 0:
+            bars_per_year = quant_metrics.infer_bars_per_year(time_a)
+            if bars_per_year > 0:
+                sharpe = float(r.mean() / r.std(ddof=1) * math.sqrt(bars_per_year))
 
     max_dd_dollars = float(dd_dollars_arr.min()) if len(dd_dollars_arr) else 0.0
 
@@ -400,7 +463,8 @@ def _side_block(trades) -> dict:
 # Analytics block — quant-research-grade insights
 # ---------------------------------------------------------------------------
 
-def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital) -> dict:
+def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
+                       wf_trials=None) -> dict:
     """Heavy stuff for the Analytics page tabs."""
     sessions_cfg = (strategy.p.get("sessions") or {}) if hasattr(strategy, "p") else {}
 
@@ -483,10 +547,12 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital)
             cur_under += 1
             max_under = max(max_under, cur_under)
 
-    # ---- distribution: bucket trade pnl_pct into 20 bins
+    # ---- distribution: bucket per-trade equity impact (% of starting capital)
+    # into 20 bins. NOT the underlying price-move % — that ignores leverage
+    # / pyramiding and would mislead users.
     distribution = []
     if trades:
-        arr = np.array([t["pnl_pct"] for t in trades])
+        arr = np.array([t.get("pnl_pct_equity", 0.0) for t in trades])
         lo = float(arr.min())
         hi = float(arr.max())
         if hi <= lo:
@@ -530,26 +596,40 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital)
     trading_days = len({datetime.fromtimestamp(t["entry_time"], tz=timezone.utc).date()
                         for t in trades})
 
-    # ---- exposure (% of bars in a position)
-    pos_bars = 0
-    pos_state = 0
-    for t in trades:
-        # approximate via trade entry/exit times — count bars in [entry, exit]
-        pass
-    # cleaner: rebuild from entry/exit pairs against time index
+    # ---- exposure (% of bars where ANY position was open)
+    # Union of [entry_bar, exit_bar] intervals across all trades — overlapping
+    # pyramided tranches don't double-count.
+    exposure_pct = 0.0
     if trades and len(sig_df) > 0:
-        ts_to_idx = {int(time_a[i]): i for i, time_a in enumerate([sig_df["time"].to_numpy()] * 1)}
-        # ↑ avoid recomputing time_a; just use sig_df directly
         time_arr = sig_df["time"].to_numpy()
         idx_lookup = {int(time_arr[i]): i for i in range(len(time_arr))}
+        intervals = []
         for t in trades:
             ei = idx_lookup.get(int(t["entry_time"]))
             xi = idx_lookup.get(int(t["exit_time"]))
             if ei is not None and xi is not None and xi >= ei:
-                pos_bars += (xi - ei + 1)
+                intervals.append((ei, xi))
+        intervals.sort()
+        pos_bars = 0
+        cur_lo = cur_hi = -1
+        for lo_i, hi_i in intervals:
+            if lo_i > cur_hi:
+                if cur_hi >= cur_lo:
+                    pos_bars += cur_hi - cur_lo + 1
+                cur_lo, cur_hi = lo_i, hi_i
+            else:
+                cur_hi = max(cur_hi, hi_i)
+        if cur_hi >= cur_lo:
+            pos_bars += cur_hi - cur_lo + 1
         exposure_pct = pos_bars / len(time_arr) * 100.0
-    else:
-        exposure_pct = 0.0
+
+    # ---- advanced quant metrics (expectancy, sortino, calmar, t-test,
+    # ulcer, skew, kurtosis, MAE/MFE, robustness when WF data is provided).
+    bars_per_year = quant_metrics.infer_bars_per_year(sig_df["time"].to_numpy()) \
+        if len(sig_df) > 1 else 0.0
+    advanced = quant_metrics.compute(
+        trades, equity_curve, starting_capital, bars_per_year, wf_trials=wf_trials,
+    )
 
     return {
         "by_session": by_session,
@@ -565,6 +645,7 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital)
         "exposure_pct": float(exposure_pct),
         "commission_dollars": total_commission,
         "trading_days": int(trading_days),
+        "advanced": advanced,
     }
 
 
@@ -593,5 +674,6 @@ def _empty_result(strategy_id, symbol, timeframe, rc):
             "distribution_pnl_pct": [], "distribution_duration_min": [],
             "best_trade": None, "worst_trade": None, "exposure_pct": 0.0,
             "commission_dollars": 0.0, "trading_days": 0,
+            "advanced": quant_metrics.compute([], [], float(rc["starting_capital"]), 0.0),
         },
     }
