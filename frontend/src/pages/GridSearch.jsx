@@ -36,6 +36,11 @@ function fmtDuration(sec) {
   return `${(sec / 3600).toFixed(1)} h`;
 }
 
+function epochToDateStr(epoch) {
+  if (epoch == null || !Number.isFinite(epoch)) return "";
+  return new Date(epoch * 1000).toISOString().slice(0, 10);
+}
+
 export default function GridSearch() {
   // ---- setup form (persisted) -----------------------------------------
   const [symbols, setSymbols] = useState([]);
@@ -83,6 +88,25 @@ export default function GridSearch() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, tfsForSymbol]);
+
+  // Active dataset for the chosen symbol+timeframe.
+  const currentDataset = useMemo(
+    () => datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe) || null,
+    [datasets, symbol, timeframe],
+  );
+
+  // Snap the date range to the dataset's full extent whenever the dataset
+  // changes. User can still narrow afterwards.
+  useEffect(() => {
+    if (!currentDataset) return;
+    const start = epochToDateStr(currentDataset.first_time);
+    const end   = epochToDateStr(currentDataset.last_time);
+    if (!start || !end) return;
+    if (range.start !== start || range.end !== end) {
+      setRange({ start, end });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentDataset?.symbol, currentDataset?.timeframe, currentDataset?.first_time, currentDataset?.last_time]);
 
   // ---- load lists ------------------------------------------------------
   useEffect(() => {

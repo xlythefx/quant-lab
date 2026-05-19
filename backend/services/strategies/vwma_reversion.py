@@ -107,7 +107,7 @@ class VwmaReversionStrategy(Strategy):
         ParamSpec("sessions", ParamType.SESSIONS,
                   {
                     "tokyo":  {"enabled": True,  "start": "00:00", "end": "04:00"},
-                    "london": {"enabled": True,  "start": "05:00", "end": "09:00"},
+                    "london": {"enabled": True,  "start": "05:00", "end": "12:30"},
                     "ny_am":  {"enabled": True,  "start": "12:30", "end": "16:00"},
                     "ny_pm":  {"enabled": False, "start": "17:00", "end": "20:00"},
                   },

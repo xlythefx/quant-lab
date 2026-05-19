@@ -51,7 +51,12 @@ export default function StatsPanel({ strategies, statsById }) {
                   <td className="px-3 py-2 text-right">{st.win_rate != null ? `${fmtNum(st.win_rate * 100)}%` : "—"}</td>
                   <td className="px-3 py-2 text-right">{st.profit_factor != null ? fmtNum(st.profit_factor) : "∞"}</td>
                   <td className="px-3 py-2 text-right">{fmtNum(st.sharpe)}</td>
-                  <td className="px-3 py-2 text-right text-loss">{st.max_drawdown_pct != null ? `${fmtNum(st.max_drawdown_pct)}%` : "—"}</td>
+                  <td className="px-3 py-2 text-right text-loss" title="Top line: % of starting capital. Bottom line: % of running peak equity (TradingView convention).">
+                    {st.max_drawdown_pct != null ? `${fmtNum(st.max_drawdown_pct)}%` : "—"}
+                    {st.max_drawdown_pct_peak != null && (
+                      <div className="text-[10px] text-muted/80 font-mono">peak {fmtNum(st.max_drawdown_pct_peak)}%</div>
+                    )}
+                  </td>
                   <td className={`px-3 py-2 text-right border-l border-line/40 ${longPnl == null ? "text-muted" : longPnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(longPnl)}</td>
                   <td className="px-3 py-2 text-right">{fmtInt(st.long?.trades)}</td>
                   <td className="px-3 py-2 text-right">{st.long?.win_rate != null ? `${fmtNum(st.long.win_rate * 100)}%` : "—"}</td>
