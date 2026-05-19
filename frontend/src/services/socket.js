@@ -1,6 +1,6 @@
 import { io } from "socket.io-client";
 
-const url = "http://localhost:5000";
+const url = "http://localhost:5050";
 
 export const socket = io(url, {
   autoConnect: true,
@@ -148,6 +148,36 @@ export function subscribeWalkForward({ onProgress, onWindowDone, onComplete, onC
     wf_complete:    wrap(onComplete),
     wf_cancelled:   wrap(onCancelled),
     wf_error:       wrap(onError),
+  };
+  for (const [evt, fn] of Object.entries(h)) {
+    if (fn) socket.on(evt, fn);
+  }
+  return () => {
+    for (const [evt, fn] of Object.entries(h)) {
+      if (fn) socket.off(evt, fn);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Grid Search events
+// ---------------------------------------------------------------------------
+/**
+ * Subscribe to grid-search job events. Returns an unsubscribe fn.
+ *
+ * Handlers (all optional):
+ *   onProgress({job_id, combo_idx, total_combos, current_metric_value, current_best_metric, params})
+ *   onComplete({job_id, result})
+ *   onCancelled({job_id})
+ *   onError({job_id, message})
+ */
+export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onError } = {}) {
+  const wrap = (fn) => (fn ? (p) => fn(p) : null);
+  const h = {
+    gs_progress:  wrap(onProgress),
+    gs_complete:  wrap(onComplete),
+    gs_cancelled: wrap(onCancelled),
+    gs_error:     wrap(onError),
   };
   for (const [evt, fn] of Object.entries(h)) {
     if (fn) socket.on(evt, fn);

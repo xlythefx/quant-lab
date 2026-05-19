@@ -28,7 +28,7 @@ STARTING_CAPITAL = 100_000.0   # USD; same baseline for every strategy/backtest
 
 CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 HOST = "0.0.0.0"
-PORT = 5000
+PORT = 5050
 
 # Timeframe -> seconds (for backtest sleep math + cache freshness checks).
 TIMEFRAME_SECONDS = {

@@ -29,7 +29,7 @@ BANNER = r"""
  | |__| | |_| | (_| | | | | |_| |__| (_| | |_) |
   \___\_\\__,_|\__,_|_| |_|\__|_____\__,_|_.__/
 
-         backtest + live trading lab
+         Quantitative Analysis and Research Lab
 """
 
 

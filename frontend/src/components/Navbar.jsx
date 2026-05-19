@@ -30,6 +30,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
           <NavLink href="#dashboard"  active={view === "dashboard"}>Dashboard</NavLink>
           <NavLink href="#analytics"   active={view === "analytics"}>Analytics</NavLink>
           <NavLink href="#walkforward" active={view === "walkforward"}>Walk-Forward</NavLink>
+          <NavLink href="#gridsearch"  active={view === "gridsearch"}>Grid Search</NavLink>
           <NavLink href="#strategies"  active={view === "strategies"}>Strategies</NavLink>
           <NavLink href="#settings"   active={view === "settings"}>Risk</NavLink>
         </div>

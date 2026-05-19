@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const baseURL = "http://localhost:5000";
+const baseURL = "http://localhost:5050";
 
 export const api = axios.create({
   baseURL,
@@ -99,6 +99,35 @@ export async function getWalkForwardStatus() {
 export async function getWalkForwardLastResult() {
   const { data } = await api.get("/api/walkforward/last_result");
   return data.result;
+}
+
+// ---------------------------------------------------------------------------
+// Grid Search
+// ---------------------------------------------------------------------------
+
+export async function startGridSearch(spec) {
+  const { data } = await api.post("/api/grid_search/start", spec);
+  return data; // {job_id, ok}
+}
+
+export async function cancelGridSearch() {
+  const { data } = await api.post("/api/grid_search/cancel");
+  return data; // {ok}
+}
+
+export async function getGridSearchStatus() {
+  const { data } = await api.get("/api/grid_search/status");
+  return data;
+}
+
+export async function getGridSearchLastResult() {
+  const { data } = await api.get("/api/grid_search/last_result");
+  return data.result;
+}
+
+export async function estimateGridSearch(spec) {
+  const { data } = await api.post("/api/grid_search/estimate", spec);
+  return data; // {combos, projected_seconds, warn, refuse, error?}
 }
 
 // ---------------------------------------------------------------------------
