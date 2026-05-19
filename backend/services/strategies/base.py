@@ -99,6 +99,11 @@ class Strategy(ABC):
     META: StrategyMeta
     PARAM_SCHEMA: list[ParamSpec] = []
     OVERLAYS: list[OverlaySpec] = []
+    # Per-symbol preset overrides applied by the frontend's Reset Defaults
+    # button when that symbol is active. Sparse: only the params that differ
+    # from PARAM_SCHEMA defaults need to be listed. For SESSIONS/SIDES,
+    # nested values are merged per sub-key.
+    SYMBOL_DEFAULTS: dict[str, dict] = {}
 
     def __init__(self, params: Optional[dict] = None):
         self.p = self._merge_with_defaults(params or {})

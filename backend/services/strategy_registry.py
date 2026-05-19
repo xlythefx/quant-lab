@@ -50,7 +50,12 @@ def _scan() -> None:
 
 def list_strategies() -> list[dict]:
     _scan()
-    return [cls.META.to_dict() for cls in _REGISTRY.values()]
+    out = []
+    for cls in _REGISTRY.values():
+        d = cls.META.to_dict()
+        d["symbol_defaults"] = dict(getattr(cls, "SYMBOL_DEFAULTS", {}) or {})
+        out.append(d)
+    return out
 
 
 def get_strategy_class(strategy_id: str) -> Type[Strategy]:

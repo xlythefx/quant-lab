@@ -98,6 +98,8 @@ class VwmaReversionStrategy(Strategy):
         ParamSpec("rsi_length",   ParamType.INT,   25,  min=5,  max=50,  step=1, group="RSI"),
         ParamSpec("rsi_long_max", ParamType.INT,   35,  min=10, max=60,  step=1, group="RSI"),
         ParamSpec("rsi_short_min",ParamType.INT,   65,  min=40, max=90,  step=1, group="RSI"),
+        ParamSpec("atr_stop",     ParamType.BOOL,  True, group="Stop",
+                  description="Use ATR-based stop loss. Turn off to exit only on mean reversion."),
         ParamSpec("atr_length",   ParamType.INT,   10,  min=5,  max=50,  step=1, group="Stop"),
         ParamSpec("atr_mult",     ParamType.FLOAT, 6.0, min=1,  max=20,  step=0.5, group="Stop"),
         ParamSpec("trade_24_7", ParamType.BOOL, False, group="Sessions",
@@ -126,6 +128,15 @@ class VwmaReversionStrategy(Strategy):
         schema=PARAM_SCHEMA,
     )
 
+    SYMBOL_DEFAULTS = {
+        "LTCUSDT": {
+            "vwma_length": 23,
+            "rsi_length":  15,
+            "sides":       {"long": True, "short": False},
+            "sessions":    {"ny_pm": {"enabled": False}},
+        },
+    }
+
     OVERLAYS = [
         OverlaySpec("vwma",  "VWMA",  from_column="vwma",       color="#fbbf24", line_width=2),
         OverlaySpec("upper", "+z·σ",  from_column="upper_band", color="rgba(34,211,238,0.55)", line_style="dashed"),
@@ -142,7 +153,10 @@ class VwmaReversionStrategy(Strategy):
         vol = out["volume"].astype(float) if "volume" in out.columns else pd.Series(1.0, index=out.index)
 
         mean = _vwma(close, vol, p["vwma_length"])
-        std = close.rolling(p["vwma_length"]).std().replace(0, 1e-9)
+        # ddof=0 (population) — matches TradingView's ta.stdev() and is the
+        # right formula when the rolling window IS the distribution, not a
+        # sample of one.
+        std = close.rolling(p["vwma_length"]).std(ddof=0).replace(0, 1e-9)
         zscore = (close - mean) / std
         rsi = _rsi(close, p["rsi_length"])
         atr = _atr(high, low, close, p["atr_length"])
@@ -235,7 +249,10 @@ class VwmaReversionStrategy(Strategy):
         out["cond_short"]     = short_cond.fillna(False).astype(bool)
         out["bar_exit_long"]  = (close >= mean).fillna(False).astype(bool)
         out["bar_exit_short"] = (close <= mean).fillna(False).astype(bool)
-        out["atr"]            = atr
+        # Emit atr only when the stop is enabled. The engine gates ATR-stop
+        # logic on "atr" column presence, so omitting it cleanly disables it.
+        if bool(p.get("atr_stop", True)):
+            out["atr"] = atr
         # Overlay columns referenced by OVERLAYS:
         out["vwma"] = mean
         out["upper_band"] = mean + std * p["z_threshold"]
@@ -284,7 +301,10 @@ class VwmaReversionStrategy(Strategy):
         vol = df["volume"]
 
         mean = _vwma(close, vol, p["vwma_length"])
-        std = close.rolling(p["vwma_length"]).std().replace(0, 1e-9)
+        # ddof=0 (population) — matches TradingView's ta.stdev() and is the
+        # right formula when the rolling window IS the distribution, not a
+        # sample of one.
+        std = close.rolling(p["vwma_length"]).std(ddof=0).replace(0, 1e-9)
         zscore = (close - mean) / std
         rsi = _rsi(close, p["rsi_length"])
         atr = _atr(high, low, close, p["atr_length"])
@@ -332,8 +352,9 @@ class VwmaReversionStrategy(Strategy):
                 return Signal(side="short", kind="entry", price=c, time=ts, reason="z_short")
             return None
 
+        atr_on = bool(p.get("atr_stop", True))
         if pos == 1:
-            stop_hit = (np.isfinite(atr_at_entry) and np.isfinite(entry_p)
+            stop_hit = (atr_on and np.isfinite(atr_at_entry) and np.isfinite(entry_p)
                         and c <= entry_p - p["atr_mult"] * atr_at_entry)
             if c >= m or stop_hit:
                 state["pos"] = 0
@@ -344,7 +365,7 @@ class VwmaReversionStrategy(Strategy):
             return None
 
         # pos == -1
-        stop_hit = (np.isfinite(atr_at_entry) and np.isfinite(entry_p)
+        stop_hit = (atr_on and np.isfinite(atr_at_entry) and np.isfinite(entry_p)
                     and c >= entry_p + p["atr_mult"] * atr_at_entry)
         if c <= m or stop_hit:
             state["pos"] = 0

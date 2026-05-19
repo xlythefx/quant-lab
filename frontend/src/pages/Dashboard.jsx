@@ -682,6 +682,30 @@ export default function Dashboard() {
             onResetDefaults={() => {
               const defaults = {};
               for (const spec of meta.schema) defaults[spec.name] = spec.default;
+              // Per-symbol preset overrides (sparse). For nested dicts
+              // (sessions / sides) merge sub-keys rather than replacing.
+              const preset = meta.symbol_defaults?.[symbol];
+              if (preset) {
+                for (const [k, v] of Object.entries(preset)) {
+                  const base = defaults[k];
+                  if (v && typeof v === "object" && !Array.isArray(v)
+                      && base && typeof base === "object" && !Array.isArray(base)) {
+                    const merged = { ...base };
+                    for (const [k2, v2] of Object.entries(v)) {
+                      const baseSub = base[k2];
+                      if (v2 && typeof v2 === "object" && !Array.isArray(v2)
+                          && baseSub && typeof baseSub === "object" && !Array.isArray(baseSub)) {
+                        merged[k2] = { ...baseSub, ...v2 };
+                      } else {
+                        merged[k2] = v2;
+                      }
+                    }
+                    defaults[k] = merged;
+                  } else {
+                    defaults[k] = v;
+                  }
+                }
+              }
               onApplyParams(s.id, defaults);
             }}
             onChange={() => {}}
