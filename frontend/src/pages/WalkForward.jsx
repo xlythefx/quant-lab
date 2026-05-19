@@ -358,6 +358,7 @@ export default function WalkForward() {
                   onChange={(e) => setNWorkers(parseInt(e.target.value, 10) || 1)}
                   className="w-44 accent-accent-blue"
                   disabled={running}
+                  title="Parallel Optuna trials per window. 1 = sequential and fully reproducible (same seed → same result). >1 is faster but non-deterministic: TPE updates its surrogate model in trial-completion order, which varies across runs."
                 />
                 <span className="font-mono text-sm tabular-nums w-12 text-right">
                   {nWorkers} / {maxWorkers}
@@ -365,7 +366,8 @@ export default function WalkForward() {
               </div>
             </Field>
             <span className="text-[11px] text-muted/70">
-              Parallel Optuna trials per window. 1 = sequential (stable). Raise to use more cores.
+              Parallel Optuna trials per window. 1 = sequential (stable, reproducible).
+              {nWorkers > 1 && <> <span className="text-amber-400">·  results non-deterministic above 1.</span></>}
             </span>
           </div>
 

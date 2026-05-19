@@ -286,7 +286,17 @@ class WalkForwardJob:
             window_start_cap = float(oos_result["stats"]["starting_capital"])
             multiplier_carry = carry_equity / window_start_cap if window_start_cap > 0 else 1.0
 
-            for pt in oos_result["equity"]:
+            # Skip the first equity point of every window after the first: it's
+            # the pre-trade `starting_capital` of the sub-run, which after rebase
+            # equals the *previous* window's last point exactly. Keeping it
+            # produces a duplicate bar at the boundary and injects a 0% return
+            # into the per-bar return series — that depresses the stitched
+            # equity-return std and inflates the aggregate Sharpe by ~1-2%.
+            skip_first_pt = w_idx > 0
+
+            for i, pt in enumerate(oos_result["equity"]):
+                if skip_first_pt and i == 0:
+                    continue
                 # Rebase this point onto the running equity (preserve % shape).
                 local_mult = pt["equity"] / window_start_cap if window_start_cap > 0 else 1.0
                 eq = carry_equity * local_mult

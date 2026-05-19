@@ -105,16 +105,28 @@ def _trade_bootstrap(base: dict, starting_capital: float, n_sims: int,
     if not trades:
         return _empty(starting_capital, x_label="trade #")
 
-    # Use dollar PnL — preserves the original position sizing of the base run.
-    # (Resampling % returns would re-compound, which is a different question.)
+    # Convert each trade's $-PnL into a fractional return on equity *at the
+    # time of that trade in the original run* — pnl_i / equity_at_entry_i.
+    # This matches the live engine's "% of equity" sizing model: under a
+    # different (bootstrapped) order, applying these fractional returns via
+    # cumprod correctly compounds gains and losses. The original cumsum
+    # approach silently assumed fixed-cash sizing and dampened tail risk.
     pnl = np.array([float(t["pnl_dollars"]) for t in trades], dtype=float)
     n = len(pnl)
+    # equity_at_entry_i = starting_capital + sum(pnl[:i]) — realized only.
+    # (Ignores intra-trade unrealized for overlapping positions; close enough
+    # for the bootstrap, which is an order-luck estimator anyway.)
+    equity_at_entry = starting_capital + np.concatenate([[0.0], np.cumsum(pnl[:-1])])
+    equity_at_entry = np.where(equity_at_entry > 1e-9, equity_at_entry, 1e-9)
+    pct_returns = pnl / equity_at_entry  # length n
 
     # Each row of `idx` is one simulated trade order (n trades drawn with
-    # replacement). Cumulative sum gives the equity path.
+    # replacement). Compound the sampled fractional returns; clip 1+r at 0
+    # so a single -100% trade is permanent ruin (and stays at 0).
     idx = rng.integers(0, n, size=(n_sims, n))
-    drawn = pnl[idx]                                            # (n_sims, n)
-    equity = starting_capital + np.cumsum(drawn, axis=1)        # (n_sims, n)
+    sampled = pct_returns[idx]                                      # (n_sims, n)
+    growth = np.cumprod(np.maximum(1.0 + sampled, 0.0), axis=1)     # (n_sims, n)
+    equity = starting_capital * growth                              # (n_sims, n)
     # Prepend starting capital so equity[:, 0] is the pre-trade level.
     equity = np.concatenate([np.full((n_sims, 1), starting_capital), equity], axis=1)
 
@@ -295,7 +307,8 @@ def _synthetic_paths(strategy_id: str, symbol: str, timeframe: str,
     summary["distribution"]["max_drawdown_pct"] = _dist(np.asarray(sim_max_dd))
     summary["distribution"]["max_drawdown_duration_bars"] = _dist(np.asarray(sim_dd_dur, dtype=float))
     summary["prob_profit"] = float(np.mean(np.asarray(sim_finals) > starting_capital))
-    summary["prob_ruin"]   = float(np.mean(np.asarray(sim_finals) <= 0.0))
+    # Intra-path ruin check: any bar where simulated equity hit zero or below.
+    summary["prob_ruin"]   = float(np.mean([1.0 if c.min() <= 0.0 else 0.0 for c in sim_equity_curves]))
     return summary
 
 
@@ -303,16 +316,11 @@ def _run_engine_on_df(strategy_id: str, symbol: str, timeframe: str,
                       params: dict, synth_df: pd.DataFrame) -> dict:
     """Run backtest_engine.run against an injected dataframe.
 
-    backtest_engine.run loads data via market_data.load_parquet — for the
-    synthetic case we need to feed our own bars. Monkey-patching at module
-    scope would be racy, so we patch the bound reference inside a try/finally.
+    Uses backtest_engine.run's `df` kwarg — thread-safe alternative to
+    monkey-patching the module-level loader (which races with concurrent
+    backtests fired by other jobs).
     """
-    orig_loader = backtest_engine.market_data.load_parquet
-    backtest_engine.market_data.load_parquet = lambda sym, tf: synth_df  # type: ignore[assignment]
-    try:
-        return backtest_engine.run(strategy_id, symbol, timeframe, params)
-    finally:
-        backtest_engine.market_data.load_parquet = orig_loader  # type: ignore[assignment]
+    return backtest_engine.run(strategy_id, symbol, timeframe, params, df=synth_df)
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +389,10 @@ def _summarize(equity: np.ndarray, x_axis: np.ndarray,
             "sharpe":                     _dist(sharpe_per_path),
         },
         "prob_profit": float(np.mean(final > starting_capital)),
-        "prob_ruin":   float(np.mean(final <= 0.0)),
+        # Ruin = equity hit zero (or below) at ANY point on the path, not just
+        # at the final step. Otherwise a path that crashed and then "recovered"
+        # via lucky resampled trades would be miscounted as solvent.
+        "prob_ruin":   float(np.mean((equity <= 0.0).any(axis=1))),
     }
 
 

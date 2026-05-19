@@ -93,7 +93,11 @@ def _classify_session(entry_ts: int, sessions_cfg: dict) -> str:
 def run(strategy_id: str, symbol: str, timeframe: str,
         params: Optional[dict] = None,
         start_time: Optional[int] = None,
-        end_time: Optional[int] = None) -> dict:
+        end_time: Optional[int] = None,
+        df: Optional[pd.DataFrame] = None) -> dict:
+    """Run a backtest. If `df` is provided, use it directly (and copy it) instead
+    of loading from parquet — this lets Monte Carlo inject synthetic bars
+    without monkey-patching the loader at module scope (race-prone)."""
 
     rc = risk_config.get()
     starting_capital = float(rc["starting_capital"])
@@ -106,7 +110,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     cls = get_strategy_class(strategy_id)
     strategy = cls(params or {})
 
-    df = market_data.load_parquet(symbol, timeframe)
+    df = df.copy() if df is not None else market_data.load_parquet(symbol, timeframe)
     if start_time is not None:
         df = df[df["time"] >= int(start_time)]
     if end_time is not None:
@@ -418,6 +422,19 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
 
     max_dd_dollars = float(dd_dollars_arr.min()) if len(dd_dollars_arr) else 0.0
 
+    # Peak-relative max DD %: denominator is the running peak equity at the
+    # moment of the worst drawdown (TradingView convention), not starting cap.
+    # peak_at_t = equity_t - dd_dollars_t (since dd ≤ 0 and dd = eq - peak).
+    max_dd_pct_peak = 0.0
+    if equity_arr is not None and len(equity_arr) and len(dd_dollars_arr):
+        eq_a = np.asarray(equity_arr, dtype=float)
+        dd_a = np.asarray(dd_dollars_arr, dtype=float)
+        peak_a = eq_a - dd_a  # always >= eq_a
+        # Avoid /0 when an early bar has 0 equity; clip to starting_capital.
+        denom = np.where(peak_a > 1e-9, peak_a, float(starting_capital))
+        dd_pct_a = dd_a / denom * 100.0  # ≤ 0
+        max_dd_pct_peak = float(dd_pct_a.min())
+
     longs  = [t for t in trades if t["side"] == "long"]
     shorts = [t for t in trades if t["side"] == "short"]
 
@@ -435,6 +452,7 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         "max_drawdown_pct": float(max_dd_dollars) / float(starting_capital) * 100.0,
+        "max_drawdown_pct_peak": float(max_dd_pct_peak),
         "max_drawdown_dollars": float(max_dd_dollars),
         "avg_pnl_dollars": float(pnl_arr.mean()) if trades else 0.0,
         "avg_pnl_pct": float(pct_arr.mean()) if trades else 0.0,
@@ -661,7 +679,7 @@ def _empty_result(strategy_id, symbol, timeframe, rc):
             "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
             "profit_factor": 0.0, "sharpe": 0.0,
             "gross_profit": 0.0, "gross_loss": 0.0,
-            "max_drawdown_pct": 0.0, "max_drawdown_dollars": 0.0,
+            "max_drawdown_pct": 0.0, "max_drawdown_pct_peak": 0.0, "max_drawdown_dollars": 0.0,
             "avg_pnl_dollars": 0.0, "avg_pnl_pct": 0.0,
             "long":  {"trades": 0, "wins": 0, "losses": 0, "pnl_dollars": 0.0, "win_rate": 0.0, "avg_pnl_dollars": 0.0},
             "short": {"trades": 0, "wins": 0, "losses": 0, "pnl_dollars": 0.0, "win_rate": 0.0, "avg_pnl_dollars": 0.0},
