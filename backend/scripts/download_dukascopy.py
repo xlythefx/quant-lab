@@ -40,7 +40,7 @@ def main():
                     help="timeframe for aggregation")
     ap.add_argument("--from", dest="start", type=_parse_date, required=True, help="YYYY-MM-DD (UTC)")
     ap.add_argument("--to",   dest="end",   type=_parse_date, required=True, help="YYYY-MM-DD (UTC, exclusive)")
-    ap.add_argument("--workers", type=int, default=6, help="concurrent downloads (default 6)")
+    ap.add_argument("--workers", type=int, default=16, help="concurrent downloads (default 16; HTTP/2 multiplexes them over a small connection pool, with 503/429 retry)")
     args = ap.parse_args()
 
     out_dir = os.path.join(DATA_DIR, "dukascopy")
