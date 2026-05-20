@@ -3,11 +3,24 @@ import Navbar from "../components/Navbar.jsx";
 import { useLastResult } from "../services/lastResultStore.js";
 import { fmtUsd, fmtNum, fmtPct, fmtInt } from "../services/format.js";
 import { runMonteCarlo, aiAnalyzeMonteCarlo } from "../services/api.js";
+import { TabBar, KpiCard } from "../components/analytics/primitives.jsx";
 
 function getKey() {
-  // Hash like #montecarlo?key=vwma_reversion|BTCUSDT|15m
   const m = window.location.hash.match(/key=([^&]+)/);
   return m ? decodeURIComponent(m[1]) : null;
+}
+
+function getTabFromHash() {
+  const m = window.location.hash.match(/tab=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : "setup";
+}
+
+function setTabInHash(t) {
+  // Preserve any existing ?key=… so Open-in-Analytics-style deep links still work.
+  const hash = window.location.hash;
+  const stripped = hash.replace(/[?&]tab=[^&]*/g, "");
+  const sep = stripped.includes("?") ? "&" : "?";
+  window.location.hash = `${stripped || "#montecarlo"}${sep}tab=${encodeURIComponent(t)}`;
 }
 
 const MC_METHODS = [
@@ -19,15 +32,75 @@ const MC_METHODS = [
     blurb: "Bootstraps OHLC bar structure to build synthetic price series, re-runs the strategy on each. Tests robustness — slowest." },
 ];
 
+const TABS = [
+  { id: "setup",        label: "Setup" },
+  { id: "distribution", label: "Distribution" },
+  { id: "paths",        label: "Paths" },
+  { id: "drawdown",     label: "Drawdown" },
+  { id: "sharpe",       label: "Sharpe" },
+  { id: "ai",           label: "AI Analysis" },
+];
+
 export default function MonteCarlo() {
   const [key, setKey] = useState(getKey());
+  const [tab, setTab] = useState(getTabFromHash());
+
   useEffect(() => {
-    const onHash = () => setKey(getKey());
+    const onHash = () => {
+      setKey(getKey());
+      setTab(getTabFromHash());
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
   const result = useLastResult(key);
+
+  // Run state lives at the top so it survives tab switches.
+  const [method, setMethod] = useState("trade_bootstrap");
+  const [nSims, setNSims] = useState(1000);
+  const [blockSize, setBlockSize] = useState("");
+  const [seed, setSeed] = useState(42);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [mc, setMc] = useState(null);
+
+  const onTab = (id) => { setTabInHash(id); setTab(id); };
+
+  // When a run completes, auto-flip from Setup to Distribution.
+  const lastMcRef = useRef(null);
+  useEffect(() => {
+    if (mc && mc !== lastMcRef.current && tab === "setup") onTab("distribution");
+    lastMcRef.current = mc;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mc]);
+
+  async function onRun() {
+    if (!result) return;
+    setLoading(true); setError(null);
+    try {
+      const data = await runMonteCarlo({
+        strategy_id: result.strategy_id,
+        symbol: result.symbol,
+        timeframe: result.timeframe,
+        params: result.params,
+        method,
+        n_sims: Number(nSims) || 1000,
+        block_size: blockSize === "" ? undefined : Number(blockSize),
+        seed: Number(seed) || 42,
+      });
+      setMc(data);
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || "MC run failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const tabs = useMemo(
+    () => TABS.map((t) => ({ ...t, disabled: t.id !== "setup" && !mc })),
+    [mc],
+  );
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -56,50 +129,63 @@ export default function MonteCarlo() {
           </div>
         )}
 
-        {result && <MonteCarloTab result={result} />}
+        {result && (
+          <>
+            <TabBar tabs={tabs} active={tab} onSelect={onTab} />
+
+            {tab === "setup" && (
+              <SetupTab
+                method={method} setMethod={setMethod}
+                nSims={nSims} setNSims={setNSims}
+                blockSize={blockSize} setBlockSize={setBlockSize}
+                seed={seed} setSeed={setSeed}
+                onRun={onRun} loading={loading} error={error}
+                tradesCount={result?.trades?.length || 0}
+                mc={mc}
+              />
+            )}
+            {tab === "distribution" && mc && <DistributionTab mc={mc} />}
+            {tab === "paths"        && mc && <PathsTab mc={mc} />}
+            {tab === "drawdown"     && mc && <DrawdownTab mc={mc} />}
+            {tab === "sharpe"       && mc && <SharpeTab mc={mc} />}
+            {tab === "ai"           && mc && <AITab mc={mc} />}
+
+            {!mc && tab !== "setup" && (
+              <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
+                <div className="text-base text-text mb-1">No Monte Carlo run yet</div>
+                <div className="text-xs">Run a simulation on the Setup tab first.</div>
+                <button
+                  onClick={() => onTab("setup")}
+                  className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm"
+                >
+                  Go to Setup →
+                </button>
+              </div>
+            )}
+          </>
+        )}
       </main>
     </div>
   );
 }
 
-function MonteCarloTab({ result }) {
-  const [method, setMethod] = useState("trade_bootstrap");
-  const [nSims, setNSims] = useState(1000);
-  const [blockSize, setBlockSize] = useState("");   // empty = auto
-  const [seed, setSeed] = useState(42);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [mc, setMc] = useState(null);
+// ---------------------------------------------------------------------------
+// SETUP
+// ---------------------------------------------------------------------------
 
-  const tradesCount = result?.trades?.length || 0;
-
-  async function onRun() {
-    setLoading(true); setError(null);
-    try {
-      const data = await runMonteCarlo({
-        strategy_id: result.strategy_id,
-        symbol: result.symbol,
-        timeframe: result.timeframe,
-        params: result.params,
-        method,
-        n_sims: Number(nSims) || 1000,
-        block_size: blockSize === "" ? undefined : Number(blockSize),
-        seed: Number(seed) || 42,
-      });
-      setMc(data);
-    } catch (e) {
-      setError(e?.response?.data?.error || e.message || "MC run failed");
-    } finally {
-      setLoading(false);
-    }
-  }
-
+function SetupTab({
+  method, setMethod,
+  nSims, setNSims,
+  blockSize, setBlockSize,
+  seed, setSeed,
+  onRun, loading, error,
+  tradesCount, mc,
+}) {
   const effNSims = method === "synthetic" ? Math.min(Number(nSims) || 1000, 200) : (Number(nSims) || 1000);
   const methodDef = MC_METHODS.find((m) => m.id === method);
 
   return (
     <div className="space-y-4">
-      {/* ---------- Controls ---------- */}
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
         <div className="flex flex-wrap items-end gap-4">
           <div className="flex-1 min-w-[260px]">
@@ -123,7 +209,7 @@ function MonteCarloTab({ result }) {
 
           <button onClick={onRun} disabled={loading}
             className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50">
-            {loading ? "Running…" : "Run"}
+            {loading ? "Running…" : (mc ? "Re-run" : "Run")}
           </button>
         </div>
         <div className="text-xs text-muted">{methodDef.blurb}</div>
@@ -146,11 +232,208 @@ function MonteCarloTab({ result }) {
           Click <span className="text-text">Run</span> to simulate {Number(nSims) || 1000}× variations of this strategy.
         </div>
       )}
-
-      {mc && <MonteCarloResults mc={mc} />}
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// DISTRIBUTION — Verdict + Interpretation + KPI strip + 3 histograms
+// ---------------------------------------------------------------------------
+
+function DistributionTab({ mc }) {
+  const sc = mc.starting_capital;
+  const dist = mc.distribution || {};
+  const fe = dist.final_equity || {};
+  const ret = dist.total_return_pct || {};
+  const dd = dist.max_drawdown_pct || {};
+  const sharpe = dist.sharpe || {};
+  const orig = mc.original || {};
+
+  return (
+    <div className="space-y-4">
+      <MCVerdict mc={mc} />
+      <MCInterpretation mc={mc} />
+
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+        <KpiCard title="Prob. of profit" value={`${fmtNum(mc.prob_profit * 100)}%`}
+                 sub={`${fmtInt(mc.n_sims)} sims`} positive={mc.prob_profit >= 0.5} />
+        <KpiCard title="Prob. of ruin" value={`${fmtNum(mc.prob_ruin * 100)}%`}
+                 sub="equity ≤ 0" positive={mc.prob_ruin <= 0.01} />
+        <KpiCard title="Median final" value={fmtUsd(fe.p50)}
+                 sub={`p05 ${fmtUsd(fe.p05)} · p95 ${fmtUsd(fe.p95)}`} />
+        <KpiCard title="Median return" value={`${fmtNum(ret.p50)}%`}
+                 sub={`p05 ${fmtNum(ret.p05)}% · p95 ${fmtNum(ret.p95)}%`}
+                 positive={(ret.p50 || 0) >= 0} />
+        <KpiCard title="Median max DD" value={`${fmtNum(dd.p50)}%`}
+                 sub={`p05 ${fmtNum(dd.p05)}% · p95 ${fmtNum(dd.p95)}%`} positive={false} />
+        <KpiCard title="Median Sharpe" value={fmtNum(sharpe.p50)}
+                 sub={`p05 ${fmtNum(sharpe.p05)} · p95 ${fmtNum(sharpe.p95)}`}
+                 positive={(sharpe.p50 || 0) >= 1} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <HistPanel title="Final equity ($)" dist={fe} unit="usd" original={orig.final_equity} />
+        <HistPanel title="Total return (%)" dist={ret} unit="pct" original={orig.total_return_pct} />
+        <HistPanel title="Max drawdown (%)" dist={dd} unit="pct" original={orig.max_drawdown_pct} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PATHS — fan chart + path rankings
+// ---------------------------------------------------------------------------
+
+function PathsTab({ mc }) {
+  return (
+    <div className="space-y-4">
+      <FanChart mc={mc} startingCapital={mc.starting_capital} />
+      <PathRankings mc={mc} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DRAWDOWN — DD histogram (Phase C.7 adds tail probabilities)
+// ---------------------------------------------------------------------------
+
+function DrawdownTab({ mc }) {
+  const dist = mc.distribution || {};
+  const dd = dist.max_drawdown_pct || {};
+  const orig = mc.original || {};
+  const hist = dd.histogram || [];
+  const total = hist.reduce((s, b) => s + (b.count || 0), 0);
+
+  // Tail probability P[max DD ≤ threshold] — DD is negative, so "≤ -10" = worse than 10% drawdown.
+  const tailProb = (threshold) => {
+    if (!total) return null;
+    let n = 0;
+    for (const b of hist) {
+      // bin midpoint
+      const mid = (b.bin_lo + b.bin_hi) / 2;
+      if (mid <= threshold) n += b.count || 0;
+    }
+    return n / total;
+  };
+  const thresholds = [-10, -20, -30, -50];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {thresholds.map((t) => {
+          const p = tailProb(t);
+          return (
+            <KpiCard
+              key={t}
+              title={`P[DD ≥ ${Math.abs(t)}%]`}
+              value={p == null ? "—" : `${fmtNum(p * 100)}%`}
+              sub={`prob. max DD reaches ${t}% or worse`}
+              positive={p == null ? null : p < 0.05}
+            />
+          );
+        })}
+      </div>
+
+      <HistPanel title="Max drawdown across simulations (%)" dist={dd} unit="pct" original={orig.max_drawdown_pct} />
+
+      <div className="rounded-xl border border-line bg-bg-panel/40 p-4 text-xs text-muted">
+        Tail probabilities are computed from the histogram bin counts. P[DD ≥ X%] = fraction of simulated paths
+        whose worst drawdown reached X% or worse. Useful for stop-out sizing — if P[DD ≥ 30%] is 8%, expect
+        a 30%+ drawdown roughly 1 in 12 hypothetical scenarios.
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SHARPE — Sharpe histogram (Phase C.7 adds t-score vs null)
+// ---------------------------------------------------------------------------
+
+function SharpeTab({ mc }) {
+  const dist = mc.distribution || {};
+  const sharpe = dist.sharpe || {};
+  const orig = mc.original || {};
+  const nSims = mc.n_sims || 0;
+
+  // t-statistic for "is the mean simulated Sharpe significantly > 0?"
+  // Approximate with mean / SE. SE = std / sqrt(n).
+  const mean = sharpe.mean;
+  const std = sharpe.std;
+  const tScore = (mean != null && std != null && std > 0 && nSims > 0)
+    ? (mean / (std / Math.sqrt(nSims)))
+    : null;
+  // For large n the t-distribution → normal; 1.96 ≈ 95% one-sided 97.5%.
+  // Reporting one-sided: H1 = Sharpe > 0.
+  const oneSidedP = tScore == null ? null : approxOneSidedP(tScore);
+
+  // Fraction of simulated Sharpes that beat zero.
+  const hist = sharpe.histogram || [];
+  const total = hist.reduce((s, b) => s + (b.count || 0), 0);
+  let aboveZero = 0;
+  for (const b of hist) {
+    const mid = (b.bin_lo + b.bin_hi) / 2;
+    if (mid > 0) aboveZero += b.count || 0;
+  }
+  const fracAboveZero = total > 0 ? aboveZero / total : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard title="Mean Sharpe" value={fmtNum(mean)}
+                 sub={`σ ${fmtNum(std)} · n ${fmtInt(nSims)}`}
+                 positive={mean != null ? mean >= 1 : null} />
+        <KpiCard title="t-score vs 0" value={tScore == null ? "—" : fmtNum(tScore)}
+                 sub="mean / (std / √n)"
+                 positive={tScore != null ? tScore >= 2 : null} />
+        <KpiCard title="One-sided p" value={oneSidedP == null ? "—" : oneSidedP < 1e-4 ? "<0.0001" : fmtNum(oneSidedP)}
+                 sub="P(mean Sharpe ≤ 0)"
+                 positive={oneSidedP != null ? oneSidedP < 0.05 : null} />
+        <KpiCard title="Paths with Sharpe>0" value={fracAboveZero == null ? "—" : `${fmtNum(fracAboveZero * 100)}%`}
+                 sub="fraction above zero"
+                 positive={fracAboveZero != null ? fracAboveZero >= 0.75 : null} />
+      </div>
+
+      <HistPanel title="Sharpe across simulations" dist={sharpe} unit="num" original={orig.sharpe} />
+
+      <div className="rounded-xl border border-line bg-bg-panel/40 p-4 text-xs text-muted">
+        The t-score treats the simulated Sharpes as a sample drawn from some underlying distribution and
+        tests whether the mean is statistically distinguishable from zero. A t-score above ~2 (one-sided p &lt; 0.025)
+        is the conventional significance bar. Caveat: simulations under the SAME strategy are not independent
+        — interpret with care, not as a hard rejection criterion.
+      </div>
+    </div>
+  );
+}
+
+// Cheap normal-approx survival function — good enough for big simulated samples.
+function approxOneSidedP(z) {
+  if (z >= 6) return 1e-9;
+  if (z <= -6) return 1 - 1e-9;
+  // Abramowitz & Stegun 26.2.17 approximation (4-decimal accuracy).
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const phi = (1 / Math.sqrt(2 * Math.PI)) * Math.exp(-(z * z) / 2);
+  const poly = t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const cdfPositive = 1 - phi * poly;
+  return z >= 0 ? 1 - cdfPositive : cdfPositive;
+}
+
+// ---------------------------------------------------------------------------
+// AI — Claude analysis
+// ---------------------------------------------------------------------------
+
+function AITab({ mc }) {
+  return (
+    <AIInsightsPanel
+      label="AI Analysis"
+      contextHint="Claude interprets robustness, tail risk, and what this MC method can (and can't) tell you."
+      fetcher={() => aiAnalyzeMonteCarlo(mc)}
+    />
+  );
+}
+
+// ===========================================================================
+// MC-specific widgets (kept inline since they're not used outside this page)
+// ===========================================================================
 
 function AIInsightsPanel({ fetcher, label, contextHint }) {
   const [loading, setLoading] = useState(false);
@@ -213,23 +496,6 @@ function NumField({ label, value, onChange, step = 1, min, placeholder }) {
   );
 }
 
-function KpiCard({ title, value, sub, positive }) {
-  const cls = positive == null
-    ? "text-text"
-    : positive ? "text-profit" : "text-loss";
-  return (
-    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
-      <div className="text-[10px] uppercase tracking-wider text-muted">{title}</div>
-      <div className={`text-2xl font-mono mt-1 ${cls}`}>{value}</div>
-      {sub && <div className="text-xs text-muted mt-0.5 font-mono">{sub}</div>}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// MC Verdict — one-line traffic-light judgement based on robustness signals.
-// ---------------------------------------------------------------------------
-
 function MCVerdict({ mc }) {
   const dist = mc.distribution || {};
   const ret = dist.total_return_pct || {};
@@ -241,10 +507,9 @@ function MCVerdict({ mc }) {
   const p05Ret     = ret.p05 ?? 0;
   const p95Ret     = ret.p95 ?? 0;
   const p50Ret     = ret.p50 ?? 0;
-  const p05DD      = dd.p05 ?? 0;    // worst-case (most negative)
+  const p05DD      = dd.p05 ?? 0;
   const origRet    = orig.total_return_pct ?? 0;
 
-  // Where does the original sit inside the distribution?
   let origPercentile = null;
   if (ret.p95 != null && ret.p05 != null && ret.p95 !== ret.p05) {
     const span = (origRet - ret.p05) / (ret.p95 - ret.p05);
@@ -299,10 +564,6 @@ function MCVerdict({ mc }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Plain-English explainer for the MC distribution.
-// ---------------------------------------------------------------------------
-
 function MCInterpretation({ mc }) {
   const dist = mc.distribution || {};
   const ret = dist.total_return_pct || {};
@@ -344,10 +605,6 @@ function MCInterpretation({ mc }) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Path Rankings — best / median / worst single paths from the sampled set.
-// ---------------------------------------------------------------------------
 
 function PathRankings({ mc }) {
   const paths = mc.paths || [];
@@ -407,61 +664,6 @@ function PathRankings({ mc }) {
   );
 }
 
-function MonteCarloResults({ mc }) {
-  const sc = mc.starting_capital;
-  const dist = mc.distribution || {};
-  const fe = dist.final_equity || {};
-  const ret = dist.total_return_pct || {};
-  const dd = dist.max_drawdown_pct || {};
-  const sharpe = dist.sharpe || {};
-  const orig = mc.original || {};
-
-  return (
-    <div className="space-y-4">
-      <MCVerdict mc={mc} />
-
-      <MCInterpretation mc={mc} />
-
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-        <KpiCard title="Prob. of profit" value={`${fmtNum(mc.prob_profit * 100)}%`}
-                 sub={`${fmtInt(mc.n_sims)} sims`} positive={mc.prob_profit >= 0.5} />
-        <KpiCard title="Prob. of ruin" value={`${fmtNum(mc.prob_ruin * 100)}%`}
-                 sub="equity ≤ 0" positive={mc.prob_ruin <= 0.01} />
-        <KpiCard title="Median final" value={fmtUsd(fe.p50)}
-                 sub={`p05 ${fmtUsd(fe.p05)} · p95 ${fmtUsd(fe.p95)}`} />
-        <KpiCard title="Median return" value={`${fmtNum(ret.p50)}%`}
-                 sub={`p05 ${fmtNum(ret.p05)}% · p95 ${fmtNum(ret.p95)}%`}
-                 positive={(ret.p50 || 0) >= 0} />
-        <KpiCard title="Median max DD" value={`${fmtNum(dd.p50)}%`}
-                 sub={`p05 ${fmtNum(dd.p05)}% · p95 ${fmtNum(dd.p95)}%`} positive={false} />
-        <KpiCard title="Median Sharpe" value={fmtNum(sharpe.p50)}
-                 sub={`p05 ${fmtNum(sharpe.p05)} · p95 ${fmtNum(sharpe.p95)}`}
-                 positive={(sharpe.p50 || 0) >= 1} />
-      </div>
-
-      <PathRankings mc={mc} />
-
-      {/* Fan chart */}
-      <FanChart mc={mc} startingCapital={sc} />
-
-      {/* Distributions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <HistPanel title="Final equity ($)" dist={fe} unit="usd" original={orig.final_equity} />
-        <HistPanel title="Total return (%)" dist={ret} unit="pct" original={orig.total_return_pct} />
-        <HistPanel title="Max drawdown (%)" dist={dd} unit="pct" original={orig.max_drawdown_pct} />
-      </div>
-
-      {/* AI analysis — click to run */}
-      <AIInsightsPanel
-        label="AI Analysis"
-        contextHint="Claude interprets robustness, tail risk, and what this MC method can (and can't) tell you."
-        fetcher={() => aiAnalyzeMonteCarlo(mc)}
-      />
-    </div>
-  );
-}
-
 function FanChart({ mc, startingCapital }) {
   const innerRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 360 });
@@ -495,7 +697,6 @@ function FanChart({ mc, startingCapital }) {
   const allX = p50.map((p) => p.x);
   const xMin = allX[0], xMax = allX[allX.length - 1];
 
-  // Y range: combine envelopes + sampled paths so nothing clips.
   let yMin = Infinity, yMax = -Infinity;
   for (const series of [p05, p95, ...(mc.paths || [])]) {
     for (const pt of series) {
@@ -520,12 +721,10 @@ function FanChart({ mc, startingCapital }) {
     return `${up}${dn}Z`;
   };
 
-  // Y ticks (5)
   const yTicks = Array.from({ length: 5 }, (_, i) => {
     const v = yMin + ((yMax - yMin) * i) / 4;
     return { v, y: yOf(v) };
   });
-  // X ticks (5)
   const xLabelFor = (xv) => mc.x_label === "trade #"
     ? `#${xv}`
     : new Date(xv * 1000).toISOString().slice(0, 10);
@@ -548,21 +747,18 @@ function FanChart({ mc, startingCapital }) {
       </div>
       <div ref={innerRef} className="relative w-full">
         <svg width={size.w} height={size.h} className="block">
-          {/* Starting capital line */}
           <line x1={pad.l} x2={size.w - pad.r} y1={yOf(startingCapital)} y2={yOf(startingCapital)}
                 stroke="rgba(229,231,235,0.25)" strokeWidth="0.6" strokeDasharray="2 3" />
 
           <path d={bandOf(p05, p95)} fill="rgba(59,130,246,0.12)" />
           <path d={bandOf(p25, p75)} fill="rgba(59,130,246,0.25)" />
 
-          {/* sampled paths */}
           {(mc.paths || []).map((s, i) => (
             <path key={i} d={lineOf(s)} fill="none" stroke="rgba(229,231,235,0.18)" strokeWidth="0.6" />
           ))}
 
           <path d={lineOf(p50)} fill="none" stroke="#3b82f6" strokeWidth="1.6" />
 
-          {/* Axes */}
           {yTicks.map((tk, i) => (
             <g key={i}>
               <line x1={pad.l} x2={size.w - pad.r} y1={tk.y} y2={tk.y}
@@ -600,11 +796,12 @@ function LegendSwatch({ color, label, line }) {
 function HistPanel({ title, dist, unit, original }) {
   const fmt = unit === "usd"
     ? (v) => fmtUsd(v)
-    : (v) => `${fmtNum(v)}%`;
+    : unit === "num"
+      ? (v) => fmtNum(v)
+      : (v) => `${fmtNum(v)}%`;
   const hist = dist.histogram || [];
   const max = Math.max(1, ...hist.map((b) => b.count));
 
-  // Where does the "original" backtest's metric land?
   const origBin = (original != null && hist.length)
     ? hist.findIndex((b) => original >= b.bin_lo && original <= b.bin_hi)
     : -1;

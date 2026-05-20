@@ -27,6 +27,52 @@ from optuna.samplers import TPESampler
 from sklearn.model_selection import TimeSeriesSplit
 
 from services import backtest_engine, event_bus, market_data, risk_config
+from services.monte_carlo import _bars_per_year
+
+_BOOTSTRAP_ITERS = 500
+_BOOTSTRAP_PCTILES = (2.5, 97.5)
+
+
+def _fold_extras(df, oos_idx, oos_result, rng, bars_per_year):
+    """Per-fold benchmark + realized vol + bootstrap CI on OOS Sharpe.
+
+    Computed on underlying close (vol, B&H) and strategy equity (Sharpe CI).
+    Returns a dict of optional fields to merge into the per-window summary.
+    """
+    out: dict[str, Any] = {}
+    if len(oos_idx) >= 2:
+        close = df["close"].to_numpy()[oos_idx]
+        # B&H — pure close-to-close on the OOS slice.
+        if close[0] > 0:
+            out["bh_return_pct"] = float((close[-1] / close[0] - 1.0) * 100.0)
+        # Annualized realized vol of underlying log returns. Captures regime
+        # in a strategy-agnostic way (used by the Regime tab).
+        if bars_per_year > 0 and (close > 0).all():
+            logret = np.diff(np.log(close))
+            if logret.size > 1:
+                std = float(np.std(logret, ddof=1))
+                out["oos_realized_vol"] = std * math.sqrt(bars_per_year)
+
+    # Nonparametric bootstrap CI on the OOS Sharpe of the *strategy* equity.
+    eq_pts = oos_result.get("equity") or []
+    if len(eq_pts) >= 3 and bars_per_year > 0:
+        eq = np.asarray([float(p.get("equity") or 0.0) for p in eq_pts], dtype=float)
+        if (eq > 0).all():
+            r = np.diff(eq) / eq[:-1]
+            n = r.size
+            if n >= 2:
+                sharpes = np.empty(_BOOTSTRAP_ITERS, dtype=float)
+                ann = math.sqrt(bars_per_year)
+                for i in range(_BOOTSTRAP_ITERS):
+                    idx = rng.integers(0, n, size=n)
+                    sample = r[idx]
+                    mean = float(sample.mean())
+                    std = float(sample.std(ddof=1))
+                    sharpes[i] = (mean / std) * ann if std > 0 else 0.0
+                lo, hi = np.percentile(sharpes, _BOOTSTRAP_PCTILES)
+                out["oos_sharpe_ci_low"] = float(lo)
+                out["oos_sharpe_ci_high"] = float(hi)
+    return out
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +166,13 @@ def _normalize_spec(spec: dict) -> dict:
         "n_workers": max(1, min(64, int(spec.get("n_workers") or 1))),
         "metric": str(spec.get("metric") or "sharpe"),
         "seed": int(spec.get("seed") or 42),
+        # Gap between IS and OOS folds — prevents micro-leakage when indicators
+        # have lookbacks that straddle the boundary. Bailey/López de Prado.
+        "embargo_bars": max(0, int(spec.get("embargo_bars") or 0)),
+        # Purged CV: drop the rightmost `purge_radius` IS bars so that trades
+        # opened on the IS boundary (which would exit inside OOS) can't bias
+        # the in-sample optimization. Purges bars, not trades.
+        "purge_radius": max(0, int(spec.get("purge_radius") or 0)),
     }
     if not out["strategy_id"]:
         raise ValueError("strategy_id is required")
@@ -129,6 +182,10 @@ def _normalize_spec(spec: dict) -> dict:
         raise ValueError("is_bars must be >= 10")
     if out["oos_bars"] < 1:
         raise ValueError("oos_bars must be >= 1")
+    if out["embargo_bars"] >= out["oos_bars"]:
+        raise ValueError("embargo_bars must be < oos_bars")
+    if out["purge_radius"] >= out["is_bars"]:
+        raise ValueError("purge_radius must be < is_bars")
     for entry in out["search_space"]:
         if entry.get("type") not in ("int", "float"):
             raise ValueError(f"search_space entry {entry.get('name')!r} has bad type")
@@ -226,20 +283,23 @@ class WalkForwardJob:
 
         total = len(df)
         # sklearn TimeSeriesSplit requires n_splits >= 2.
-        min_bars = s["is_bars"] + 2 * s["oos_bars"]
+        # Need extra room for embargo (between IS and OOS) and purge (off IS edge).
+        min_bars = s["is_bars"] + 2 * s["oos_bars"] + s["embargo_bars"] + s["purge_radius"]
         if total < min_bars:
             raise ValueError(
-                f"not enough bars for walk-forward: have {total}, need at "
-                f"least is_bars + 2*oos_bars = {min_bars}"
+                f"not enough bars for walk-forward: have {total}, need at least "
+                f"is_bars + 2*oos_bars + embargo + purge = {min_bars}"
             )
 
         # How many full IS+OOS windows fit, stepping by oos_bars after the
-        # initial IS chunk.
-        n_splits = max(2, (total - s["is_bars"]) // s["oos_bars"])
+        # initial IS chunk. Embargo eats into the effective stride.
+        effective_step = s["oos_bars"]
+        n_splits = max(2, (total - s["is_bars"] - s["embargo_bars"]) // effective_step)
         splitter = TimeSeriesSplit(
             n_splits=n_splits,
             max_train_size=s["is_bars"],
             test_size=s["oos_bars"],
+            gap=s["embargo_bars"],
         )
         self.total_windows = n_splits
 
@@ -256,12 +316,20 @@ class WalkForwardJob:
         dd_dollars_arr_all: list[float] = []
 
         time_col = df["time"].to_numpy()
+        bars_per_year = _bars_per_year(time_col)
+        rng = np.random.default_rng(s["seed"])
         # Use a dummy X with same length as df — TimeSeriesSplit only needs len.
         dummy = np.zeros(total)
 
         for w_idx, (is_idx, oos_idx) in enumerate(splitter.split(dummy)):
             if self.cancel_flag:
                 break
+
+            # Purged CV: drop the rightmost `purge_radius` IS bars. Trades
+            # opened on those bars could exit inside OOS, so they'd bias the
+            # in-sample optimization toward parameters that exploit lookahead.
+            if s["purge_radius"] > 0:
+                is_idx = is_idx[:-s["purge_radius"]]
 
             self.window_idx = w_idx + 1
             is_start = int(time_col[is_idx[0]])
@@ -330,7 +398,8 @@ class WalkForwardJob:
                 local_mult_last = (last_pt["equity"] / window_start_cap) if window_start_cap > 0 else 1.0
                 carry_equity = carry_equity * local_mult_last
 
-            # Per-window summary
+            # Per-window summary + per-fold extras (B&H, realized vol, Sharpe CI).
+            extras = _fold_extras(df, oos_idx, oos_result, rng, bars_per_year)
             summary = {
                 "window_idx": w_idx + 1,
                 "is_start": is_start,
@@ -341,6 +410,7 @@ class WalkForwardJob:
                 "is_score": float(is_score) if is_score is not None and math.isfinite(is_score) else None,
                 "oos_stats": oos_result["stats"],
                 "optuna_trials": optuna_trials,
+                **extras,
             }
             self.window_summaries.append(summary)
             self._emit("wf_window_done", {"window": summary})
@@ -417,6 +487,8 @@ class WalkForwardJob:
                 "base_params": s["base_params"],
                 "start_time": s["start_time"],
                 "end_time": s["end_time"],
+                "embargo_bars": s["embargo_bars"],
+                "purge_radius": s["purge_radius"],
             },
             "windows": self.window_summaries,
             # Empty candles/overlays: WFA result reuses analytics UI, not the

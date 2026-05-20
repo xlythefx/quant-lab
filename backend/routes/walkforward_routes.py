@@ -34,6 +34,8 @@ def start_job():
             "n_trials":    body.get("n_trials"),
             "n_workers":   body.get("n_workers"),
             "metric":      body.get("metric"),
+            "embargo_bars": body.get("embargo_bars"),
+            "purge_radius": body.get("purge_radius"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")

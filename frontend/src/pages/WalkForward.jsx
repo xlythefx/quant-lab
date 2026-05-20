@@ -10,12 +10,20 @@ import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
 import {
   getSymbols, getStrategies,
   startWalkForward, cancelWalkForward, getWalkForwardStatus, getWalkForwardLastResult,
-  aiSuggestWalkForward, aiAnalyzeWalkForward,
+  aiSuggestWalkForward, aiAnalyzeWalkForwardSection,
 } from "../services/api.js";
 import { subscribeWalkForward } from "../services/socket.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
 import { fmtUsd, fmtNum, fmtPct, fmtInt } from "../services/format.js";
+import { TabBar } from "../components/analytics/primitives.jsx";
+import {
+  Field, NumInput, BudgetHint,
+  ProgressPanel,
+  WFVerdict, Kpi,
+  BestParamRankings, TopCombinations, WindowRankings, WindowHeatmap,
+  useParamStats,
+} from "../components/walkforward/widgets.jsx";
 
 const METRICS = [
   { id: "sharpe",        label: "Sharpe" },
@@ -24,6 +32,26 @@ const METRICS = [
 ];
 
 const TF_SECONDS = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
+
+const TABS = [
+  { id: "setup",      label: "Setup" },
+  { id: "overview",   label: "Overview" },
+  { id: "folds",      label: "Folds" },
+  { id: "parameters", label: "Parameters" },
+  { id: "optuna",     label: "Optuna" },
+  { id: "robustness", label: "Robustness" },
+  { id: "regime",     label: "Regime" },
+  { id: "ai",         label: "AI Analysis" },
+];
+
+function getTabFromHash() {
+  const m = window.location.hash.match(/tab=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : "setup";
+}
+
+function setTabInHash(t) {
+  window.location.hash = `#walkforward?tab=${encodeURIComponent(t)}`;
+}
 
 function dateStrToEpoch(s, endOfDay = false) {
   if (!s) return undefined;
@@ -45,7 +73,7 @@ function wfKey(result) {
 export default function WalkForward() {
   // ---- setup form (persisted) -----------------------------------------
   const [symbols, setSymbols] = useState([]);
-  const [datasets, setDatasets] = useState([]);   // for TF filtering
+  const [datasets, setDatasets] = useState([]);
   const [strategies, setStrategies] = useState([]);
   const [symbol, setSymbol]       = usePersistentState("ql.wf.symbol", "");
   const [timeframe, setTimeframe] = usePersistentState("ql.wf.timeframe", "1h");
@@ -55,19 +83,16 @@ export default function WalkForward() {
   const [oosBars, setOosBars] = usePersistentState("ql.wf.oos_bars", 200);
   const [nTrials, setNTrials] = usePersistentState("ql.wf.n_trials", 50);
   const [metric, setMetric]   = usePersistentState("ql.wf.metric", "sharpe");
-  // CPU parallelism for Optuna inside each window. Default 1 = sequential
-  // (most stable). Hardware-clamped at runtime via navigator.hardwareConcurrency.
   const [nWorkers, setNWorkers] = usePersistentState("ql.wf.n_workers", 1);
+  const [embargoBars, setEmbargoBars] = usePersistentState("ql.wf.embargo_bars", 0);
+  const [purgeRadius, setPurgeRadius] = usePersistentState("ql.wf.purge_radius", 0);
   const [showGuide, setShowGuide] = useState(false);
   const maxWorkers = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 8;
 
-  // Timeframes that actually have parquet data for the current symbol.
   const tfsForSymbol = useMemo(
     () => datasets.filter((d) => d.symbol === symbol).map((d) => d.timeframe),
     [datasets, symbol],
   );
-  // If the persisted timeframe isn't available for this symbol, drop to the
-  // first available one (prefer 15m). Matches Dashboard behavior.
   useEffect(() => {
     if (!symbol || tfsForSymbol.length === 0) return;
     if (!tfsForSymbol.includes(timeframe)) {
@@ -76,8 +101,6 @@ export default function WalkForward() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, tfsForSymbol]);
 
-  // baseParams/searchSpace: persisted, but reset on strategy change since
-  // the schema (and thus param names) differs per strategy.
   const [baseParams, setBaseParams]   = usePersistentState("ql.wf.base", {});
   const [searchSpace, setSearchSpace] = usePersistentState("ql.wf.search", []);
   const lastStrategyId = useRef(strategyId);
@@ -98,16 +121,34 @@ export default function WalkForward() {
 
   // ---- AI Suggest state ------------------------------------------------
   const [aiSuggestLoading, setAiSuggestLoading] = useState(false);
-  const [aiSuggestResult, setAiSuggestResult] = useState(null);  // {is_bars, oos_bars, n_trials, metric, rationale, expected_windows}
+  const [aiSuggestResult, setAiSuggestResult] = useState(null);
   const [aiSuggestError, setAiSuggestError] = useState(null);
+
+  // ---- tab state (URL-hash synced) ------------------------------------
+  const [tab, setTab] = useState(getTabFromHash());
+  useEffect(() => {
+    const onHash = () => setTab(getTabFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const onTab = (id) => { setTabInHash(id); setTab(id); };
+
+  // Once a result appears, auto-flip from Setup to Overview so the user
+  // sees the headline numbers without having to click.
+  const lastResultRef = useRef(null);
+  useEffect(() => {
+    if (result && result !== lastResultRef.current && tab === "setup") {
+      onTab("overview");
+    }
+    lastResultRef.current = result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
 
   const currentDataset = useMemo(
     () => datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe) || null,
     [datasets, symbol, timeframe],
   );
 
-  // Auto-fill date range to the active dataset's full extent whenever the
-  // dataset changes (matches Grid Search behavior). Preset picker can override.
   useEffect(() => {
     if (!currentDataset) return;
     const start = currentDataset.first_time ? fmtDate(currentDataset.first_time) : "";
@@ -119,14 +160,12 @@ export default function WalkForward() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDataset?.first_time, currentDataset?.last_time]);
 
-  // Apply a deterministic test preset (range + IS + OOS + trials + metric).
   const onApplyPreset = (values) => {
     setRange({ start: values.start, end: values.end });
     setIsBars(values.isBars);
     setOosBars(values.oosBars);
     setNTrials(values.nTrials);
     setMetric(values.metric);
-    // Clear the AI suggestion banner since the user picked a deterministic preset.
     setAiSuggestResult(null);
     setAiSuggestError(null);
   };
@@ -232,7 +271,6 @@ export default function WalkForward() {
 
   const running = jobState?.state === "running" || jobState?.state === "starting";
 
-  // ---- handlers --------------------------------------------------------
   const onStart = async () => {
     setError(null);
     liveWindows.current = [];
@@ -251,6 +289,8 @@ export default function WalkForward() {
         n_trials: nTrials,
         n_workers: nWorkers,
         metric,
+        embargo_bars: embargoBars,
+        purge_radius: purgeRadius,
       });
     } catch (e) {
       setError(e?.response?.data?.error || e.message);
@@ -269,6 +309,27 @@ export default function WalkForward() {
     window.location.hash = `#analytics?key=${encodeURIComponent(k)}`;
   };
 
+  const tabs = useMemo(
+    () => TABS.map((t) => ({ ...t, disabled: t.id !== "setup" && !result })),
+    [result],
+  );
+
+  const setupProps = {
+    symbols, symbol, setSymbol,
+    timeframe, setTimeframe, tfsForSymbol,
+    range, setRange,
+    currentDataset,
+    onApplyPreset, running,
+    aiSuggestLoading, aiSuggestResult, aiSuggestError, onAiSuggest,
+    strategies, strategyId, setStrategyId,
+    isBars, setIsBars, oosBars, setOosBars,
+    nTrials, setNTrials, metric, setMetric,
+    nWorkers, setNWorkers, maxWorkers,
+    embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius,
+    searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
+    onStart, onCancel,
+  };
+
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar view="walkforward" />
@@ -283,172 +344,57 @@ export default function WalkForward() {
               window. The stitched OOS performance is the honest, out-of-sample report.
             </p>
           </div>
-          <button
-            onClick={() => setShowGuide(true)}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line text-xs text-muted hover:text-text hover:border-accent-blue"
-            title="What do IS / OOS / trials / workers mean?"
-          >
-            <span className="w-4 h-4 rounded-full bg-accent-blue/15 text-accent-blue flex items-center justify-center text-[10px] font-bold">?</span>
-            Guide
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {result && (
+              <button
+                onClick={onOpenInAnalytics}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent-grad text-white"
+              >
+                Open in Analytics →
+              </button>
+            )}
+            <button
+              onClick={() => setShowGuide(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line text-xs text-muted hover:text-text hover:border-accent-blue"
+              title="What do IS / OOS / trials / workers mean?"
+            >
+              <span className="w-4 h-4 rounded-full bg-accent-blue/15 text-accent-blue flex items-center justify-center text-[10px] font-bold">?</span>
+              Guide
+            </button>
+          </div>
         </header>
 
         {error && (
           <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{error}</div>
         )}
 
-        {/* ---------------- Setup ---------------- */}
-        <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-4">
-          <div className="text-[11px] uppercase tracking-wider text-muted">Setup</div>
-
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-            <SymbolSelector value={symbol} options={symbols} onChange={setSymbol} />
-            <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
-            <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
-          </div>
-
-          {/* Deterministic test presets — no AI, no hallucination. Recommended path. */}
-          <WalkForwardPresetPicker
-            dataset={currentDataset}
-            timeframe={timeframe}
-            onApply={onApplyPreset}
-            disabled={running}
-          />
-
-          {/* AI Suggest: autofill IS/OOS/trials/metric from dataset size */}
-          <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 p-3 flex items-start gap-3">
-            <div className="flex-1">
-              <div className="text-[10px] uppercase tracking-wider text-accent-blue">AI Suggest · Claude Haiku 4.5</div>
-              <div className="text-xs text-muted mt-0.5">
-                {currentDataset
-                  ? <>Have <span className="text-text font-mono">{currentDataset.rows.toLocaleString()}</span> bars · ~{((currentDataset.last_time - currentDataset.first_time) / 86400 / 365).toFixed(1)} years of {symbol} {timeframe}. Claude will pick IS / OOS / trials / metric.</>
-                  : <>Pick a symbol + timeframe with downloaded data, then click for an AI-tuned config.</>}
-              </div>
-              {aiSuggestError && <div className="text-xs text-loss font-mono mt-1.5">{aiSuggestError}</div>}
-              {aiSuggestResult && (
-                <div className="text-xs text-text mt-2 leading-relaxed">
-                  <span className="text-accent-blue">▸</span> {aiSuggestResult.rationale}
-                  {aiSuggestResult.expected_windows != null && (
-                    <span className="text-muted font-mono"> · ~{aiSuggestResult.expected_windows} windows</span>
-                  )}
-                </div>
-              )}
-            </div>
-            <button
-              onClick={onAiSuggest}
-              disabled={aiSuggestLoading || !currentDataset || !strategyId}
-              className="shrink-0 px-4 py-2 rounded-md bg-accent-grad text-white text-xs font-semibold disabled:opacity-40"
-            >
-              {aiSuggestLoading ? "Thinking…" : (aiSuggestResult ? "Re-suggest" : "AI Suggest")}
-            </button>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-            <Field label="Strategy">
-              <select
-                value={strategyId}
-                onChange={(e) => setStrategyId(e.target.value)}
-                className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
-              >
-                {strategies.length === 0 && <option value="">— loading —</option>}
-                {strategies.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
-            </Field>
-
-            <Field label="IS bars">
-              <NumInput value={isBars} onChange={setIsBars} min={10} />
-            </Field>
-            <Field label="OOS bars">
-              <NumInput value={oosBars} onChange={setOosBars} min={1} />
-            </Field>
-            <Field label="Trials / window">
-              <NumInput value={nTrials} onChange={setNTrials} min={1} />
-            </Field>
-            <Field label="Metric">
-              <select
-                value={metric}
-                onChange={(e) => setMetric(e.target.value)}
-                className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
-              >
-                {METRICS.map((m) => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
-                ))}
-              </select>
-            </Field>
-          </div>
-
-          {/* CPU parallelism: slider + numeric readout. 1..navigator.hardwareConcurrency. */}
-          <div className="flex items-center gap-3">
-            <Field label={`Workers (CPUs)`}>
-              <div className="flex items-center gap-3 min-w-[280px]">
-                <input
-                  type="range"
-                  min={1}
-                  max={maxWorkers}
-                  step={1}
-                  value={Math.min(nWorkers, maxWorkers)}
-                  onChange={(e) => setNWorkers(parseInt(e.target.value, 10) || 1)}
-                  className="w-44 accent-accent-blue"
-                  disabled={running}
-                  title="Parallel Optuna trials per window. 1 = sequential and fully reproducible (same seed → same result). >1 is faster but non-deterministic: TPE updates its surrogate model in trial-completion order, which varies across runs."
-                />
-                <span className="font-mono text-sm tabular-nums w-12 text-right">
-                  {nWorkers} / {maxWorkers}
-                </span>
-              </div>
-            </Field>
-            <span className="text-[11px] text-muted/70">
-              Parallel Optuna trials per window. 1 = sequential (stable, reproducible).
-              {nWorkers > 1 && <> <span className="text-amber-400">·  results non-deterministic above 1.</span></>}
-            </span>
-          </div>
-
-          <BudgetHint searchSpaceLen={searchSpace.length} nTrials={nTrials} isBars={isBars} oosBars={oosBars} />
-
-          {activeStrategy && (
-            <div className="pt-2 border-t border-line/40">
-              <WalkForwardParamEditor
-                schema={activeStrategy.schema}
-                baseParams={baseParams}
-                searchSpace={searchSpace}
-                onChange={({ baseParams: b, searchSpace: ss }) => {
-                  setBaseParams(b);
-                  setSearchSpace(ss);
-                }}
-              />
-            </div>
-          )}
-
-          <div className="flex items-center justify-end gap-3 pt-2">
-            {running ? (
-              <button
-                onClick={onCancel}
-                className="px-4 py-2 rounded-md bg-loss/15 text-loss border border-loss/40 text-sm font-semibold"
-              >
-                Cancel
-              </button>
-            ) : (
-              <button
-                onClick={onStart}
-                disabled={!symbol || !strategyId}
-                className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-40"
-              >
-                Start Walk-Forward
-              </button>
-            )}
-          </div>
-        </section>
-
-        {/* ---------------- Progress ---------------- */}
+        {/* Progress banner sits ABOVE the tab bar so it's visible from any tab */}
         {(running || jobState?.state === "cancelled") && (
           <ProgressPanel jobState={jobState} />
         )}
 
-        {/* ---------------- Result ---------------- */}
-        {result && !running && (
-          <ResultPanel result={result} onOpenInAnalytics={onOpenInAnalytics} />
+        <TabBar tabs={tabs} active={tab} onSelect={onTab} />
+
+        {tab === "setup"      && <SetupTab {...setupProps} />}
+        {tab === "overview"   && result && <OverviewTab   result={result} />}
+        {tab === "folds"      && result && <FoldsTab      result={result} />}
+        {tab === "parameters" && result && <ParametersTab result={result} />}
+        {tab === "optuna"     && result && <OptunaTab     result={result} />}
+        {tab === "robustness" && result && <RobustnessTab result={result} />}
+        {tab === "regime"     && result && <RegimeTab     result={result} />}
+        {tab === "ai"         && result && <AITab         result={result} />}
+
+        {!result && tab !== "setup" && (
+          <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
+            <div className="text-base text-text mb-1">No walk-forward result loaded</div>
+            <div className="text-xs">Configure and start a run on the Setup tab.</div>
+            <button
+              onClick={() => onTab("setup")}
+              className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm"
+            >
+              Go to Setup →
+            </button>
+          </div>
         )}
       </main>
 
@@ -458,126 +404,224 @@ export default function WalkForward() {
 }
 
 // ---------------------------------------------------------------------------
+// SETUP
+// ---------------------------------------------------------------------------
 
-function Field({ label, children }) {
+function SetupTab({
+  symbols, symbol, setSymbol,
+  timeframe, setTimeframe, tfsForSymbol,
+  range, setRange,
+  currentDataset,
+  onApplyPreset, running,
+  aiSuggestLoading, aiSuggestResult, aiSuggestError, onAiSuggest,
+  strategies, strategyId, setStrategyId,
+  isBars, setIsBars, oosBars, setOosBars,
+  nTrials, setNTrials, metric, setMetric,
+  nWorkers, setNWorkers, maxWorkers,
+  embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius,
+  searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
+  onStart, onCancel,
+}) {
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs uppercase tracking-wider text-muted">{label}</span>
-      {children}
-    </div>
-  );
-}
+    <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-4">
+      <div className="text-[11px] uppercase tracking-wider text-muted">Setup</div>
 
-function NumInput({ value, onChange, min, max }) {
-  return (
-    <input
-      type="number"
-      value={value ?? ""}
-      min={min} max={max}
-      onChange={(e) => {
-        const n = parseInt(e.target.value, 10);
-        if (Number.isFinite(n)) onChange(n);
-      }}
-      className="w-24 px-2 py-1.5 text-right rounded-md bg-bg-panel border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
-    />
-  );
-}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <SymbolSelector value={symbol} options={symbols} datasets={datasets} onChange={setSymbol} />
+        <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
+        <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
+      </div>
 
-function BudgetHint({ searchSpaceLen, nTrials, isBars, oosBars }) {
-  // estimate windows fitting in a "typical" range — without total bars we
-  // can only describe per-window cost; show that.
-  const perWindow = (searchSpaceLen ? nTrials : 1) + 1; // +1 OOS eval
-  const heavy = perWindow > 200;
-  return (
-    <div className={`text-[11px] font-mono ${heavy ? "text-loss" : "text-muted"}`}>
-      ≈ {perWindow} backtests per window
-      &nbsp;·&nbsp; IS={isBars} bars, OOS={oosBars} bars
-    </div>
-  );
-}
+      <WalkForwardPresetPicker
+        dataset={currentDataset}
+        timeframe={timeframe}
+        onApply={onApplyPreset}
+        disabled={running}
+      />
 
-function ProgressPanel({ jobState }) {
-  const { window_idx = 0, total_windows = 0, trial_idx = 0, n_trials = 0 } = jobState || {};
-  const wPct = total_windows ? (window_idx / total_windows) * 100 : 0;
-  const tPct = n_trials ? Math.min(100, (trial_idx / n_trials) * 100) : 0;
-  const cancelled = jobState?.state === "cancelled";
-
-  return (
-    <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-wider text-muted">
-          {cancelled ? "Cancelled" : "Running"}
-        </div>
-        <div className="text-xs font-mono text-muted">
-          job {jobState?.job_id || "—"}
-          {jobState?.eta_seconds != null && (
-            <> · ETA {Math.round(jobState.eta_seconds)}s</>
+      <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 p-3 flex items-start gap-3">
+        <div className="flex-1">
+          <div className="text-[10px] uppercase tracking-wider text-accent-blue">AI Suggest · Claude Haiku 4.5</div>
+          <div className="text-xs text-muted mt-0.5">
+            {currentDataset
+              ? <>Have <span className="text-text font-mono">{currentDataset.rows.toLocaleString()}</span> bars · ~{((currentDataset.last_time - currentDataset.first_time) / 86400 / 365).toFixed(1)} years of {symbol} {timeframe}. Claude will pick IS / OOS / trials / metric.</>
+              : <>Pick a symbol + timeframe with downloaded data, then click for an AI-tuned config.</>}
+          </div>
+          {aiSuggestError && <div className="text-xs text-loss font-mono mt-1.5">{aiSuggestError}</div>}
+          {aiSuggestResult && (
+            <div className="text-xs text-text mt-2 leading-relaxed">
+              <span className="text-accent-blue">▸</span> {aiSuggestResult.rationale}
+              {aiSuggestResult.expected_windows != null && (
+                <span className="text-muted font-mono"> · ~{aiSuggestResult.expected_windows} windows</span>
+              )}
+            </div>
           )}
         </div>
+        <button
+          onClick={onAiSuggest}
+          disabled={aiSuggestLoading || !currentDataset || !strategyId}
+          className="shrink-0 px-4 py-2 rounded-md bg-accent-grad text-white text-xs font-semibold disabled:opacity-40"
+        >
+          {aiSuggestLoading ? "Thinking…" : (aiSuggestResult ? "Re-suggest" : "AI Suggest")}
+        </button>
       </div>
 
-      <div className="space-y-2">
-        <ProgressBar label={`Window ${window_idx} / ${total_windows}`} pct={wPct} />
-        <ProgressBar label={`Trial ${trial_idx} / ${n_trials} (current window)`} pct={tPct} />
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <Field label="Strategy">
+          <select
+            value={strategyId}
+            onChange={(e) => setStrategyId(e.target.value)}
+            className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+          >
+            {strategies.length === 0 && <option value="">— loading —</option>}
+            {strategies.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="IS bars">
+          <NumInput value={isBars} onChange={setIsBars} min={10} />
+        </Field>
+        <Field label="OOS bars">
+          <NumInput value={oosBars} onChange={setOosBars} min={1} />
+        </Field>
+        <Field label="Trials / window">
+          <NumInput value={nTrials} onChange={setNTrials} min={1} />
+        </Field>
+        <Field label="Metric">
+          <select
+            value={metric}
+            onChange={(e) => setMetric(e.target.value)}
+            className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+          >
+            {METRICS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </Field>
       </div>
 
-      {jobState?.current_best_score != null && (
-        <div className="text-xs font-mono text-muted">
-          best score so far: <span className="text-text">{fmtNum(jobState.current_best_score)}</span>
+      <div className="flex items-center gap-3">
+        <Field label={`Workers (CPUs)`}>
+          <div className="flex items-center gap-3 min-w-[280px]">
+            <input
+              type="range"
+              min={1}
+              max={maxWorkers}
+              step={1}
+              value={Math.min(nWorkers, maxWorkers)}
+              onChange={(e) => setNWorkers(parseInt(e.target.value, 10) || 1)}
+              className="w-44 accent-accent-blue"
+              disabled={running}
+              title="Parallel Optuna trials per window. 1 = sequential and fully reproducible (same seed → same result). >1 is faster but non-deterministic."
+            />
+            <span className="font-mono text-sm tabular-nums w-12 text-right">
+              {nWorkers} / {maxWorkers}
+            </span>
+          </div>
+        </Field>
+        <span className="text-[11px] text-muted/70">
+          Parallel Optuna trials per window. 1 = sequential (stable, reproducible).
+          {nWorkers > 1 && <> <span className="text-amber-400">·  results non-deterministic above 1.</span></>}
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 pt-2 border-t border-line/40">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Rigor (optional)</div>
+        <Field label="Embargo bars">
+          <NumInput value={embargoBars} onChange={setEmbargoBars} min={0} />
+        </Field>
+        <Field label="Purge radius">
+          <NumInput value={purgeRadius} onChange={setPurgeRadius} min={0} />
+        </Field>
+        <span className="text-[11px] text-muted/70 max-w-md">
+          Embargo = bars skipped between IS and OOS (prevents leakage from straddling indicators).
+          Purge = bars trimmed off the right edge of IS (purged CV).
+        </span>
+      </div>
+
+      <BudgetHint searchSpaceLen={searchSpace.length} nTrials={nTrials} isBars={isBars} oosBars={oosBars} />
+
+      {activeStrategy && (
+        <div className="pt-2 border-t border-line/40">
+          <WalkForwardParamEditor
+            schema={activeStrategy.schema}
+            baseParams={baseParams}
+            searchSpace={searchSpace}
+            onChange={({ baseParams: b, searchSpace: ss }) => {
+              setBaseParams(b);
+              setSearchSpace(ss);
+            }}
+          />
         </div>
       )}
 
-      {jobState?.windows?.length > 0 && (
-        <details className="text-xs">
-          <summary className="text-muted cursor-pointer hover:text-text">
-            {jobState.windows.length} window{jobState.windows.length === 1 ? "" : "s"} completed
-          </summary>
-          <div className="mt-3 space-y-2">
-            {jobState.windows.slice(-5).map((w) => (
-              <WindowCard key={w.window_idx} w={w} />
-            ))}
-          </div>
-        </details>
-      )}
+      <div className="flex items-center justify-end gap-3 pt-2">
+        {running ? (
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 rounded-md bg-loss/15 text-loss border border-loss/40 text-sm font-semibold"
+          >
+            Cancel
+          </button>
+        ) : (
+          <button
+            onClick={onStart}
+            disabled={!symbol || !strategyId}
+            className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-40"
+          >
+            Start Walk-Forward
+          </button>
+        )}
+      </div>
     </section>
   );
 }
 
-function ProgressBar({ label, pct }) {
-  return (
-    <div>
-      <div className="flex items-center justify-between text-[11px] text-muted mb-1">
-        <span>{label}</span>
-        <span className="font-mono">{Math.floor(pct)}%</span>
-      </div>
-      <div className="h-2 rounded bg-bg-elev/60 overflow-hidden">
-        <div className="h-full bg-accent-grad transition-all" style={{ width: `${pct}%` }} />
-      </div>
-    </div>
-  );
-}
+// ---------------------------------------------------------------------------
+// OVERVIEW — headline KPIs + stitched OOS equity (B&H overlay in C.1)
+// ---------------------------------------------------------------------------
 
-function ResultPanel({ result, onOpenInAnalytics }) {
+function OverviewTab({ result }) {
   const s = result.stats || {};
   const windows = result.windows || [];
   const equityPts = (result.equity || []).map((p) => ({ time: p.time, value: p.value }));
-  const strategyMeta = [{ id: result.strategy_id, color: "#3b82f6" }];
+
+  // Stitched buy-and-hold series, chained from per-window bh_return_pct.
+  // Each window contributes one segment from oos_start (carry equity) to oos_end
+  // (carry * (1 + bh_return)). Linear interpolation between window endpoints —
+  // not a tick-accurate B&H curve, but close enough to spot trend regimes.
+  const bhPts = useMemo(() => {
+    let value = 100;
+    const pts = [];
+    for (const w of windows) {
+      if (w.bh_return_pct == null || w.oos_start == null || w.oos_end == null) continue;
+      if (pts.length === 0) pts.push({ time: w.oos_start, value });
+      else pts.push({ time: w.oos_start, value });
+      value = value * (1 + w.bh_return_pct / 100);
+      pts.push({ time: w.oos_end, value });
+    }
+    return pts;
+  }, [windows]);
+
+  const hasBh = bhPts.length >= 2;
+  const strategyMeta = hasBh
+    ? [{ id: result.strategy_id, color: "#3b82f6" }, { id: "__bh__", color: "#94a3b8" }]
+    : [{ id: result.strategy_id, color: "#3b82f6" }];
+  const pointsByStrategy = hasBh
+    ? { [result.strategy_id]: equityPts, __bh__: bhPts }
+    : { [result.strategy_id]: equityPts };
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="text-[11px] uppercase tracking-wider text-muted">
-          Walk-Forward Result · {windows.length} window{windows.length === 1 ? "" : "s"}
-          {result.wf_spec && (
-            <> · IS={result.wf_spec.is_bars}b OOS={result.wf_spec.oos_bars}b · metric={result.wf_spec.metric}</>
-          )}
-        </div>
-        <button
-          onClick={onOpenInAnalytics}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent-grad text-white"
-        >
-          Open in Analytics →
-        </button>
+      <div className="text-[11px] uppercase tracking-wider text-muted">
+        Walk-Forward Result · {windows.length} window{windows.length === 1 ? "" : "s"}
+        {result.wf_spec && (
+          <> · IS={result.wf_spec.is_bars}b OOS={result.wf_spec.oos_bars}b · metric={result.wf_spec.metric}</>
+        )}
+        {result.wf_spec?.embargo_bars > 0 && <> · embargo={result.wf_spec.embargo_bars}</>}
+        {result.wf_spec?.purge_radius > 0 && <> · purge={result.wf_spec.purge_radius}</>}
       </div>
 
       <WFVerdict result={result} />
@@ -595,519 +639,1241 @@ function ResultPanel({ result, onOpenInAnalytics }) {
       </div>
 
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
-        <div className="text-[11px] uppercase tracking-wider text-muted mb-2">Stitched OOS Equity</div>
-        <div className="h-[260px]">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-[11px] uppercase tracking-wider text-muted">Stitched OOS Equity</div>
+          {hasBh && (
+            <div className="text-[10px] font-mono text-muted flex items-center gap-3">
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-0.5 bg-[#3b82f6]" /> strategy
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-3 h-0.5 bg-[#94a3b8]" /> buy-and-hold
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="h-[320px]">
           <CustomEquityChart
             strategies={strategyMeta}
-            pointsByStrategy={{ [result.strategy_id]: equityPts }}
+            pointsByStrategy={pointsByStrategy}
             startingCapital={s.starting_capital ?? 100000}
           />
         </div>
       </div>
+    </section>
+  );
+}
 
-      <BestParamRankings result={result} />
+// ---------------------------------------------------------------------------
+// FOLDS — per-window table + heatmap (C.2 adds IS-vs-OOS / vs-B&H / CI charts)
+// ---------------------------------------------------------------------------
 
+function FoldsTab({ result }) {
+  const windows = result.windows || [];
+  return (
+    <section className="space-y-4">
+      <FoldsISvsOOSChart windows={windows} />
+      <FoldsStratVsBHChart windows={windows} />
+      <FoldsSharpeCIChart windows={windows} />
       <WindowRankings windows={windows} />
-
-      <WalkForwardAIInsights result={result} />
-
       <WindowHeatmap windows={windows} searchSpace={result?.wf_spec?.search_space || []} />
     </section>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Verdict banner — synthesizes the headline stats into a one-line judgment.
-// ---------------------------------------------------------------------------
+// Paired bars: IS metric (training score) vs OOS Sharpe. Gap = overfit signal.
+function FoldsISvsOOSChart({ windows }) {
+  if (!windows.length) return null;
+  const rows = windows.map((w) => ({
+    idx: w.window_idx,
+    is: typeof w.is_score === "number" ? w.is_score : null,
+    oos: w.oos_stats?.sharpe ?? 0,
+  }));
+  const all = rows.flatMap((r) => [r.is, r.oos]).filter((v) => v != null);
+  let yMin = Math.min(0, ...all), yMax = Math.max(0, ...all);
+  if (yMin === yMax) yMax = yMin + 1;
+  const pad = (yMax - yMin) * 0.08 || 0.1;
+  yMin -= pad; yMax += pad;
 
-function WFVerdict({ result }) {
-  const s = result.stats || {};
-  const windows = result.windows || [];
-  const sharpe = s.sharpe ?? 0;
-  const pf = s.profit_factor;
-  const ret = s.total_return_pct ?? 0;
-  const dd = Math.abs(s.max_drawdown_pct ?? 0);
-  const positiveWins = windows.filter((w) => (w.oos_stats?.sharpe ?? 0) > 0).length;
-  const pctPositive = windows.length ? positiveWins / windows.length : 0;
-
-  // Scoring model: weighted blend of OOS Sharpe, % positive windows, and return/DD ratio.
-  const calmar = dd > 0 ? ret / dd : 0;
-  let score = 0;
-  if (sharpe >= 1.5) score += 3; else if (sharpe >= 1.0) score += 2; else if (sharpe >= 0.5) score += 1;
-  if (pctPositive >= 0.7) score += 2; else if (pctPositive >= 0.5) score += 1;
-  if (calmar >= 2) score += 2; else if (calmar >= 1) score += 1;
-  if (pf != null && pf >= 1.5) score += 1;
-
-  let tier, tone, label, summary;
-  if (score >= 6)        { tier = "Strong";   tone = "profit";  label = "🟢 Deploy candidate"; }
-  else if (score >= 4)   { tier = "Decent";   tone = "profit";  label = "🟡 Promising — refine further"; }
-  else if (score >= 2)   { tier = "Marginal"; tone = "amber";   label = "🟠 Marginal — likely overfit or thin edge"; }
-  else                   { tier = "Weak";     tone = "loss";    label = "🔴 Does not generalize — kill or rework"; }
-
-  summary = [
-    `${fmtPct(ret)} OOS return`,
-    `Sharpe ${fmtNum(sharpe)}`,
-    `${fmtInt(positiveWins)}/${fmtInt(windows.length)} windows positive (${fmtNum(pctPositive * 100)}%)`,
-    `max DD ${fmtPct(dd, false)}`,
-  ].join(" · ");
-
-  const toneClasses = {
-    profit: "border-profit/40 bg-profit/5 text-profit",
-    amber:  "border-amber-400/40 bg-amber-400/5 text-amber-400",
-    loss:   "border-loss/40 bg-loss/5 text-loss",
-  };
+  const w = 720, h = 220;
+  const px = { l: 56, r: 16, t: 12, b: 28 };
+  const innerW = w - px.l - px.r, innerH = h - px.t - px.b;
+  const groupW = innerW / rows.length;
+  const barW = Math.max(4, (groupW - 4) / 2);
+  const yOf = (v) => px.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
 
   return (
-    <div className={`rounded-xl border p-4 ${toneClasses[tone]}`}>
-      <div className="flex items-center justify-between gap-3 flex-wrap">
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
         <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-70">Verdict · {tier}</div>
-          <div className="text-base font-semibold mt-0.5">{label}</div>
+          <div className="text-sm font-semibold text-text">IS score vs OOS Sharpe per window</div>
+          <div className="text-[11px] text-muted">
+            Big gap = overfit (training score didn't generalize). Aligned bars = honest edge.
+          </div>
         </div>
-        <div className="text-xs font-mono opacity-90">{summary}</div>
+        <div className="text-[10px] font-mono text-muted flex items-center gap-3">
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#94a3b8] rounded-sm" /> IS</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#3b82f6] rounded-sm" /> OOS</span>
+        </div>
+      </div>
+      <div className="w-full overflow-x-auto">
+        <svg width={w} height={h} className="block">
+          <line x1={px.l} x2={w - px.r} y1={yOf(0)} y2={yOf(0)} stroke="rgba(229,231,235,0.25)" strokeWidth="0.6" />
+          {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+            const v = yMin + (yMax - yMin) * (1 - p);
+            return (
+              <g key={i}>
+                <line x1={px.l} x2={w - px.r} y1={px.t + p * innerH} y2={px.t + p * innerH}
+                      stroke="rgba(229,231,235,0.05)" />
+                <text x={px.l - 6} y={px.t + p * innerH + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {fmtNum(v)}
+                </text>
+              </g>
+            );
+          })}
+          {rows.map((r, i) => {
+            const gx = px.l + i * groupW;
+            const xIs = gx + 2;
+            const xOos = gx + 2 + barW + 2;
+            const yIs = r.is != null ? yOf(r.is) : yOf(0);
+            const yOos = yOf(r.oos);
+            return (
+              <g key={r.idx}>
+                {r.is != null && (
+                  <rect x={xIs} y={Math.min(yIs, yOf(0))}
+                        width={barW} height={Math.abs(yIs - yOf(0))}
+                        fill="#94a3b8" fillOpacity="0.7" />
+                )}
+                <rect x={xOos} y={Math.min(yOos, yOf(0))}
+                      width={barW} height={Math.abs(yOos - yOf(0))}
+                      fill={r.oos >= 0 ? "#3b82f6" : "#ef4444"} fillOpacity="0.85" />
+                {(i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 10) === 0) && (
+                  <text x={gx + groupW / 2} y={h - 10} textAnchor="middle"
+                        className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                    #{r.idx}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// Strategy OOS return % vs underlying buy-and-hold % per fold.
+function FoldsStratVsBHChart({ windows }) {
+  const rows = windows
+    .filter((w) => w.bh_return_pct != null)
+    .map((w) => ({
+      idx: w.window_idx,
+      strat: w.oos_stats?.total_return_pct ?? 0,
+      bh: w.bh_return_pct,
+    }));
+  if (rows.length < 1) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Need bh_return_pct (Phase B.2) on at least one window to render strategy-vs-B&H bars.
+      </div>
+    );
+  }
+  const all = rows.flatMap((r) => [r.strat, r.bh]);
+  let yMin = Math.min(0, ...all), yMax = Math.max(0, ...all);
+  if (yMin === yMax) yMax = yMin + 1;
+  const pad = (yMax - yMin) * 0.08 || 0.1;
+  yMin -= pad; yMax += pad;
+
+  const w = 720, h = 220;
+  const px = { l: 56, r: 16, t: 12, b: 28 };
+  const innerW = w - px.l - px.r, innerH = h - px.t - px.b;
+  const groupW = innerW / rows.length;
+  const barW = Math.max(4, (groupW - 4) / 2);
+  const yOf = (v) => px.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+  const beat = rows.filter((r) => r.strat > r.bh).length;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-sm font-semibold text-text">Strategy vs Buy-and-Hold per window</div>
+          <div className="text-[11px] text-muted">
+            {beat}/{rows.length} windows beat passive ({fmtNum(beat / rows.length * 100)}%).
+            Trading is only worth doing if you're consistently winning here.
+          </div>
+        </div>
+        <div className="text-[10px] font-mono text-muted flex items-center gap-3">
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#3b82f6] rounded-sm" /> strategy</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#94a3b8] rounded-sm" /> B&amp;H</span>
+        </div>
+      </div>
+      <div className="w-full overflow-x-auto">
+        <svg width={w} height={h} className="block">
+          <line x1={px.l} x2={w - px.r} y1={yOf(0)} y2={yOf(0)} stroke="rgba(229,231,235,0.25)" strokeWidth="0.6" />
+          {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+            const v = yMin + (yMax - yMin) * (1 - p);
+            return (
+              <g key={i}>
+                <line x1={px.l} x2={w - px.r} y1={px.t + p * innerH} y2={px.t + p * innerH}
+                      stroke="rgba(229,231,235,0.05)" />
+                <text x={px.l - 6} y={px.t + p * innerH + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {fmtNum(v)}%
+                </text>
+              </g>
+            );
+          })}
+          {rows.map((r, i) => {
+            const gx = px.l + i * groupW;
+            const xS = gx + 2, xB = gx + 2 + barW + 2;
+            const yS = yOf(r.strat), yB = yOf(r.bh);
+            const won = r.strat > r.bh;
+            return (
+              <g key={r.idx}>
+                <rect x={xS} y={Math.min(yS, yOf(0))} width={barW} height={Math.abs(yS - yOf(0))}
+                      fill={won ? "#3b82f6" : "#ef4444"} fillOpacity="0.85">
+                  <title>#{r.idx}: strat {fmtPct(r.strat)} vs B&H {fmtPct(r.bh)}</title>
+                </rect>
+                <rect x={xB} y={Math.min(yB, yOf(0))} width={barW} height={Math.abs(yB - yOf(0))}
+                      fill="#94a3b8" fillOpacity="0.6" />
+                {(i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 10) === 0) && (
+                  <text x={gx + groupW / 2} y={h - 10} textAnchor="middle"
+                        className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                    #{r.idx}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// OOS Sharpe with bootstrap CI brackets. Windows whose CI crosses zero are faded.
+function FoldsSharpeCIChart({ windows }) {
+  const rows = windows
+    .filter((w) => w.oos_sharpe_ci_low != null && w.oos_sharpe_ci_high != null)
+    .map((w) => ({
+      idx: w.window_idx,
+      sharpe: w.oos_stats?.sharpe ?? 0,
+      lo: w.oos_sharpe_ci_low,
+      hi: w.oos_sharpe_ci_high,
+    }));
+  if (rows.length < 1) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Need bootstrap Sharpe CIs (Phase B.2) to render confidence brackets.
+      </div>
+    );
+  }
+  const all = rows.flatMap((r) => [r.lo, r.hi, r.sharpe]);
+  let yMin = Math.min(0, ...all), yMax = Math.max(0, ...all);
+  if (yMin === yMax) yMax = yMin + 1;
+  const pad = (yMax - yMin) * 0.1 || 0.1;
+  yMin -= pad; yMax += pad;
+
+  const w = 720, h = 240;
+  const px = { l: 56, r: 16, t: 12, b: 28 };
+  const innerW = w - px.l - px.r, innerH = h - px.t - px.b;
+  const colW = innerW / rows.length;
+  const dotW = Math.max(2, colW * 0.5);
+  const yOf = (v) => px.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+  const crossesZero = (r) => r.lo <= 0 && r.hi >= 0;
+  const ambiguous = rows.filter(crossesZero).length;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-sm font-semibold text-text">OOS Sharpe with 95% bootstrap CI</div>
+          <div className="text-[11px] text-muted">
+            Brackets that cross zero = window's Sharpe is not statistically distinguishable from random.
+            {ambiguous > 0 && <> {ambiguous}/{rows.length} ambiguous.</>}
+          </div>
+        </div>
+      </div>
+      <div className="w-full overflow-x-auto">
+        <svg width={w} height={h} className="block">
+          <line x1={px.l} x2={w - px.r} y1={yOf(0)} y2={yOf(0)} stroke="rgba(229,231,235,0.3)" strokeDasharray="2 3" strokeWidth="0.6" />
+          {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+            const v = yMin + (yMax - yMin) * (1 - p);
+            return (
+              <g key={i}>
+                <line x1={px.l} x2={w - px.r} y1={px.t + p * innerH} y2={px.t + p * innerH}
+                      stroke="rgba(229,231,235,0.05)" />
+                <text x={px.l - 6} y={px.t + p * innerH + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {fmtNum(v)}
+                </text>
+              </g>
+            );
+          })}
+          {rows.map((r, i) => {
+            const cx = px.l + i * colW + colW / 2;
+            const yLo = yOf(r.lo), yHi = yOf(r.hi), yS = yOf(r.sharpe);
+            const faded = crossesZero(r);
+            const color = r.sharpe >= 0 ? "#3b82f6" : "#ef4444";
+            const opacity = faded ? 0.35 : 0.95;
+            return (
+              <g key={r.idx} opacity={opacity}>
+                <line x1={cx} x2={cx} y1={yLo} y2={yHi} stroke={color} strokeWidth="1.5" />
+                <line x1={cx - dotW / 2} x2={cx + dotW / 2} y1={yLo} y2={yLo} stroke={color} strokeWidth="1.5" />
+                <line x1={cx - dotW / 2} x2={cx + dotW / 2} y1={yHi} y2={yHi} stroke={color} strokeWidth="1.5" />
+                <circle cx={cx} cy={yS} r={3} fill={color}>
+                  <title>#{r.idx}: Sharpe {fmtNum(r.sharpe)} (95% CI [{fmtNum(r.lo)}, {fmtNum(r.hi)}])</title>
+                </circle>
+                {(i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 10) === 0) && (
+                  <text x={cx} y={h - 10} textAnchor="middle"
+                        className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                    #{r.idx}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
       </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Best Parameter Combinations — ranks each search-toggled param across windows.
-// For INT params: frequency table of picked values with avg OOS Sharpe.
-// For FLOAT params: min / median / max / stdev of picked values + drift indicator.
+// PARAMETERS — best-pick rankings + top full combos (C.3 adds drift chart)
 // ---------------------------------------------------------------------------
 
-function BestParamRankings({ result }) {
+function ParametersTab({ result }) {
   const windows = result.windows || [];
   const searchSpace = result?.wf_spec?.search_space || [];
-
-  const rankings = useMemo(() => {
-    if (windows.length === 0 || searchSpace.length === 0) return [];
-    return searchSpace.map((spec) => {
-      const picks = windows
-        .map((w) => ({ value: w.best_params?.[spec.name], oos: w.oos_stats?.sharpe ?? 0, ret: w.oos_stats?.total_return_pct ?? 0 }))
-        .filter((p) => typeof p.value === "number" && Number.isFinite(p.value));
-      if (picks.length === 0) return { spec, picks: [], buckets: [] };
-
-      const values = picks.map((p) => p.value);
-      const sorted = [...values].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
-      const mean = values.reduce((a, b) => a + b, 0) / values.length;
-      const variance = values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length;
-      const stdev = Math.sqrt(variance);
-      const range = sorted[sorted.length - 1] - sorted[0];
-      const spread = mean !== 0 ? stdev / Math.abs(mean) : 0;  // coefficient of variation
-
-      // Group identical / nearly-identical picks into buckets (top by avg OOS Sharpe).
-      const bucketSize = spec.type === "int" ? 1 : Math.max((spec.high - spec.low) / 20, 1e-9);
-      const bucketMap = new Map();
-      for (const p of picks) {
-        const key = spec.type === "int" ? p.value : Math.round(p.value / bucketSize) * bucketSize;
-        if (!bucketMap.has(key)) bucketMap.set(key, { value: key, count: 0, sumSharpe: 0, sumRet: 0 });
-        const b = bucketMap.get(key);
-        b.count += 1;
-        b.sumSharpe += p.oos;
-        b.sumRet += p.ret;
-      }
-      const buckets = Array.from(bucketMap.values())
-        .map((b) => ({ ...b, avgSharpe: b.sumSharpe / b.count, avgRet: b.sumRet / b.count }))
-        .sort((a, b) => b.avgSharpe - a.avgSharpe || b.count - a.count)
-        .slice(0, 5);
-
-      // Drift verdict: low stdev relative to range = stable.
-      const stable = spread < 0.15;
-      return { spec, picks, buckets, stats: { mean, median, stdev, range, spread, stable } };
-    });
-  }, [windows, searchSpace]);
-
-  if (rankings.length === 0) {
-    return null;
-  }
-
   return (
-    <section className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
-      <div>
-        <div className="text-sm font-semibold text-text">Best Parameter Combinations</div>
-        <div className="text-xs text-muted">
-          Across {windows.length} windows: top values Optuna picked (ranked by avg OOS Sharpe).
-          Low spread = robust; high spread = parameter drift / overfit signal.
-        </div>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {rankings.map(({ spec, picks, buckets, stats }) => (
-          <ParamRankingCard key={spec.name} spec={spec} picks={picks} buckets={buckets} stats={stats} />
-        ))}
-      </div>
+    <section className="space-y-4">
+      <ParameterDriftChart windows={windows} searchSpace={searchSpace} />
+      <BestParamRankings result={result} />
+      <TopCombinations result={result} />
     </section>
   );
 }
 
-function ParamRankingCard({ spec, picks, buckets, stats }) {
-  if (!picks.length) {
+// Z-scored parameter drift across windows. One line per numeric param;
+// y=0 = median pick. Lines hugging zero = stable; diverging = drift.
+function ParameterDriftChart({ windows, searchSpace }) {
+  const wrapRef = useRef(null);
+  const [size, setSize] = useState({ w: 800, h: 280 });
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: Math.max(200, Math.floor(r.width)), h: 280 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const { cols, stats } = useParamStats(windows, searchSpace);
+
+  if (!cols.length || windows.length < 2) {
     return (
-      <div className="rounded-md border border-line bg-bg-elev/30 p-3">
-        <div className="text-xs font-mono text-text">{spec.name}</div>
-        <div className="text-[11px] text-muted mt-1">no picks recorded</div>
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Need at least 2 windows with numeric search-space params to chart drift.
       </div>
     );
   }
-  const stableTone = stats.stable ? "text-profit" : "text-amber-400";
-  const stableLabel = stats.stable ? "✓ stable" : "⚠ drifting";
+
+  // Compute z-scores per param per window.
+  const series = cols.map((spec, i) => {
+    const s = stats[spec.name];
+    const ys = windows.map((w) => {
+      const v = w.best_params?.[spec.name];
+      if (typeof v !== "number" || !s || s.stdev < 1e-9) return 0;
+      return (v - s.median) / s.stdev;
+    });
+    const palette = ["#3b82f6", "#22c55e", "#ef4444", "#f59e0b", "#a855f7", "#06b6d4", "#ec4899", "#84cc16"];
+    return { name: spec.name, ys, color: palette[i % palette.length], stable: stats[spec.name]?.stdev < 1e-9 ? true : Math.max(...ys.map(Math.abs)) < 1 };
+  });
+
+  const allZ = series.flatMap((s) => s.ys);
+  let yMin = Math.min(-1, ...allZ), yMax = Math.max(1, ...allZ);
+  const pad = (yMax - yMin) * 0.1 || 1;
+  yMin -= pad; yMax += pad;
+
+  const px = { l: 56, r: 130, t: 16, b: 26 };
+  const innerW = Math.max(1, size.w - px.l - px.r);
+  const innerH = Math.max(1, size.h - px.t - px.b);
+  const xOf = (i) => px.l + (windows.length <= 1 ? 0 : (i / (windows.length - 1)) * innerW);
+  const yOf = (z) => px.t + (1 - (z - yMin) / (yMax - yMin)) * innerH;
 
   return (
-    <div className="rounded-md border border-line bg-bg-elev/30 p-3 space-y-2">
-      <div className="flex items-center justify-between">
-        <div className="text-xs font-mono text-text">{spec.name}</div>
-        <span className={`text-[10px] font-mono ${stableTone}`}>{stableLabel}</span>
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="mb-2">
+        <div className="text-sm font-semibold text-text">Parameter drift across windows</div>
+        <div className="text-[11px] text-muted">
+          Each line = one optimized param, z-scored against its own median across windows.
+          Hugging zero = stable; swinging = drift / overfit signal.
+        </div>
       </div>
-      <div className="text-[11px] text-muted font-mono">
-        median <span className="text-text">{fmtNum(stats.median)}</span>
-        &nbsp;· mean <span className="text-text">{fmtNum(stats.mean)}</span>
-        &nbsp;· σ <span className="text-text">{fmtNum(stats.stdev)}</span>
-        &nbsp;· range <span className="text-text">{fmtNum(stats.range)}</span>
+      <div ref={wrapRef} className="relative w-full">
+        <svg width={size.w} height={size.h} className="block">
+          <line x1={px.l} x2={size.w - px.r} y1={yOf(0)} y2={yOf(0)} stroke="rgba(229,231,235,0.3)" strokeDasharray="2 3" strokeWidth="0.6" />
+          {[-2, -1, 1, 2].map((z) => (
+            yMin <= z && z <= yMax && (
+              <g key={z}>
+                <line x1={px.l} x2={size.w - px.r} y1={yOf(z)} y2={yOf(z)} stroke="rgba(229,231,235,0.05)" />
+                <text x={px.l - 6} y={yOf(z) + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {z}σ
+                </text>
+              </g>
+            )
+          ))}
+          {series.map((s) => {
+            const d = s.ys.map((y, i) =>
+              `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(y).toFixed(1)}`
+            ).join("");
+            return (
+              <g key={s.name}>
+                <path d={d} fill="none" stroke={s.color} strokeWidth="1.4" opacity="0.85" />
+                {s.ys.map((y, i) => (
+                  <circle key={i} cx={xOf(i)} cy={yOf(y)} r={2.5} fill={s.color}>
+                    <title>{s.name} window #{windows[i]?.window_idx} · z={fmtNum(y)}</title>
+                  </circle>
+                ))}
+              </g>
+            );
+          })}
+          {/* legend */}
+          {series.map((s, i) => (
+            <g key={`leg-${s.name}`} transform={`translate(${size.w - px.r + 8},${px.t + 4 + i * 16})`}>
+              <line x1={0} x2={14} y1={6} y2={6} stroke={s.color} strokeWidth="1.6" />
+              <text x={18} y={9} className="fill-text" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                {s.name}
+              </text>
+            </g>
+          ))}
+          {/* x axis */}
+          {[0, Math.floor(windows.length / 4), Math.floor(windows.length / 2), Math.floor(3 * windows.length / 4), windows.length - 1].filter((v, i, a) => a.indexOf(v) === i && v >= 0).map((i) => (
+            <text key={`x${i}`} x={xOf(i)} y={size.h - 8}
+                  textAnchor={i === 0 ? "start" : i === windows.length - 1 ? "end" : "middle"}
+                  className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+              #{windows[i]?.window_idx}
+            </text>
+          ))}
+        </svg>
       </div>
-      <div className="space-y-1">
-        <div className="text-[10px] uppercase tracking-wider text-muted">Top picks (rank · value · avg OOS Sharpe · windows)</div>
-        {buckets.map((b, i) => {
-          const tone = b.avgSharpe >= 1 ? "text-profit" : b.avgSharpe >= 0 ? "text-text" : "text-loss";
-          const medal = ["🥇", "🥈", "🥉", "4.", "5."][i] || `${i + 1}.`;
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OPTUNA — placeholder until C.4 fills in scatter charts
+// ---------------------------------------------------------------------------
+
+function OptunaTab({ result }) {
+  const windows = result.windows || [];
+  const searchSpace = result?.wf_spec?.search_space || [];
+  const trialCount = windows.reduce((sum, w) => sum + (w.optuna_trials?.length || 0), 0);
+
+  const numericParams = useMemo(
+    () => (searchSpace || []).filter((p) => p.type === "int" || p.type === "float").map((p) => p.name),
+    [searchSpace],
+  );
+  const [paramName, setParamName] = useState(numericParams[0] || "");
+  const [windowIdx, setWindowIdx] = useState(windows[0]?.window_idx ?? 1);
+
+  useEffect(() => {
+    if (numericParams.length && !numericParams.includes(paramName)) setParamName(numericParams[0]);
+  }, [numericParams, paramName]);
+
+  if (trialCount === 0) {
+    return (
+      <section className="space-y-3">
+        <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted">
+          <div className="text-text font-semibold mb-1">No Optuna trials recorded</div>
+          <div>
+            The result has no <span className="font-mono">optuna_trials</span> populated — re-run the walk-forward to capture trial history.
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3 text-xs">
+        <span className="text-muted">Window:</span>
+        <select
+          value={windowIdx}
+          onChange={(e) => setWindowIdx(Number(e.target.value))}
+          className="px-2 py-1 text-xs font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+        >
+          {windows.map((w) => (
+            <option key={w.window_idx} value={w.window_idx}>
+              #{w.window_idx} · {fmtDate(w.oos_start)} → {fmtDate(w.oos_end)} · OOS sharpe {fmtNum(w.oos_stats?.sharpe ?? 0)}
+            </option>
+          ))}
+        </select>
+        {numericParams.length > 0 && (
+          <>
+            <span className="text-muted ml-4">Param scatter:</span>
+            <select
+              value={paramName}
+              onChange={(e) => setParamName(e.target.value)}
+              className="px-2 py-1 text-xs font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+            >
+              {numericParams.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </>
+        )}
+      </div>
+
+      <OptunaTrialScatter window={windows.find((w) => w.window_idx === windowIdx) || windows[0]} />
+
+      {paramName && (
+        <OptunaParamScatter windows={windows} paramName={paramName} />
+      )}
+    </section>
+  );
+}
+
+// Trial-order scatter for one window with best-so-far step line.
+function OptunaTrialScatter({ window }) {
+  const wrapRef = useRef(null);
+  const [size, setSize] = useState({ w: 800, h: 280 });
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: Math.max(200, Math.floor(r.width)), h: 280 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const trials = window?.optuna_trials || [];
+  if (trials.length < 2) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Window #{window?.window_idx} has fewer than 2 trials.
+      </div>
+    );
+  }
+
+  const values = trials.map((t) => Number(t.value));
+  const finite = values.filter((v) => Number.isFinite(v));
+  if (!finite.length) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        All trial values are non-finite for window #{window.window_idx}.
+      </div>
+    );
+  }
+  let yMin = Math.min(...finite), yMax = Math.max(...finite);
+  if (yMin === yMax) yMax = yMin + 1;
+  const pad = (yMax - yMin) * 0.08 || 0.1;
+  yMin -= pad; yMax += pad;
+
+  // best-so-far step line (TPE max-objective convention).
+  const bestSoFar = [];
+  let best = -Infinity;
+  for (const v of values) {
+    if (Number.isFinite(v) && v > best) best = v;
+    bestSoFar.push(best);
+  }
+
+  const px = { l: 56, r: 16, t: 16, b: 30 };
+  const innerW = Math.max(1, size.w - px.l - px.r);
+  const innerH = Math.max(1, size.h - px.t - px.b);
+  const xOf = (i) => px.l + (trials.length <= 1 ? 0 : (i / (trials.length - 1)) * innerW);
+  const yOf = (v) => px.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+
+  const bestPath = bestSoFar.map((v, i) =>
+    Number.isFinite(v) ? `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}` : ""
+  ).join("");
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-sm font-semibold text-text">Window #{window.window_idx} trial trace</div>
+          <div className="text-[11px] text-muted">
+            {trials.length} trials. Best-so-far step line shows how quickly Optuna converged.
+          </div>
+        </div>
+      </div>
+      <div ref={wrapRef} className="relative w-full">
+        <svg width={size.w} height={size.h} className="block">
+          {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+            const v = yMin + (yMax - yMin) * (1 - p);
+            return (
+              <g key={i}>
+                <line x1={px.l} x2={size.w - px.r} y1={px.t + p * innerH} y2={px.t + p * innerH}
+                      stroke="rgba(229,231,235,0.05)" />
+                <text x={px.l - 6} y={px.t + p * innerH + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {fmtNum(v)}
+                </text>
+              </g>
+            );
+          })}
+          {values.map((v, i) => Number.isFinite(v) && (
+            <circle key={i} cx={xOf(i)} cy={yOf(v)} r={2.5} fill="#94a3b8" fillOpacity="0.55">
+              <title>trial {i}: {fmtNum(v)}</title>
+            </circle>
+          ))}
+          <path d={bestPath} fill="none" stroke="#3b82f6" strokeWidth="1.6" />
+          <text x={px.l} y={size.h - 10} textAnchor="start"
+                className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">trial 0</text>
+          <text x={size.w - px.r} y={size.h - 10} textAnchor="end"
+                className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">trial {trials.length - 1}</text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// Param-value vs trial-score scatter across ALL windows for one param.
+function OptunaParamScatter({ windows, paramName }) {
+  const wrapRef = useRef(null);
+  const [size, setSize] = useState({ w: 800, h: 280 });
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: Math.max(200, Math.floor(r.width)), h: 280 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const pts = [];
+  for (const w of windows) {
+    for (const t of (w.optuna_trials || [])) {
+      const x = t.params?.[paramName];
+      const y = Number(t.value);
+      if (typeof x === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+        pts.push({ x, y, idx: w.window_idx });
+      }
+    }
+  }
+  if (pts.length < 5) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Not enough trials to scatter for {paramName}.
+      </div>
+    );
+  }
+
+  let xMin = Math.min(...pts.map((p) => p.x)), xMax = Math.max(...pts.map((p) => p.x));
+  let yMin = Math.min(...pts.map((p) => p.y)), yMax = Math.max(...pts.map((p) => p.y));
+  if (xMin === xMax) xMax = xMin + 1;
+  if (yMin === yMax) yMax = yMin + 1;
+  const xPad = (xMax - xMin) * 0.06, yPad = (yMax - yMin) * 0.08;
+  xMin -= xPad; xMax += xPad; yMin -= yPad; yMax += yPad;
+
+  const px = { l: 56, r: 16, t: 16, b: 36 };
+  const innerW = Math.max(1, size.w - px.l - px.r);
+  const innerH = Math.max(1, size.h - px.t - px.b);
+  const xOf = (v) => px.l + ((v - xMin) / (xMax - xMin)) * innerW;
+  const yOf = (v) => px.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+
+  // Color by window index so the user can spot if early windows preferred
+  // different param values than later ones (regime shift).
+  const maxIdx = Math.max(...pts.map((p) => p.idx)) || 1;
+  const colorOf = (idx) => {
+    const t = idx / maxIdx;
+    return `hsl(${(220 + t * 100) | 0}, 70%, 60%)`;
+  };
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="mb-2">
+        <div className="text-sm font-semibold text-text">{paramName} vs trial score (all windows)</div>
+        <div className="text-[11px] text-muted">
+          Color shades from blue (early windows) → magenta (late). Clusters at a particular x value =
+          Optuna preferred that param value across many windows.
+        </div>
+      </div>
+      <div ref={wrapRef} className="relative w-full">
+        <svg width={size.w} height={size.h} className="block">
+          {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+            const v = yMin + (yMax - yMin) * (1 - p);
+            return (
+              <g key={i}>
+                <line x1={px.l} x2={size.w - px.r} y1={px.t + p * innerH} y2={px.t + p * innerH}
+                      stroke="rgba(229,231,235,0.05)" />
+                <text x={px.l - 6} y={px.t + p * innerH + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {fmtNum(v)}
+                </text>
+              </g>
+            );
+          })}
+          {pts.map((p, i) => (
+            <circle key={i} cx={xOf(p.x)} cy={yOf(p.y)} r={2.5} fill={colorOf(p.idx)} fillOpacity="0.6">
+              <title>#{p.idx}: {paramName}={fmtNum(p.x)}, score={fmtNum(p.y)}</title>
+            </circle>
+          ))}
+          {[0, 0.25, 0.5, 0.75, 1].map((p, i) => {
+            const v = xMin + (xMax - xMin) * p;
+            return (
+              <text key={`x${i}`} x={px.l + p * innerW} y={size.h - 18}
+                    textAnchor={p === 0 ? "start" : p === 1 ? "end" : "middle"}
+                    className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                {fmtNum(v)}
+              </text>
+            );
+          })}
+          <text x={px.l + innerW / 2} y={size.h - 4} textAnchor="middle"
+                className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+            {paramName}
+          </text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ROBUSTNESS — robustness KPI tiles (C.5 adds the fan chart)
+// ---------------------------------------------------------------------------
+
+function RobustnessTab({ result }) {
+  const rob = result?.analytics?.advanced?.robustness || result?.analytics?.robustness || {};
+  const fmtProb = (v) => v == null ? "—" : `${fmtNum(v * 100)}%`;
+  return (
+    <section className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Kpi
+          title="Deflated Sharpe"
+          value={fmtProb(rob.deflated_sharpe_probability)}
+          sub="P(Sharpe > 0 | overfit-adjusted)"
+          positive={rob.deflated_sharpe_probability != null ? rob.deflated_sharpe_probability >= 0.9 : null}
+        />
+        <Kpi
+          title="WF Efficiency"
+          value={rob.walk_forward_efficiency == null ? "—" : fmtNum(rob.walk_forward_efficiency)}
+          sub="median OOS / IS Sharpe"
+          positive={rob.walk_forward_efficiency != null ? rob.walk_forward_efficiency >= 0.5 : null}
+        />
+        <Kpi
+          title="Parameter stability"
+          value={rob.parameter_stability_score == null ? "—" : fmtNum(rob.parameter_stability_score)}
+          sub="higher = flatter optimum"
+          positive={rob.parameter_stability_score != null ? rob.parameter_stability_score >= 0.5 : null}
+        />
+        <Kpi
+          title="% windows positive"
+          value={rob.pct_windows_positive_oos == null ? "—" : `${fmtNum(rob.pct_windows_positive_oos * 100)}%`}
+          sub="OOS Sharpe > 0"
+          positive={rob.pct_windows_positive_oos != null ? rob.pct_windows_positive_oos >= 0.6 : null}
+        />
+      </div>
+      <WFEquityFanChart result={result} />
+    </section>
+  );
+}
+
+// Per-fold OOS equity quantile fan chart. Each window's OOS sub-curve is
+// rebased to "% of starting capital" and resampled onto a common N-step grid,
+// then we compute p10/p25/p50/p75/p90 per step.
+function WFEquityFanChart({ result }) {
+  const wrapRef = useRef(null);
+  const [size, setSize] = useState({ w: 800, h: 320 });
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: Math.max(200, Math.floor(r.width)), h: 320 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const bands = useMemo(() => {
+    const windows = result.windows || [];
+    const equity = result.equity || [];
+    if (windows.length < 2 || equity.length === 0) return null;
+
+    const N = 40; // resample resolution
+    const matrix = [];
+    for (const w of windows) {
+      if (w.oos_start == null || w.oos_end == null) continue;
+      const slice = equity.filter((p) => p.time >= w.oos_start && p.time <= w.oos_end);
+      if (slice.length < 2) continue;
+      const base = slice[0].equity || slice[0].value || 1;
+      if (base <= 0) continue;
+      // Rebase each window so it starts at 100 (% of carry-equity at window start).
+      const rebased = slice.map((p) => (p.equity ? p.equity / base : p.value / slice[0].value) * 100);
+      // Resample to uniform N points by linear interpolation in index space.
+      const out = new Array(N);
+      for (let i = 0; i < N; i++) {
+        const idx = (i / (N - 1)) * (rebased.length - 1);
+        const lo = Math.floor(idx), hi = Math.ceil(idx);
+        const t = idx - lo;
+        out[i] = rebased[lo] * (1 - t) + rebased[hi] * t;
+      }
+      matrix.push(out);
+    }
+    if (matrix.length < 2) return null;
+
+    const pct = (arr, p) => {
+      const s = [...arr].sort((a, b) => a - b);
+      const idx = (s.length - 1) * (p / 100);
+      const lo = Math.floor(idx), hi = Math.ceil(idx);
+      return s[lo] * (hi - idx) + s[hi] * (idx - lo);
+    };
+    const bands = { p10: [], p25: [], p50: [], p75: [], p90: [] };
+    for (let i = 0; i < N; i++) {
+      const col = matrix.map((row) => row[i]);
+      bands.p10.push(pct(col, 10));
+      bands.p25.push(pct(col, 25));
+      bands.p50.push(pct(col, 50));
+      bands.p75.push(pct(col, 75));
+      bands.p90.push(pct(col, 90));
+    }
+    return { bands, N, nWindows: matrix.length };
+  }, [result]);
+
+  if (!bands) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Need at least 2 windows with OOS equity to build a fan chart.
+      </div>
+    );
+  }
+
+  const pad = { l: 56, r: 16, t: 16, b: 26 };
+  const innerW = Math.max(1, size.w - pad.l - pad.r);
+  const innerH = Math.max(1, size.h - pad.t - pad.b);
+
+  const all = [...bands.bands.p10, ...bands.bands.p90];
+  let yMin = Math.min(100, ...all);
+  let yMax = Math.max(100, ...all);
+  const yPad = (yMax - yMin) * 0.06 || 1;
+  yMin -= yPad; yMax += yPad;
+
+  const xOf = (i) => pad.l + (i / (bands.N - 1)) * innerW;
+  const yOf = (v) => pad.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+
+  const lineOf = (series) => series.map((v, i) =>
+    `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`
+  ).join("");
+  const bandOf = (lo, hi) => {
+    const up = lo.map((v, i) => `${i === 0 ? "M" : "L"}${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join("");
+    const dn = [...hi].reverse().map((v, i) => {
+      const idx = hi.length - 1 - i;
+      return `L${xOf(idx).toFixed(1)},${yOf(v).toFixed(1)}`;
+    }).join("");
+    return `${up}${dn}Z`;
+  };
+
+  const yTicks = Array.from({ length: 5 }, (_, i) => {
+    const v = yMin + ((yMax - yMin) * i) / 4;
+    return { v, y: yOf(v) };
+  });
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-sm font-semibold text-text">Per-fold OOS equity fan</div>
+          <div className="text-[11px] text-muted">
+            Each window's OOS curve rebased to 100% at its start, resampled, stacked. Bands show
+            p10/p25/p50/p75/p90 across {bands.nWindows} windows. Bands hugging 100 = consistent edge;
+            wide spread = regime-dependent.
+          </div>
+        </div>
+        <div className="text-[10px] font-mono text-muted flex items-center gap-3">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm" style={{ background: "rgba(59,130,246,0.12)" }} />
+            p10–p90
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm" style={{ background: "rgba(59,130,246,0.25)" }} />
+            p25–p75
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-3 h-0.5 bg-[#3b82f6]" />
+            median
+          </span>
+        </div>
+      </div>
+      <div ref={wrapRef} className="relative w-full">
+        <svg width={size.w} height={size.h} className="block">
+          <line x1={pad.l} x2={size.w - pad.r} y1={yOf(100)} y2={yOf(100)}
+                stroke="rgba(229,231,235,0.3)" strokeDasharray="2 3" strokeWidth="0.6" />
+          <path d={bandOf(bands.bands.p10, bands.bands.p90)} fill="rgba(59,130,246,0.12)" />
+          <path d={bandOf(bands.bands.p25, bands.bands.p75)} fill="rgba(59,130,246,0.25)" />
+          <path d={lineOf(bands.bands.p50)} fill="none" stroke="#3b82f6" strokeWidth="1.6" />
+          {yTicks.map((tk, i) => (
+            <g key={i}>
+              <line x1={pad.l} x2={size.w - pad.r} y1={tk.y} y2={tk.y}
+                    stroke="rgba(229,231,235,0.06)" />
+              <text x={pad.l - 6} y={tk.y + 3} textAnchor="end"
+                    className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                {fmtNum(tk.v)}%
+              </text>
+            </g>
+          ))}
+          <text x={pad.l} y={size.h - 8} textAnchor="start"
+                className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">window start</text>
+          <text x={size.w - pad.r} y={size.h - 8} textAnchor="end"
+                className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">window end</text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// REGIME — needs Phase B oos_realized_vol (placeholder until then)
+// ---------------------------------------------------------------------------
+
+function RegimeTab({ result }) {
+  const windows = result.windows || [];
+  const withVol = useMemo(
+    () => windows.filter((w) => w.oos_realized_vol != null && w.oos_stats),
+    [windows],
+  );
+
+  if (withVol.length < 3) {
+    return (
+      <section className="space-y-3">
+        <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted">
+          <div className="text-text font-semibold mb-1">Regime bucketing by realized volatility</div>
+          <div>
+            Need at least 3 windows with <span className="font-mono">oos_realized_vol</span> populated.
+            Re-run a walk-forward after the Phase B.2 backend changes to enable this view.
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  // Tercile bucket by realized vol of the underlying.
+  const sorted = [...withVol].sort((a, b) => a.oos_realized_vol - b.oos_realized_vol);
+  const n = sorted.length;
+  const t1 = Math.floor(n / 3);
+  const t2 = Math.floor((2 * n) / 3);
+  const buckets = [
+    { label: "Low vol", tone: "profit", windows: sorted.slice(0, t1) },
+    { label: "Mid vol", tone: "neutral", windows: sorted.slice(t1, t2) },
+    { label: "High vol", tone: "loss", windows: sorted.slice(t2) },
+  ];
+
+  const summarize = (ws) => {
+    if (!ws.length) return null;
+    const sharpes = ws.map((w) => w.oos_stats?.sharpe ?? 0);
+    const rets    = ws.map((w) => w.oos_stats?.total_return_pct ?? 0);
+    const dds     = ws.map((w) => Math.abs(w.oos_stats?.max_drawdown_pct ?? 0));
+    const wins    = ws.map((w) => w.oos_stats?.win_rate ?? 0);
+    const vols    = ws.map((w) => w.oos_realized_vol);
+    const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+    return {
+      sharpe: mean(sharpes),
+      ret:    mean(rets),
+      dd:     mean(dds),
+      win:    mean(wins),
+      volLo:  Math.min(...vols),
+      volHi:  Math.max(...vols),
+      n:      ws.length,
+    };
+  };
+
+  return (
+    <section className="space-y-4">
+      <div className="rounded-xl border border-line bg-bg-panel/40 p-3 text-xs text-muted">
+        <span className="text-text">Realized volatility</span> is the annualized std of log-returns on the
+        underlying close, per OOS window. Windows are bucketed into terciles —
+        compare per-bucket Sharpe to see if the strategy needs a vol filter.
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {buckets.map((b) => {
+          const stats = summarize(b.windows);
+          const tone = b.tone === "profit" ? "border-profit/40 bg-profit/5" :
+                       b.tone === "loss"   ? "border-loss/40 bg-loss/5" :
+                                              "border-line bg-bg-elev/30";
           return (
-            <div key={i} className="flex items-center gap-2 text-[11px] font-mono">
-              <span className="w-6 text-muted">{medal}</span>
-              <span className="w-16 text-text">{spec.type === "int" ? fmtInt(b.value) : fmtNum(b.value)}</span>
-              <span className={`flex-1 ${tone}`}>sharpe {fmtNum(b.avgSharpe)}</span>
-              <span className="text-muted">ret {fmtPct(b.avgRet)}</span>
-              <span className="text-muted">{b.count}w</span>
+            <div key={b.label} className={`rounded-md border ${tone} p-3 space-y-2`}>
+              <div className="text-sm font-semibold text-text">{b.label} ({stats?.n ?? 0} windows)</div>
+              {stats ? (
+                <>
+                  <div className="text-[11px] font-mono text-muted">
+                    realized vol: {fmtNum(stats.volLo)}% – {fmtNum(stats.volHi)}%
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[12px] font-mono">
+                    <span className="text-muted">avg Sharpe</span>
+                    <span className={stats.sharpe >= 1 ? "text-profit" : stats.sharpe >= 0 ? "text-text" : "text-loss"}>
+                      {fmtNum(stats.sharpe)}
+                    </span>
+                    <span className="text-muted">avg return</span>
+                    <span className={stats.ret >= 0 ? "text-profit" : "text-loss"}>
+                      {fmtPct(stats.ret)}
+                    </span>
+                    <span className="text-muted">avg max DD</span>
+                    <span className="text-loss">{fmtPct(stats.dd, false)}</span>
+                    <span className="text-muted">avg win rate</span>
+                    <span className="text-text">{fmtNum(stats.win * 100)}%</span>
+                  </div>
+                </>
+              ) : (
+                <div className="text-[11px] text-muted">no windows in bucket</div>
+              )}
             </div>
           );
         })}
       </div>
-    </div>
-  );
-}
 
-// ---------------------------------------------------------------------------
-// Window Rankings — best & worst OOS windows side-by-side.
-// ---------------------------------------------------------------------------
-
-function WindowRankings({ windows }) {
-  const ranked = useMemo(() => {
-    if (!windows || windows.length < 3) return [];
-    return [...windows]
-      .map((w, i) => ({ w, originalIdx: i, sharpe: w.oos_stats?.sharpe ?? 0, ret: w.oos_stats?.total_return_pct ?? 0 }))
-      .sort((a, b) => b.sharpe - a.sharpe);
-  }, [windows]);
-
-  if (ranked.length === 0) return null;
-  const top3 = ranked.slice(0, 3);
-  const bot3 = ranked.slice(-3).reverse();
-
-  return (
-    <section className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
-      <div>
-        <div className="text-sm font-semibold text-text">Window Rankings</div>
-        <div className="text-xs text-muted">
-          Best and worst OOS windows by Sharpe. Big gap between top and bottom = inconsistent — strategy is regime-sensitive.
-        </div>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <RankBlock title="🏆 Top 3 windows" items={top3} tone="profit" />
-        <RankBlock title="📉 Bottom 3 windows" items={bot3} tone="loss" />
-      </div>
+      <RegimeScatter windows={withVol} />
     </section>
   );
 }
 
-function RankBlock({ title, items, tone }) {
-  const headTone = tone === "profit" ? "text-profit" : "text-loss";
+function RegimeScatter({ windows }) {
+  const wrapRef = useRef(null);
+  const [size, setSize] = useState({ w: 800, h: 320 });
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      setSize({ w: Math.max(200, Math.floor(r.width)), h: 320 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const pad = { l: 56, r: 16, t: 16, b: 36 };
+  const innerW = Math.max(1, size.w - pad.l - pad.r);
+  const innerH = Math.max(1, size.h - pad.t - pad.b);
+
+  const pts = windows
+    .filter((w) => w.oos_realized_vol != null && w.oos_stats?.sharpe != null)
+    .map((w) => ({ x: w.oos_realized_vol, y: w.oos_stats.sharpe, idx: w.window_idx }));
+
+  if (pts.length < 3) {
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
+        Not enough windows to scatter.
+      </div>
+    );
+  }
+
+  let xMin = Math.min(...pts.map((p) => p.x));
+  let xMax = Math.max(...pts.map((p) => p.x));
+  let yMin = Math.min(0, ...pts.map((p) => p.y));
+  let yMax = Math.max(0, ...pts.map((p) => p.y));
+  const xPad = (xMax - xMin) * 0.06 || 1e-6;
+  const yPad = (yMax - yMin) * 0.08 || 0.1;
+  xMin -= xPad; xMax += xPad; yMin -= yPad; yMax += yPad;
+
+  const xOf = (v) => pad.l + ((v - xMin) / (xMax - xMin)) * innerW;
+  const yOf = (v) => pad.t + (1 - (v - yMin) / (yMax - yMin)) * innerH;
+
+  // Simple linear regression y = a + b*x for the trendline.
+  const n = pts.length;
+  const xm = pts.reduce((s, p) => s + p.x, 0) / n;
+  const ym = pts.reduce((s, p) => s + p.y, 0) / n;
+  let num = 0, den = 0;
+  for (const p of pts) { num += (p.x - xm) * (p.y - ym); den += (p.x - xm) ** 2; }
+  const slope = den > 0 ? num / den : 0;
+  const intercept = ym - slope * xm;
+  const trendY = (x) => intercept + slope * x;
+
+  const xTicks = Array.from({ length: 5 }, (_, i) => {
+    const v = xMin + ((xMax - xMin) * i) / 4;
+    return { v, x: xOf(v), anchor: i === 0 ? "start" : i === 4 ? "end" : "middle" };
+  });
+  const yTicks = Array.from({ length: 5 }, (_, i) => {
+    const v = yMin + ((yMax - yMin) * i) / 4;
+    return { v, y: yOf(v) };
+  });
+
+  // Color by tercile rank on x for visual link to the bucket cards.
+  const sortedX = [...pts].map((p) => p.x).sort((a, b) => a - b);
+  const t1 = sortedX[Math.floor(sortedX.length / 3)];
+  const t2 = sortedX[Math.floor(2 * sortedX.length / 3)];
+  const colorOf = (x) => x <= t1 ? "#22c55e" : x <= t2 ? "#94a3b8" : "#ef4444";
+
   return (
-    <div className="rounded-md border border-line bg-bg-elev/30 p-3 space-y-2">
-      <div className={`text-xs font-semibold ${headTone}`}>{title}</div>
-      {items.map(({ w, sharpe, ret }, i) => {
-        const medal = i === 0 ? (tone === "profit" ? "🥇" : "🚨") : i === 1 ? (tone === "profit" ? "🥈" : "⚠") : (tone === "profit" ? "🥉" : "·");
-        return (
-          <div key={w.window_idx} className="text-[11px] font-mono space-y-0.5 pb-1 border-b border-line/30 last:border-b-0">
-            <div className="flex items-center justify-between">
-              <span className="text-text">
-                {medal} <span className="text-muted">#{w.window_idx}</span>
-                &nbsp;{fmtDate(w.oos_start)} → {fmtDate(w.oos_end)}
-              </span>
-              <span className={tone === "profit" ? "text-profit" : "text-loss"}>
-                Sharpe {fmtNum(sharpe)} · {fmtPct(ret)}
-              </span>
-            </div>
-            <div className="text-muted/80 truncate">
-              {Object.entries(w.best_params || {})
-                .filter(([k]) => !["sessions", "sides"].includes(k))
-                .slice(0, 4)
-                .map(([k, v]) => `${k}=${typeof v === "number" ? fmtNum(v) : v}`)
-                .join(" · ")}
-            </div>
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className="text-sm font-semibold text-text">Realized vol → OOS Sharpe</div>
+          <div className="text-[11px] text-muted">
+            Each dot = one window. Slope = {fmtNum(slope)} Sharpe per +1% vol.
+            {Math.abs(slope) > 0.05
+              ? slope > 0 ? " Edge is vol-favored (does better in high vol)."
+                          : " Edge is vol-averse (decays in high vol)."
+              : " Edge is largely regime-agnostic."}
           </div>
-        );
-      })}
+        </div>
+      </div>
+      <div ref={wrapRef} className="relative w-full">
+        <svg width={size.w} height={size.h} className="block">
+          <line x1={pad.l} x2={size.w - pad.r} y1={yOf(0)} y2={yOf(0)}
+                stroke="rgba(229,231,235,0.25)" strokeDasharray="2 3" strokeWidth="0.6" />
+          <line x1={xOf(xMin)} x2={xOf(xMax)} y1={yOf(trendY(xMin))} y2={yOf(trendY(xMax))}
+                stroke="#3b82f6" strokeWidth="1.3" />
+          {pts.map((p, i) => (
+            <circle key={i} cx={xOf(p.x)} cy={yOf(p.y)} r={4}
+                    fill={colorOf(p.x)} fillOpacity="0.85" stroke="rgba(0,0,0,0.3)" strokeWidth="0.5">
+              <title>#{p.idx} · vol {fmtNum(p.x)}% · Sharpe {fmtNum(p.y)}</title>
+            </circle>
+          ))}
+          {yTicks.map((tk, i) => (
+            <g key={`y${i}`}>
+              <line x1={pad.l} x2={size.w - pad.r} y1={tk.y} y2={tk.y}
+                    stroke="rgba(229,231,235,0.06)" />
+              <text x={pad.l - 6} y={tk.y + 3} textAnchor="end"
+                    className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                {fmtNum(tk.v)}
+              </text>
+            </g>
+          ))}
+          {xTicks.map((tk, i) => (
+            <text key={`x${i}`} x={tk.x} y={size.h - 16} textAnchor={tk.anchor}
+                  className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+              {fmtNum(tk.v)}%
+            </text>
+          ))}
+          <text x={pad.l + innerW / 2} y={size.h - 2} textAnchor="middle"
+                className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+            realized vol (annualized %)
+          </text>
+        </svg>
+      </div>
     </div>
   );
 }
 
-function WalkForwardAIInsights({ result }) {
-  const [loading, setLoading] = useState(false);
-  const [data, setData] = useState(null);
-  const [err, setErr] = useState(null);
+// ---------------------------------------------------------------------------
+// AI — per-section caching (mirrors Analytics' AITab)
+// ---------------------------------------------------------------------------
 
-  async function onRun() {
-    setLoading(true); setErr(null);
+const AI_SECTIONS = [
+  { id: "overview",   label: "Overview",   hint: "Headline OOS performance, deploy verdict." },
+  { id: "folds",      label: "Folds",      hint: "Per-window consistency, IS-vs-OOS gap." },
+  { id: "parameters", label: "Parameters", hint: "Parameter drift across windows." },
+  { id: "robustness", label: "Robustness", hint: "Deflated Sharpe, WFE, stability." },
+  { id: "regime",     label: "Regime",     hint: "Performance vs realized vol of underlying." },
+];
+
+function AITab({ result }) {
+  const [byId, setById] = useState({});
+  const [loadingId, setLoadingId] = useState(null);
+  const [selected, setSelected] = useState("overview");
+
+  async function runSection(id) {
+    setLoadingId(id);
     try {
-      setData(await aiAnalyzeWalkForward(result));
+      const data = await aiAnalyzeWalkForwardSection(result, id);
+      setById((m) => ({ ...m, [id]: data }));
     } catch (e) {
-      setErr(e?.response?.data?.error || e.message || "AI analysis failed");
+      setById((m) => ({ ...m, [id]: { error: e?.response?.data?.error || e.message || "AI analysis failed" } }));
     } finally {
-      setLoading(false);
+      setLoadingId(null);
     }
   }
 
-  return (
-    <div className="rounded-xl border border-accent-blue/30 bg-accent-blue/5 p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-[10px] uppercase tracking-wider text-accent-blue">AI Insights · Claude Haiku 4.5</div>
-          <div className="text-xs text-muted mt-0.5">
-            Claude reviews OOS performance, parameter drift, and IS-vs-OOS degradation.
-          </div>
-        </div>
-        <button onClick={onRun} disabled={loading}
-          className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50">
-          {loading ? "Analyzing…" : (data ? "Re-run AI Analysis" : "Run AI Analysis")}
-        </button>
-      </div>
-      {err && <div className="text-sm text-loss font-mono">{err}</div>}
-      {loading && (
-        <div className="text-xs text-muted font-mono">
-          Claude is reasoning (adaptive thinking enabled) — usually 20–40s…
-        </div>
-      )}
-      {data?.text && (
-        <div className="text-sm text-text leading-relaxed whitespace-pre-wrap">{data.text}</div>
-      )}
-      {data?.usage && (
-        <div className="text-[10px] text-muted font-mono pt-1 border-t border-line/30">
-          {data.model} · in {data.usage.input_tokens}t · out {data.usage.output_tokens}t
-          {data.usage.cache_read_input_tokens > 0 && ` · cache hit ${data.usage.cache_read_input_tokens}t`}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Per-window heatmap — rows = windows chronological, cols = optimized params.
-// Cell color = signed deviation from the column's median (warm = above,
-// cool = below). Solid block = stable / robust params; color swings = drift.
-// Click a row to expand the existing WindowCard inline with full detail.
-// ---------------------------------------------------------------------------
-
-function WindowHeatmap({ windows, searchSpace }) {
-  const [selectedIdx, setSelectedIdx] = useState(null);
-
-  // Pick out numeric search-space params and compute their distribution stats.
-  // sides/sessions are skipped (no numeric distance metric makes sense).
-  const { cols, stats } = useMemo(() => {
-    const cols = (searchSpace || []).filter((spec) =>
-      windows.some((w) => {
-        const v = w.best_params?.[spec.name];
-        return typeof v === "number" && Number.isFinite(v);
-      })
-    );
-    const stats = {};
-    for (const spec of cols) {
-      const vals = windows
-        .map((w) => w.best_params?.[spec.name])
-        .filter((v) => typeof v === "number" && Number.isFinite(v));
-      if (!vals.length) continue;
-      const sorted = [...vals].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
-      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length;
-      const stdev = Math.sqrt(variance);
-      stats[spec.name] = {
-        median, mean, stdev,
-        min: sorted[0],
-        max: sorted[sorted.length - 1],
-      };
+  async function runAll() {
+    for (const sec of AI_SECTIONS) {
+      if (byId[sec.id] && !byId[sec.id].error) continue;
+      await runSection(sec.id);
     }
-    return { cols, stats };
-  }, [windows, searchSpace]);
-
-  if (!windows.length) {
-    return (
-      <section className="rounded-xl border border-line bg-bg-panel/60 p-4">
-        <div className="text-[11px] uppercase tracking-wider text-muted">Per-window results</div>
-        <div className="text-sm text-muted mt-2">no windows</div>
-      </section>
-    );
-  }
-  if (!cols.length) {
-    // Fallback when nothing numeric was optimized — just show the cards.
-    return (
-      <div className="space-y-2">
-        <div className="text-[11px] uppercase tracking-wider text-muted">Per-window results</div>
-        {windows.map((w) => <WindowCard key={w.window_idx} w={w} />)}
-      </div>
-    );
   }
 
-  // Signed-z color: amber-ish above median, blue-ish below. Alpha scales with
-  // |z|, clamped so very stable cells stay readable and outliers stand out.
-  function colorFor(specName, value) {
-    const s = stats[specName];
-    if (!s || !Number.isFinite(value)) return null;
-    if (s.stdev < 1e-9) return "rgba(120,120,140,0.06)";
-    const z = (value - s.median) / s.stdev;
-    const alpha = Math.min(0.7, Math.abs(z) * 0.32);
-    if (alpha < 0.04) return null;
-    return z >= 0
-      ? `rgba(251, 191, 36, ${alpha.toFixed(3)})`   // amber-400
-      : `rgba(96, 165, 250, ${alpha.toFixed(3)})`;  // blue-400
-  }
-
-  const fmtVal = (spec, v) => (spec.type === "int" ? fmtInt(v) : fmtNum(v));
+  const current = byId[selected];
 
   return (
-    <section className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
-      <div className="flex items-baseline justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-sm font-semibold text-text">Per-window heatmap</div>
-          <div className="text-xs text-muted mt-0.5">
-            Rows = windows (chronological). Cells colored by deviation from each column's median:{" "}
-            <span className="px-1.5 py-0.5 rounded text-text" style={{ backgroundColor: "rgba(251,191,36,0.45)" }}>warmer</span>
-            {" "}above,{" "}
-            <span className="px-1.5 py-0.5 rounded text-text" style={{ backgroundColor: "rgba(96,165,250,0.45)" }}>cooler</span>
-            {" "}below. Solid block = robust; color swings = parameter drift. Click a row for details.
+    <div className="space-y-4">
+      <div className="rounded-xl border border-accent-blue/30 bg-accent-blue/5 p-4 space-y-3">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <div className="text-[10px] uppercase tracking-wider text-accent-blue">AI Analysis · Claude Haiku 4.5</div>
+            <div className="text-xs text-muted mt-0.5">
+              Each section gives a focused 2–4 paragraph read of that tab's data. Pick one, or run them all.
+            </div>
           </div>
-        </div>
-        {selectedIdx != null && (
-          <button
-            type="button"
-            onClick={() => setSelectedIdx(null)}
-            className="text-[11px] font-mono text-muted hover:text-text underline underline-offset-2"
-          >
-            clear selection
+          <button onClick={runAll} disabled={loadingId != null}
+            className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50">
+            {loadingId ? `Running ${loadingId}…` : "Run all sections"}
           </button>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          {AI_SECTIONS.map((sec) => {
+            const has = byId[sec.id] && !byId[sec.id].error;
+            const err = byId[sec.id] && byId[sec.id].error;
+            const isLoading = loadingId === sec.id;
+            const isSelected = selected === sec.id;
+            return (
+              <button key={sec.id}
+                onClick={() => { setSelected(sec.id); if (!has && !isLoading) runSection(sec.id); }}
+                disabled={isLoading}
+                className={`text-left px-3 py-2 rounded-md border text-xs transition ${
+                  isSelected
+                    ? "border-accent-blue bg-accent-blue/10 text-text"
+                    : "border-line bg-bg-elev/30 text-muted hover:text-text hover:border-accent-blue/40"
+                }`}
+                title={sec.hint}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium text-text">{sec.label}</span>
+                  <span className="text-[10px] font-mono">
+                    {isLoading ? "…" : has ? "✓" : err ? "✗" : ""}
+                  </span>
+                </div>
+                <div className="text-[10px] text-muted/80 mt-0.5">{sec.hint}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-5 min-h-[200px]">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold text-text">
+            {AI_SECTIONS.find((s) => s.id === selected)?.label} — Analysis
+          </div>
+          {current && !current.error && (
+            <button onClick={() => runSection(selected)} disabled={loadingId === selected}
+              className="text-[11px] text-accent-blue hover:underline disabled:opacity-50">
+              Re-run
+            </button>
+          )}
+        </div>
+
+        {loadingId === selected && (
+          <div className="text-xs text-muted font-mono">
+            Claude Haiku is analyzing — usually 5–10s…
+          </div>
+        )}
+
+        {!current && loadingId !== selected && (
+          <div className="text-sm text-muted">
+            Click a section above to generate analysis.
+          </div>
+        )}
+
+        {current?.error && (
+          <div className="text-sm text-loss font-mono">{current.error}</div>
+        )}
+
+        {current?.text && (
+          <div className="space-y-2 text-sm text-text leading-relaxed whitespace-pre-wrap">
+            {current.text}
+          </div>
+        )}
+
+        {current?.usage && (
+          <div className="text-[10px] text-muted font-mono pt-3 mt-3 border-t border-line/30">
+            {current.model} · in {current.usage.input_tokens}t · out {current.usage.output_tokens}t
+            {current.usage.cache_read_input_tokens > 0 && ` · cache hit ${current.usage.cache_read_input_tokens}t`}
+          </div>
         )}
       </div>
-
-      <div className="overflow-x-auto -mx-1 px-1">
-        <table className="min-w-full text-[11px] font-mono border-separate" style={{ borderSpacing: "0 2px" }}>
-          <thead>
-            <tr className="text-muted">
-              <th className="text-left px-2 py-1 sticky left-0 z-10 bg-bg-panel/95 backdrop-blur">Window</th>
-              {cols.map((spec) => (
-                <th key={spec.name} className="text-left px-2 py-1 whitespace-nowrap align-bottom">
-                  <div className="text-text/90">{spec.name}</div>
-                  <div className="text-[9px] text-muted/70 font-normal">
-                    med {fmtVal(spec, stats[spec.name].median)} · σ {fmtNum(stats[spec.name].stdev)}
-                  </div>
-                </th>
-              ))}
-              <th className="text-right px-2 py-1 whitespace-nowrap">OOS %</th>
-              <th className="text-right px-2 py-1 whitespace-nowrap">Sharpe</th>
-              <th className="text-right px-2 py-1 whitespace-nowrap">t</th>
-            </tr>
-          </thead>
-          <tbody>
-            {windows.map((w) => {
-              const os = w.oos_stats || {};
-              const ret = os.total_return_pct ?? 0;
-              const pos = ret >= 0;
-              const selected = selectedIdx === w.window_idx;
-              const rowCls = selected
-                ? "outline outline-1 outline-accent-blue/70 bg-accent-blue/5"
-                : "hover:bg-bg-elev/40";
-              return (
-                <tr
-                  key={w.window_idx}
-                  className={`cursor-pointer transition-colors ${rowCls}`}
-                  onClick={() => setSelectedIdx(selected ? null : w.window_idx)}
-                >
-                  <td className={`px-2 py-1 whitespace-nowrap sticky left-0 z-[1] ${selected ? "bg-bg-panel" : "bg-bg-panel/95"} backdrop-blur`}>
-                    <span className="text-muted">#{w.window_idx}</span>{" "}
-                    <span className="text-text/85">{fmtDate(w.oos_start)} → {fmtDate(w.oos_end)}</span>
-                  </td>
-                  {cols.map((spec) => {
-                    const v = w.best_params?.[spec.name];
-                    const numeric = typeof v === "number" && Number.isFinite(v);
-                    const bg = numeric ? colorFor(spec.name, v) : null;
-                    const s = stats[spec.name];
-                    const z = numeric && s && s.stdev > 1e-9 ? (v - s.median) / s.stdev : 0;
-                    return (
-                      <td
-                        key={spec.name}
-                        className="px-2 py-1 text-text whitespace-nowrap"
-                        style={bg ? { backgroundColor: bg } : undefined}
-                        title={numeric ? `${spec.name} = ${fmtVal(spec, v)} · z=${fmtNum(z)} vs median ${fmtVal(spec, s.median)}` : spec.name}
-                      >
-                        {numeric ? fmtVal(spec, v) : "—"}
-                      </td>
-                    );
-                  })}
-                  <td className={`px-2 py-1 text-right whitespace-nowrap ${pos ? "text-profit" : "text-loss"}`}>{fmtPct(ret)}</td>
-                  <td className="px-2 py-1 text-right text-text whitespace-nowrap">{fmtNum(os.sharpe ?? 0)}</td>
-                  <td className="px-2 py-1 text-right text-muted whitespace-nowrap">{fmtInt(os.trades ?? 0)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {selectedIdx != null && (
-        <div className="pt-2 border-t border-line/30">
-          <WindowCard w={windows.find((w) => w.window_idx === selectedIdx)} />
-        </div>
-      )}
-    </section>
-  );
-}
-
-function WindowCard({ w }) {
-  const os = w.oos_stats || {};
-  const pos = (os.total_return_dollars ?? 0) >= 0;
-  return (
-    <div className="rounded-md border border-line bg-bg-panel/40 p-3">
-      <div className="flex items-center justify-between text-xs font-mono">
-        <div className="text-text">
-          <span className="text-muted">#{w.window_idx}</span>
-          &nbsp; IS {fmtDate(w.is_start)} → {fmtDate(w.is_end)}
-          &nbsp; <span className="text-muted">·</span>
-          &nbsp; OOS {fmtDate(w.oos_start)} → {fmtDate(w.oos_end)}
-        </div>
-        <div className="flex items-center gap-4">
-          <div className="text-muted">IS score: <span className="text-text">{w.is_score == null ? "—" : fmtNum(w.is_score)}</span></div>
-          <div className={pos ? "text-profit" : "text-loss"}>
-            OOS {fmtPct(os.total_return_pct ?? 0)} · {fmtUsd(os.total_return_dollars ?? 0)}
-          </div>
-          <div className="text-muted">{fmtInt(os.trades ?? 0)}t · sharpe {fmtNum(os.sharpe ?? 0)}</div>
-        </div>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1 text-[11px] font-mono">
-        {Object.entries(w.best_params || {})
-          .filter(([k]) => !["sessions", "sides"].includes(k))
-          .map(([k, v]) => (
-            <span key={k} className="px-2 py-0.5 rounded bg-bg-elev/60 border border-line/40 text-muted">
-              {k}=<span className="text-text">{typeof v === "number" ? fmtNum(v) : String(v)}</span>
-            </span>
-          ))}
-      </div>
-    </div>
-  );
-}
-
-function Kpi({ title, value, sub, positive }) {
-  const cls = positive == null ? "text-text" : positive ? "text-profit" : "text-loss";
-  return (
-    <div className="rounded-xl border border-line bg-bg-panel/60 p-3">
-      <div className="text-[10px] uppercase tracking-wider text-muted">{title}</div>
-      <div className={`text-xl font-mono mt-0.5 ${cls}`}>{value}</div>
-      {sub && <div className="text-[11px] text-muted mt-0.5 font-mono">{sub}</div>}
     </div>
   );
 }
