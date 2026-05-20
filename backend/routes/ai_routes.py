@@ -57,6 +57,16 @@ def backtest_section_insights():
     return _handle(ai_insights.analyze_backtest_section, {"result": result, "section": section})
 
 
+@ai_bp.post("/insights/walkforward-section")
+def walkforward_section_insights():
+    body = request.get_json(silent=True) or {}
+    result = body.get("result")
+    section = body.get("section")
+    if not isinstance(result, dict) or not isinstance(section, str):
+        return jsonify({"error": "result (object) and section (string) are required"}), 400
+    return _handle(ai_insights.analyze_walkforward_section, {"result": result, "section": section})
+
+
 @ai_bp.post("/suggest/walkforward")
 def wf_suggest():
     body = request.get_json(silent=True) or {}

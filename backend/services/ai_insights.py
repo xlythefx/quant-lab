@@ -359,6 +359,132 @@ def _compact_section(result: dict, section: str) -> dict:
     return {**base, "stats": s}
 
 
+_WF_SECTION_SYSTEMS = {
+    "overview": """You are a senior quant reviewing a Walk-Forward Optimization result. Cover in 3-4 short paragraphs:
+1) Headline: is the stitched OOS performance actually any good (Sharpe, return, max DD)? Compare to a buy-and-hold baseline if available.
+2) How many windows ran, and what's the spread between best and worst windows?
+3) One-line verdict: paper-trade candidate, refine, or kill?
+Plain text, no markdown headers. Under 200 words.""",
+    "folds": """You are a quant analyzing per-fold Walk-Forward results. Cover in 2-3 paragraphs:
+1) Consistency — how many folds posted positive OOS Sharpe vs negative? Is the result driven by one or two outlier windows?
+2) IS-vs-OOS gap per window — heavy degradation indicates overfitting; flat = real edge.
+3) If buy-and-hold returns are provided per fold, did the strategy beat passive in most windows?
+Plain text, no headers. Under 200 words.""",
+    "parameters": """You are a quant analyzing parameter selections across walk-forward windows. Cover in 2-3 paragraphs:
+1) Parameter drift — did Optuna pick wildly different values per window (fragile), or were picks clustered (robust)?
+2) Identify the most-stable and most-unstable params by name; flag any that swing across their entire search range.
+3) Recommendation: which params should be frozen at the consensus median vs left in the search space?
+Plain text, no headers. Under 200 words.""",
+    "robustness": """You are a quant reading robustness metrics from a Walk-Forward run. Cover in 3-4 paragraphs:
+1) Deflated Sharpe probability — how confident are we that the edge isn't an artifact of multiple testing?
+2) Walk-Forward Efficiency (WFE) — what fraction of IS Sharpe survived OOS? Below ~0.5 is suspicious.
+3) Parameter stability score and % windows positive — interpret what these mean for live deployment.
+4) Single biggest concern.
+Plain text, no headers. Under 220 words.""",
+    "regime": """You are a quant analyzing how a strategy performs across different market regimes (bucketed by realized volatility of the underlying). Cover in 2-3 paragraphs:
+1) In which volatility regime (low / mid / high) does the strategy perform best? Worst?
+2) Is the edge regime-dependent (works only in one bucket) or regime-agnostic?
+3) Practical recommendation — should the strategy be gated by a vol filter, or is it broadly applicable?
+Plain text, no headers. Under 180 words.""",
+}
+
+
+def _compact_wf_section(result: dict, section: str) -> dict:
+    """Slim a walk-forward result down to the slice relevant for a given section."""
+    base = {
+        "strategy_id": result.get("strategy_id"),
+        "symbol": result.get("symbol"),
+        "timeframe": result.get("timeframe"),
+        "wf_spec": result.get("wf_spec"),
+    }
+    s = result.get("stats") or {}
+    analytics = result.get("analytics") or {}
+    rob = (analytics.get("advanced") or {}).get("robustness") or analytics.get("robustness") or {}
+
+    if section == "overview":
+        return {**base, "stats": s, "robustness": rob,
+                "window_count": len(result.get("windows") or [])}
+    if section == "folds":
+        windows = []
+        for w in result.get("windows") or []:
+            os_stats = w.get("oos_stats") or {}
+            windows.append({
+                "window_idx": w.get("window_idx"),
+                "oos_start": w.get("oos_start"),
+                "oos_end": w.get("oos_end"),
+                "is_score": w.get("is_score"),
+                "oos_sharpe":           os_stats.get("sharpe"),
+                "oos_total_return_pct": os_stats.get("total_return_pct"),
+                "oos_max_drawdown_pct": os_stats.get("max_drawdown_pct"),
+                "oos_trades":           os_stats.get("trades"),
+                "bh_return_pct":        w.get("bh_return_pct"),
+                "oos_sharpe_ci_low":    w.get("oos_sharpe_ci_low"),
+                "oos_sharpe_ci_high":   w.get("oos_sharpe_ci_high"),
+            })
+        return {**base, "windows": windows, "stats": s}
+    if section == "parameters":
+        # Per-window best_params (numeric only); the model will compute drift itself.
+        windows = []
+        for w in result.get("windows") or []:
+            params = {
+                k: v for k, v in (w.get("best_params") or {}).items()
+                if isinstance(v, (int, float)) and k not in ("sessions", "sides")
+            }
+            windows.append({
+                "window_idx": w.get("window_idx"),
+                "best_params": params,
+                "oos_sharpe": (w.get("oos_stats") or {}).get("sharpe"),
+            })
+        return {**base, "windows": windows,
+                "search_space": (result.get("wf_spec") or {}).get("search_space")}
+    if section == "robustness":
+        return {**base, "robustness": rob, "stats": s,
+                "window_count": len(result.get("windows") or [])}
+    if section == "regime":
+        # Per-window realized vol + OOS performance for regime bucketing.
+        windows = []
+        for w in result.get("windows") or []:
+            os_stats = w.get("oos_stats") or {}
+            windows.append({
+                "window_idx": w.get("window_idx"),
+                "oos_realized_vol":     w.get("oos_realized_vol"),
+                "bh_return_pct":        w.get("bh_return_pct"),
+                "oos_sharpe":           os_stats.get("sharpe"),
+                "oos_total_return_pct": os_stats.get("total_return_pct"),
+                "oos_max_drawdown_pct": os_stats.get("max_drawdown_pct"),
+                "oos_win_rate":         os_stats.get("win_rate"),
+            })
+        return {**base, "windows": windows}
+    return {**base, "stats": s}
+
+
+def analyze_walkforward_section(payload: dict) -> dict:
+    """payload: {result: <wf result>, section: <section id>}"""
+    result = payload.get("result") or {}
+    section = str(payload.get("section") or "overview").lower()
+    if section not in _WF_SECTION_SYSTEMS:
+        raise ValueError(f"unknown walk-forward section: {section}")
+    client = _client()
+    compact = _compact_wf_section(result, section)
+    msg = client.messages.create(
+        model=_MODEL,
+        max_tokens=_MAX_TOKENS,
+        system=[{
+            "type": "text",
+            "text": _WF_SECTION_SYSTEMS[section],
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Section to analyze: walk-forward {section}\n\n"
+                + json.dumps(compact, indent=2)
+            ),
+        }],
+    )
+    return _format_text_response(msg)
+
+
 def analyze_backtest_section(payload: dict) -> dict:
     """payload: {result: <backtest result>, section: <section id>}"""
     result = payload.get("result") or {}
