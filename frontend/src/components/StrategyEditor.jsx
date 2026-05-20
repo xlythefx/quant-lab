@@ -107,35 +107,62 @@ function NumberRow({ spec, value, onChange }) {
   const isPct = spec.name === "risk_pct";
   const min = spec.min ?? -Infinity;
   const max = spec.max ?? Infinity;
+  const decimals = (String(step).split(".")[1] || "").length;
 
-  const round = (x) => {
-    // avoid float crud: round to step's decimal places.
-    const decimals = (String(step).split(".")[1] || "").length;
-    return Math.round(x * 10 ** decimals) / 10 ** decimals;
-  };
+  const round = (x) => Math.round(x * 10 ** decimals) / 10 ** decimals;
   const clamp = (x) => Math.max(min, Math.min(max, x));
-  const apply = (x) => onChange(spec.name, clamp(round(spec.type === "int" ? Math.round(x) : x)));
+  const normalize = (x) => clamp(round(spec.type === "int" ? Math.round(x) : x));
+
+  // Local string draft so the user can type intermediate values ("1" on the
+  // way to "11", "0." on the way to "0.5") without per-keystroke clamping
+  // jumping the cursor to min/max. Commit only on blur, Enter, or +/−.
+  const [draft, setDraft] = useState(value == null ? "" : String(value));
+  useEffect(() => {
+    setDraft(value == null ? "" : String(value));
+  }, [value]);
+
+  const commit = () => {
+    const parsed = spec.type === "int" ? parseInt(draft, 10) : parseFloat(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(value == null ? "" : String(value));
+      return;
+    }
+    const next = normalize(parsed);
+    setDraft(String(next));
+    if (next !== value) onChange(spec.name, next);
+  };
+
+  const bump = (delta) => {
+    const base = Number.isFinite(parseFloat(draft)) ? parseFloat(draft) : Number(value || 0);
+    const next = normalize(base + delta);
+    setDraft(String(next));
+    onChange(spec.name, next);
+  };
 
   return (
     <div>
       <div className="flex items-center justify-between gap-3">
         <label className="text-xs font-mono text-muted">{spec.name}</label>
         <div className="flex items-center gap-1">
-          <button type="button" onClick={() => apply(Number(value) - step)}
+          <button type="button" onClick={() => bump(-step)}
             className="w-6 h-6 rounded-md bg-bg-elev border border-line text-muted hover:text-text hover:border-accent-blue text-xs leading-none">
             −
           </button>
           <div className="relative">
             <input
               type="number"
-              value={value}
+              value={draft}
               min={spec.min ?? undefined}
               max={spec.max ?? undefined}
               step={step}
-              onChange={(e) => {
-                const raw = e.target.value;
-                const parsed = spec.type === "int" ? parseInt(raw, 10) : parseFloat(raw);
-                if (Number.isFinite(parsed)) apply(parsed);
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                else if (e.key === "Escape") {
+                  setDraft(value == null ? "" : String(value));
+                  e.currentTarget.blur();
+                }
               }}
               className={`w-24 px-2 py-1 text-right rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue ${isPct ? "pr-6" : ""}`}
             />
@@ -143,7 +170,7 @@ function NumberRow({ spec, value, onChange }) {
               <span className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted pointer-events-none">%</span>
             )}
           </div>
-          <button type="button" onClick={() => apply(Number(value) + step)}
+          <button type="button" onClick={() => bump(step)}
             className="w-6 h-6 rounded-md bg-bg-elev border border-line text-muted hover:text-text hover:border-accent-blue text-xs leading-none">
             +
           </button>

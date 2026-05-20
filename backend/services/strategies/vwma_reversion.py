@@ -117,6 +117,8 @@ class VwmaReversionStrategy(Strategy):
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
                   group="Direction"),
+        ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
+                  description="Max concurrent positions per side. Each tranche is sized at the global Risk%. Set to 1 to disable stacking."),
         # risk_pct removed — managed globally on the Risk page.
     ]
 

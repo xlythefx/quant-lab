@@ -115,10 +115,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     fee_flat         = float(rc["fee_flat"])
     fee_pct          = float(rc["fee_pct"]) / 100.0
     slippage         = float(rc["slippage_bps"]) / 10000.0
-    max_tranches     = max(1, int(float(rc.get("pyramiding", 1))))
 
     cls = get_strategy_class(strategy_id)
     strategy = cls(params or {})
+
+    # Pyramiding is per-strategy (in PARAM_SCHEMA). Fall back to the global
+    # risk_config value if the strategy doesn't declare it.
+    pyramiding_param = strategy.p.get("pyramiding", rc.get("pyramiding", 1))
+    max_tranches = max(1, int(float(pyramiding_param)))
 
     df = df.copy() if df is not None else market_data.load_parquet(symbol, timeframe)
     if start_time is not None:

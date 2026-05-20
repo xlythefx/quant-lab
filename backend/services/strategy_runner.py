@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from services import event_bus, market_data
+from services import event_bus, market_data, risk_config, backtest_engine
 from services.strategies.base import Signal
 
 log = logging.getLogger(__name__)
@@ -90,113 +90,81 @@ class VectorizedRunner:
         # the curve would start at whatever value the precompute reached
         # over the unseen history, which is confusing.
         _, start_idx = market_data.replay_start_index(self.symbol, self.timeframe)
+        start_ts = int(df.iloc[start_idx]["time"])
+
+        # Delegate the backtest math to backtest_engine.run() — pyramiding,
+        # tranche accounting, fees, slippage, and ATR stops live there. The
+        # runner is now a thin adapter that streams those precomputed
+        # results in lockstep with the candle replay, so dashboard numbers
+        # match Walk-Forward / Grid / Monte Carlo / Cost Sweep exactly.
+        result = backtest_engine.run(
+            self.strategy_id, self.symbol, self.timeframe, dict(self.strategy.p),
+            start_time=start_ts,
+        )
+        equity_curve = result.get("equity") or []
+        trades = result.get("trades") or []
+
+        n = len(equity_curve)
+        self._equity = [100.0] * n
+        self._dd = [0.0] * n
+        self._trades_running = [0] * n
+        self._wins_running = [0] * n
+        self._time_to_idx = {}
+        for i, pt in enumerate(equity_curve):
+            ts = int(pt["time"])
+            self._time_to_idx[ts] = i
+            # `value` is normalized to 100 = starting capital (par).
+            self._equity[i] = float(pt.get("value", 100.0))
+            self._dd[i] = float(pt.get("drawdown", 0.0))
+
+        # Bucket trades by exit timestamp; with pyramiding, multiple
+        # tranches can close on the same bar.
+        exits_at: dict[int, list[dict]] = {}
+        for tr in trades:
+            exits_at.setdefault(int(tr["exit_time"]), []).append(tr)
+
+        cum_trades = 0
+        cum_wins = 0
+        for i, pt in enumerate(equity_curve):
+            ts = int(pt["time"])
+            for tr in exits_at.get(ts, ()):
+                cum_trades += 1
+                if float(tr.get("pnl_dollars", 0.0)) > 0.0:
+                    cum_wins += 1
+            self._trades_running[i] = cum_trades
+            self._wins_running[i] = cum_wins
+
+        # Per-bar signals and the streaming trade payload. Multiple trades
+        # per bar are stored in a list and streamed sequentially in
+        # _on_candle so each gets its entry/exit markers + win/loss coloring.
+        self._signals_at = {}
+        self._trade_at = {}
+        for tr in trades:
+            et = int(tr["entry_time"])
+            xt = int(tr["exit_time"])
+            side = tr["side"]
+            self._signals_at.setdefault(et, []).append(
+                Signal(side=side, kind="entry", price=float(tr["entry_price"]),
+                       time=et, reason="")
+            )
+            self._signals_at.setdefault(xt, []).append(
+                Signal(side=side, kind="exit", price=float(tr["exit_price"]),
+                       time=xt, reason="")
+            )
+            self._trade_at.setdefault(xt, []).append({
+                "side": side,
+                "entry_price": float(tr["entry_price"]),
+                "exit_price": float(tr["exit_price"]),
+                "entry_time": et,
+                "exit_time": xt,
+                "pnl_pct": float(tr.get("pnl_pct_equity", tr.get("pnl_pct", 0.0))),
+                "pnl_dollars": float(tr.get("pnl_dollars", 0.0)),
+            })
+
+        # Overlay arrays for streaming. Spec metadata is sent ONCE; values
+        # stream per replayed candle. Re-extract from a vectorized pass over
+        # the trimmed df — cheap, and avoids leaking sig_df from the engine.
         sig_df = self.strategy.vectorized(df.iloc[start_idx:].reset_index(drop=True))
-
-        # Walk forward, simulate fills at close, % equity sizing, compound.
-        n = len(sig_df)
-        equity = 100.0           # equity in percent terms
-        peak = equity
-        trades_count = 0
-        wins = 0
-
-        equity_arr = np.full(n, np.nan)
-        dd_arr = np.full(n, 0.0)
-        trades_arr = np.zeros(n, dtype=int)
-        wins_arr = np.zeros(n, dtype=int)
-
-        # risk_pct in PARAM_SCHEMA is a percent (1.0 = 1%); convert to fraction.
-        risk_pct = float(self.strategy.p.get("risk_pct", 1.0)) / 100.0
-
-        pos = 0          # 1 long, -1 short, 0 flat
-        entry_price = np.nan
-        entry_size = 0.0      # in "equity %" terms
-        entry_time = 0
-
-        time_a = sig_df["time"].to_numpy()
-        close_a = sig_df["close"].to_numpy(dtype=float)
-        el = sig_df["entry_long"].to_numpy()
-        es = sig_df["entry_short"].to_numpy()
-        xl = sig_df["exit_long"].to_numpy()
-        xs = sig_df["exit_short"].to_numpy()
-
-        signals_at = self._signals_at
-        trade_at = self._trade_at
-
-        for t in range(n):
-            ts = int(time_a[t])
-            self._time_to_idx[ts] = t
-            c = close_a[t]
-
-            # Process exits before entries (the strategy guarantees they
-            # don't fire on the same bar, but be safe).
-            if pos == 1 and xl[t]:
-                pnl_pct = (c - entry_price) / entry_price * entry_size * 100.0
-                equity += pnl_pct
-                trades_count += 1
-                if pnl_pct > 0: wins += 1
-                signals_at.setdefault(ts, []).append(
-                    Signal(side="long", kind="exit", price=float(c), time=ts, reason="")
-                )
-                trade_at[ts] = {
-                    "side": "long", "entry_price": float(entry_price),
-                    "exit_price": float(c), "entry_time": int(entry_time),
-                    "exit_time": int(ts), "pnl_pct": float(pnl_pct),
-                }
-                pos = 0
-                entry_price = np.nan
-                entry_size = 0.0
-
-            elif pos == -1 and xs[t]:
-                pnl_pct = (entry_price - c) / entry_price * entry_size * 100.0
-                equity += pnl_pct
-                trades_count += 1
-                if pnl_pct > 0: wins += 1
-                signals_at.setdefault(ts, []).append(
-                    Signal(side="short", kind="exit", price=float(c), time=ts, reason="")
-                )
-                trade_at[ts] = {
-                    "side": "short", "entry_price": float(entry_price),
-                    "exit_price": float(c), "entry_time": int(entry_time),
-                    "exit_time": int(ts), "pnl_pct": float(pnl_pct),
-                }
-                pos = 0
-                entry_price = np.nan
-                entry_size = 0.0
-
-            if pos == 0:
-                if el[t]:
-                    pos = 1
-                    entry_price = c
-                    entry_size = risk_pct
-                    entry_time = ts
-                    signals_at.setdefault(ts, []).append(
-                        Signal(side="long", kind="entry", price=float(c), time=ts, reason="")
-                    )
-                elif es[t]:
-                    pos = -1
-                    entry_price = c
-                    entry_size = risk_pct
-                    entry_time = ts
-                    signals_at.setdefault(ts, []).append(
-                        Signal(side="short", kind="entry", price=float(c), time=ts, reason="")
-                    )
-
-            peak = max(peak, equity)
-            dd = (equity - peak) / peak * 100.0 if peak > 0 else 0.0
-            equity_arr[t] = equity
-            dd_arr[t] = dd
-            trades_arr[t] = trades_count
-            wins_arr[t] = wins
-
-        self._equity = equity_arr.tolist()
-        self._dd = dd_arr.tolist()
-        self._trades_running = trades_arr.tolist()
-        self._wins_running = wins_arr.tolist()
-
-        # Build per-bar overlay arrays for streaming. Spec metadata is sent
-        # ONCE; values are streamed per replayed candle so the chart's
-        # overlay range stays in lockstep with the candle range (no auto-fit
-        # zoom-out that crushes the candles).
         overlay_specs = []
         for ov in getattr(self.strategy, "OVERLAYS", []):
             if ov.from_column not in sig_df.columns:
@@ -212,19 +180,18 @@ class VectorizedRunner:
                 "specs": overlay_specs,
             }, to=self.sid)
 
-        # Diagnostic so missing trades is debuggable from the backend log.
-        n_long = int(sig_df["entry_long"].sum())
-        n_short = int(sig_df["entry_short"].sum())
-
         # Subscribe to the backtest stream so we can emit equity in lockstep.
         def listener(candle):
             self._on_candle(candle)
         self._listener = listener
         self._sm.add_listener("backtest", self.symbol, self.timeframe, listener)
+
+        rc = result.get("risk_config") or {}
         log.info("[%s] vectorized precompute done (%d bars, %d trades, "
-                 "long=%d short=%d, %d overlay series)",
-                 self.strategy_id, n, trades_count, n_long, n_short,
-                 len(overlays_payload))
+                 "pyramiding=%s, %d overlay series)",
+                 self.strategy_id, n, len(trades),
+                 self.strategy.p.get("pyramiding", rc.get("pyramiding", 1)),
+                 len(overlay_specs))
 
     def _on_candle(self, candle):
         if not bool(candle.get("isClosed", False)):
@@ -253,13 +220,27 @@ class VectorizedRunner:
         for sig in self._signals_at.get(ts, ()):
             _emit_signal(self.strategy_id, self.sid, sig)
 
-        trade = self._trade_at.get(ts)
-        _emit_equity(
-            self.strategy_id, self.sid, ts,
-            self._equity[idx], self._dd[idx],
-            self._trades_running[idx], self._wins_running[idx],
-            trade=trade,
-        )
+        # With pyramiding, multiple trades can close on the same bar. Emit
+        # one equity_update per closed trade so the frontend's marker
+        # handler sees each one. The equity/dd/cum-count values are the
+        # bar's terminal state and identical across emits — the chart
+        # point at this ts is idempotent.
+        trades_here = self._trade_at.get(ts) or []
+        if not trades_here:
+            _emit_equity(
+                self.strategy_id, self.sid, ts,
+                self._equity[idx], self._dd[idx],
+                self._trades_running[idx], self._wins_running[idx],
+                trade=None,
+            )
+        else:
+            for tr in trades_here:
+                _emit_equity(
+                    self.strategy_id, self.sid, ts,
+                    self._equity[idx], self._dd[idx],
+                    self._trades_running[idx], self._wins_running[idx],
+                    trade=tr,
+                )
 
     def stop(self):
         if self._listener:
@@ -300,8 +281,9 @@ class LiveRunner:
             return
         _emit_signal(self.strategy_id, self.sid, sig)
 
-        # risk_pct in PARAM_SCHEMA is a percent (1.0 = 1%); convert to fraction.
-        risk_pct = float(self.strategy.p.get("risk_pct", 1.0)) / 100.0
+        # risk_pct is now sourced from the GLOBAL risk_config (Risk page),
+        # not the strategy's PARAM_SCHEMA — strategies no longer carry it.
+        risk_pct = float(risk_config.get()["risk_pct"]) / 100.0
         ts = int(sig.time)
         trade_meta = None
 

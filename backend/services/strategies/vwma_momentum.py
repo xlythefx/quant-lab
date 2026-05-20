@@ -108,6 +108,8 @@ class VwmaMomentumStrategy(Strategy):
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
                   group="Direction"),
+        ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
+                  description="Max concurrent positions per side. Each tranche is sized at the global Risk%. Set to 1 to disable stacking."),
     ]
 
     META = StrategyMeta(
@@ -209,6 +211,18 @@ class VwmaMomentumStrategy(Strategy):
         out["exit_short"]  = exit_short
         out["stop_price"]  = stop_price
         out["vwma"]        = vwma
+
+        # Raw per-bar conditions used by the pyramiding-capable backtest
+        # engine. The state-machine columns above stay for one-shot consumers
+        # and any callers still relying on edge-triggered semantics.
+        # bar_exit_* mirror the in-loop FSM exit checks but are stateless,
+        # which is what the tranche-based engine needs.
+        exit_long_cond  = (close < vwma) & (slope < 0)
+        exit_short_cond = (close > vwma) & (slope > 0)
+        out["cond_long"]      = long_cond.fillna(False).astype(bool)
+        out["cond_short"]     = short_cond.fillna(False).astype(bool)
+        out["bar_exit_long"]  = exit_long_cond.fillna(False).astype(bool)
+        out["bar_exit_short"] = exit_short_cond.fillna(False).astype(bool)
         return out
 
     # ---- on_candle (live) ---------------------------------------------

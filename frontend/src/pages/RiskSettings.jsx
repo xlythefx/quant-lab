@@ -24,8 +24,7 @@ const FIELDS = [
     hint: "Of notional. Charged on both entry and exit." },
   { key: "slippage_bps",     label: "Slippage",             unit: "bps", step: 0.5,  min: 0, max: 500,
     hint: "Adverse fill price applied to each entry & exit." },
-  { key: "pyramiding",       label: "Pyramiding",           unit: "pos", step: 1,    min: 1, max: 100,
-    hint: "Max concurrent tranches per side. Each tranche is sized at Risk% of current equity at entry — set to 1 to disable stacking." },
+  // pyramiding is now configured per-strategy in the strategy Settings panel.
 ];
 
 export default function RiskSettings() {
@@ -118,7 +117,6 @@ export default function RiskSettings() {
             <div className="text-muted">Flat fee</div>        <div className="text-text">{fmtUsd(cfg.fee_flat)}</div>
             <div className="text-muted">Fee %</div>           <div className="text-text">{fmtNum(cfg.fee_pct)}%</div>
             <div className="text-muted">Slippage</div>        <div className="text-text">{fmtNum(cfg.slippage_bps)} bps</div>
-            <div className="text-muted">Pyramiding</div>      <div className="text-text">{fmtNum(cfg.pyramiding)}</div>
           </div>
         </div>
 
