@@ -6,6 +6,8 @@ import RiskSettings from "./pages/RiskSettings.jsx";
 import Analytics from "./pages/Analytics.jsx";
 import WalkForward from "./pages/WalkForward.jsx";
 import GridSearch from "./pages/GridSearch.jsx";
+import MonteCarlo from "./pages/MonteCarlo.jsx";
+import CostSweep from "./pages/CostSweep.jsx";
 
 function getView() {
   // Hash like "#analytics?key=..." → strip query and route by base name.
@@ -28,5 +30,7 @@ export default function App() {
   if (view === "analytics")  return <Analytics />;
   if (view === "walkforward") return <WalkForward />;
   if (view === "gridsearch")  return <GridSearch />;
+  if (view === "montecarlo")  return <MonteCarlo />;
+  if (view === "costsweep")   return <CostSweep />;
   return <Dashboard />;
 }

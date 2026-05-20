@@ -160,6 +160,37 @@ export function subscribeWalkForward({ onProgress, onWindowDone, onComplete, onC
 }
 
 // ---------------------------------------------------------------------------
+// Cost Sweep events
+// ---------------------------------------------------------------------------
+/**
+ * Subscribe to cost-sweep job events. Returns an unsubscribe fn.
+ *
+ * Handlers (all optional):
+ *   onProgress({job_id, run_idx, total_runs, sweep_dim, sweep_value,
+ *               current_metric_value, current_best_metric})
+ *   onComplete({job_id, result})
+ *   onCancelled({job_id})
+ *   onError({job_id, message})
+ */
+export function subscribeCostSweep({ onProgress, onComplete, onCancelled, onError } = {}) {
+  const wrap = (fn) => (fn ? (p) => fn(p) : null);
+  const h = {
+    cs_progress:  wrap(onProgress),
+    cs_complete:  wrap(onComplete),
+    cs_cancelled: wrap(onCancelled),
+    cs_error:     wrap(onError),
+  };
+  for (const [evt, fn] of Object.entries(h)) {
+    if (fn) socket.on(evt, fn);
+  }
+  return () => {
+    for (const [evt, fn] of Object.entries(h)) {
+      if (fn) socket.off(evt, fn);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Grid Search events
 // ---------------------------------------------------------------------------
 /**

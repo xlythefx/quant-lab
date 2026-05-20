@@ -24,6 +24,7 @@ from routes.strategy_routes import strategy_bp
 from routes.settings_routes import settings_bp
 from routes.walkforward_routes import walkforward_bp
 from routes.grid_search_routes import grid_search_bp
+from routes.cost_sweep_routes import cost_sweep_bp
 from routes.monte_carlo_routes import monte_carlo_bp
 from routes.ai_routes import ai_bp
 from services.socket_manager import SocketManager
@@ -51,6 +52,7 @@ def create_app():
     app.register_blueprint(settings_bp)
     app.register_blueprint(walkforward_bp)
     app.register_blueprint(grid_search_bp)
+    app.register_blueprint(cost_sweep_bp)
     app.register_blueprint(monte_carlo_bp)
     app.register_blueprint(ai_bp)
 

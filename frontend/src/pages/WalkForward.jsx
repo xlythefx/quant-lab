@@ -5,6 +5,7 @@ import TimeframeSelector from "../components/TimeframeSelector.jsx";
 import DateRangePicker from "../components/DateRangePicker.jsx";
 import CustomEquityChart from "../components/CustomEquityChart.jsx";
 import WalkForwardParamEditor from "../components/WalkForwardParamEditor.jsx";
+import WalkForwardPresetPicker from "../components/WalkForwardPresetPicker.jsx";
 import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
 import {
   getSymbols, getStrategies,
@@ -104,6 +105,31 @@ export default function WalkForward() {
     () => datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe) || null,
     [datasets, symbol, timeframe],
   );
+
+  // Auto-fill date range to the active dataset's full extent whenever the
+  // dataset changes (matches Grid Search behavior). Preset picker can override.
+  useEffect(() => {
+    if (!currentDataset) return;
+    const start = currentDataset.first_time ? fmtDate(currentDataset.first_time) : "";
+    const end   = currentDataset.last_time  ? fmtDate(currentDataset.last_time)  : "";
+    if (!start || !end) return;
+    if (range.start !== start || range.end !== end) {
+      setRange({ start, end });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentDataset?.first_time, currentDataset?.last_time]);
+
+  // Apply a deterministic test preset (range + IS + OOS + trials + metric).
+  const onApplyPreset = (values) => {
+    setRange({ start: values.start, end: values.end });
+    setIsBars(values.isBars);
+    setOosBars(values.oosBars);
+    setNTrials(values.nTrials);
+    setMetric(values.metric);
+    // Clear the AI suggestion banner since the user picked a deterministic preset.
+    setAiSuggestResult(null);
+    setAiSuggestError(null);
+  };
 
   const onAiSuggest = async () => {
     if (!currentDataset) {
@@ -280,6 +306,14 @@ export default function WalkForward() {
             <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
             <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
           </div>
+
+          {/* Deterministic test presets — no AI, no hallucination. Recommended path. */}
+          <WalkForwardPresetPicker
+            dataset={currentDataset}
+            timeframe={timeframe}
+            onApply={onApplyPreset}
+            disabled={running}
+          />
 
           {/* AI Suggest: autofill IS/OOS/trials/metric from dataset size */}
           <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 p-3 flex items-start gap-3">
@@ -577,11 +611,7 @@ function ResultPanel({ result, onOpenInAnalytics }) {
 
       <WalkForwardAIInsights result={result} />
 
-      <div className="space-y-2">
-        <div className="text-[11px] uppercase tracking-wider text-muted">Per-window results</div>
-        {windows.length === 0 && <div className="text-sm text-muted">no windows</div>}
-        {windows.map((w) => <WindowCard key={w.window_idx} w={w} />)}
-      </div>
+      <WindowHeatmap windows={windows} searchSpace={result?.wf_spec?.search_space || []} />
     </section>
   );
 }
@@ -865,6 +895,176 @@ function WalkForwardAIInsights({ result }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-window heatmap — rows = windows chronological, cols = optimized params.
+// Cell color = signed deviation from the column's median (warm = above,
+// cool = below). Solid block = stable / robust params; color swings = drift.
+// Click a row to expand the existing WindowCard inline with full detail.
+// ---------------------------------------------------------------------------
+
+function WindowHeatmap({ windows, searchSpace }) {
+  const [selectedIdx, setSelectedIdx] = useState(null);
+
+  // Pick out numeric search-space params and compute their distribution stats.
+  // sides/sessions are skipped (no numeric distance metric makes sense).
+  const { cols, stats } = useMemo(() => {
+    const cols = (searchSpace || []).filter((spec) =>
+      windows.some((w) => {
+        const v = w.best_params?.[spec.name];
+        return typeof v === "number" && Number.isFinite(v);
+      })
+    );
+    const stats = {};
+    for (const spec of cols) {
+      const vals = windows
+        .map((w) => w.best_params?.[spec.name])
+        .filter((v) => typeof v === "number" && Number.isFinite(v));
+      if (!vals.length) continue;
+      const sorted = [...vals].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const variance = vals.reduce((s, v) => s + (v - mean) ** 2, 0) / vals.length;
+      const stdev = Math.sqrt(variance);
+      stats[spec.name] = {
+        median, mean, stdev,
+        min: sorted[0],
+        max: sorted[sorted.length - 1],
+      };
+    }
+    return { cols, stats };
+  }, [windows, searchSpace]);
+
+  if (!windows.length) {
+    return (
+      <section className="rounded-xl border border-line bg-bg-panel/60 p-4">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Per-window results</div>
+        <div className="text-sm text-muted mt-2">no windows</div>
+      </section>
+    );
+  }
+  if (!cols.length) {
+    // Fallback when nothing numeric was optimized — just show the cards.
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Per-window results</div>
+        {windows.map((w) => <WindowCard key={w.window_idx} w={w} />)}
+      </div>
+    );
+  }
+
+  // Signed-z color: amber-ish above median, blue-ish below. Alpha scales with
+  // |z|, clamped so very stable cells stay readable and outliers stand out.
+  function colorFor(specName, value) {
+    const s = stats[specName];
+    if (!s || !Number.isFinite(value)) return null;
+    if (s.stdev < 1e-9) return "rgba(120,120,140,0.06)";
+    const z = (value - s.median) / s.stdev;
+    const alpha = Math.min(0.7, Math.abs(z) * 0.32);
+    if (alpha < 0.04) return null;
+    return z >= 0
+      ? `rgba(251, 191, 36, ${alpha.toFixed(3)})`   // amber-400
+      : `rgba(96, 165, 250, ${alpha.toFixed(3)})`;  // blue-400
+  }
+
+  const fmtVal = (spec, v) => (spec.type === "int" ? fmtInt(v) : fmtNum(v));
+
+  return (
+    <section className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-sm font-semibold text-text">Per-window heatmap</div>
+          <div className="text-xs text-muted mt-0.5">
+            Rows = windows (chronological). Cells colored by deviation from each column's median:{" "}
+            <span className="px-1.5 py-0.5 rounded text-text" style={{ backgroundColor: "rgba(251,191,36,0.45)" }}>warmer</span>
+            {" "}above,{" "}
+            <span className="px-1.5 py-0.5 rounded text-text" style={{ backgroundColor: "rgba(96,165,250,0.45)" }}>cooler</span>
+            {" "}below. Solid block = robust; color swings = parameter drift. Click a row for details.
+          </div>
+        </div>
+        {selectedIdx != null && (
+          <button
+            type="button"
+            onClick={() => setSelectedIdx(null)}
+            className="text-[11px] font-mono text-muted hover:text-text underline underline-offset-2"
+          >
+            clear selection
+          </button>
+        )}
+      </div>
+
+      <div className="overflow-x-auto -mx-1 px-1">
+        <table className="min-w-full text-[11px] font-mono border-separate" style={{ borderSpacing: "0 2px" }}>
+          <thead>
+            <tr className="text-muted">
+              <th className="text-left px-2 py-1 sticky left-0 z-10 bg-bg-panel/95 backdrop-blur">Window</th>
+              {cols.map((spec) => (
+                <th key={spec.name} className="text-left px-2 py-1 whitespace-nowrap align-bottom">
+                  <div className="text-text/90">{spec.name}</div>
+                  <div className="text-[9px] text-muted/70 font-normal">
+                    med {fmtVal(spec, stats[spec.name].median)} · σ {fmtNum(stats[spec.name].stdev)}
+                  </div>
+                </th>
+              ))}
+              <th className="text-right px-2 py-1 whitespace-nowrap">OOS %</th>
+              <th className="text-right px-2 py-1 whitespace-nowrap">Sharpe</th>
+              <th className="text-right px-2 py-1 whitespace-nowrap">t</th>
+            </tr>
+          </thead>
+          <tbody>
+            {windows.map((w) => {
+              const os = w.oos_stats || {};
+              const ret = os.total_return_pct ?? 0;
+              const pos = ret >= 0;
+              const selected = selectedIdx === w.window_idx;
+              const rowCls = selected
+                ? "outline outline-1 outline-accent-blue/70 bg-accent-blue/5"
+                : "hover:bg-bg-elev/40";
+              return (
+                <tr
+                  key={w.window_idx}
+                  className={`cursor-pointer transition-colors ${rowCls}`}
+                  onClick={() => setSelectedIdx(selected ? null : w.window_idx)}
+                >
+                  <td className={`px-2 py-1 whitespace-nowrap sticky left-0 z-[1] ${selected ? "bg-bg-panel" : "bg-bg-panel/95"} backdrop-blur`}>
+                    <span className="text-muted">#{w.window_idx}</span>{" "}
+                    <span className="text-text/85">{fmtDate(w.oos_start)} → {fmtDate(w.oos_end)}</span>
+                  </td>
+                  {cols.map((spec) => {
+                    const v = w.best_params?.[spec.name];
+                    const numeric = typeof v === "number" && Number.isFinite(v);
+                    const bg = numeric ? colorFor(spec.name, v) : null;
+                    const s = stats[spec.name];
+                    const z = numeric && s && s.stdev > 1e-9 ? (v - s.median) / s.stdev : 0;
+                    return (
+                      <td
+                        key={spec.name}
+                        className="px-2 py-1 text-text whitespace-nowrap"
+                        style={bg ? { backgroundColor: bg } : undefined}
+                        title={numeric ? `${spec.name} = ${fmtVal(spec, v)} · z=${fmtNum(z)} vs median ${fmtVal(spec, s.median)}` : spec.name}
+                      >
+                        {numeric ? fmtVal(spec, v) : "—"}
+                      </td>
+                    );
+                  })}
+                  <td className={`px-2 py-1 text-right whitespace-nowrap ${pos ? "text-profit" : "text-loss"}`}>{fmtPct(ret)}</td>
+                  <td className="px-2 py-1 text-right text-text whitespace-nowrap">{fmtNum(os.sharpe ?? 0)}</td>
+                  <td className="px-2 py-1 text-right text-muted whitespace-nowrap">{fmtInt(os.trades ?? 0)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {selectedIdx != null && (
+        <div className="pt-2 border-t border-line/30">
+          <WindowCard w={windows.find((w) => w.window_idx === selectedIdx)} />
+        </div>
+      )}
+    </section>
   );
 }
 

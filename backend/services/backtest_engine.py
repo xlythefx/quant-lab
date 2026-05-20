@@ -94,12 +94,22 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         params: Optional[dict] = None,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
-        df: Optional[pd.DataFrame] = None) -> dict:
-    """Run a backtest. If `df` is provided, use it directly (and copy it) instead
-    of loading from parquet — this lets Monte Carlo inject synthetic bars
-    without monkey-patching the loader at module scope (race-prone)."""
+        df: Optional[pd.DataFrame] = None,
+        risk_overrides: Optional[dict] = None) -> dict:
+    """Run a backtest.
+
+    `df`: if provided, use it directly (and copy it) instead of loading from
+    parquet — Monte Carlo uses this to inject synthetic bars without
+    monkey-patching the loader at module scope.
+
+    `risk_overrides`: dict of risk-config keys (slippage_bps, fee_pct, fee_flat,
+    starting_capital, risk_pct, pyramiding) to override for this single call.
+    Local-only, does not mutate the global config. Used by Cost Sweep to test
+    how the strategy's edge holds up under elevated execution costs."""
 
     rc = risk_config.get()
+    if risk_overrides:
+        rc = {**rc, **risk_overrides}
     starting_capital = float(rc["starting_capital"])
     risk_frac        = float(rc["risk_pct"]) / 100.0
     fee_flat         = float(rc["fee_flat"])

@@ -131,6 +131,30 @@ export async function estimateGridSearch(spec) {
 }
 
 // ---------------------------------------------------------------------------
+// Cost Sweep
+// ---------------------------------------------------------------------------
+
+export async function startCostSweep(spec) {
+  const { data } = await api.post("/api/cost_sweep/start", spec);
+  return data; // {job_id, ok}
+}
+
+export async function cancelCostSweep() {
+  const { data } = await api.post("/api/cost_sweep/cancel");
+  return data; // {ok}
+}
+
+export async function getCostSweepStatus() {
+  const { data } = await api.get("/api/cost_sweep/status");
+  return data;
+}
+
+export async function getCostSweepLastResult() {
+  const { data } = await api.get("/api/cost_sweep/last_result");
+  return data.result;
+}
+
+// ---------------------------------------------------------------------------
 // Monte Carlo
 // ---------------------------------------------------------------------------
 

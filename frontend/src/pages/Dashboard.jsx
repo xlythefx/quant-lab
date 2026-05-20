@@ -464,10 +464,12 @@ export default function Dashboard() {
     return null;
   }, [active, catalogById]);
 
-  // Analytics deep-link target — first active strategy's last result.
-  const analyticsHref = active.length > 0 && symbol
-    ? `#analytics?key=${encodeURIComponent(`${active[0].id}|${symbol}|${timeframe}`)}`
-    : "#analytics";
+  // Analytics / Monte Carlo deep-link targets — first active strategy's last result.
+  const resultKey = active.length > 0 && symbol
+    ? encodeURIComponent(`${active[0].id}|${symbol}|${timeframe}`)
+    : null;
+  const analyticsHref  = resultKey ? `#analytics?key=${resultKey}`   : "#analytics";
+  const monteCarloHref = resultKey ? `#montecarlo?key=${resultKey}` : "#montecarlo";
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -505,12 +507,20 @@ export default function Dashboard() {
             </button>
           )}
           {staticData && (
-            <a
-              href={analyticsHref}
-              className="px-4 py-2 rounded-md border border-accent-blue/60 text-accent-blue hover:bg-accent-blue/10 text-sm font-medium"
-            >
-              View Analytics →
-            </a>
+            <>
+              <a
+                href={analyticsHref}
+                className="px-4 py-2 rounded-md border border-accent-blue/60 text-accent-blue hover:bg-accent-blue/10 text-sm font-medium"
+              >
+                View Analytics →
+              </a>
+              <a
+                href={monteCarloHref}
+                className="px-4 py-2 rounded-md border border-accent-blue/60 text-accent-blue hover:bg-accent-blue/10 text-sm font-medium"
+              >
+                Monte Carlo →
+              </a>
+            </>
           )}
           <a
             href="#downloads"
