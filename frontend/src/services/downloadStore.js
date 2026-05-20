@@ -15,11 +15,12 @@ import { downloadDataset } from "./api.js";
 let state = {
   busy: false,
   jobId: null,
+  broker: null,
   symbol: null,
   timeframe: null,
   start: null,
   end: null,
-  progress: null,   // { fetched, expected, cursor_ms, start_ms, end_ms, status }
+  progress: null,   // { fetched, expected, cursor_ms, start_ms, end_ms, status, broker }
   result: null,     // server response on success
   error: null,      // string on failure
 };
@@ -59,15 +60,15 @@ export function subscribe(fn) {
  *
  * Throws synchronously if a download is already in flight.
  */
-export async function startDownload({ symbol, timeframe, start, end, sid, jobId }) {
+export async function startDownload({ symbol, timeframe, start, end, sid, jobId, broker = "binance" }) {
   if (state.busy) throw new Error("a download is already in progress");
   setState({
     busy: true,
-    jobId, symbol, timeframe, start, end,
+    jobId, broker, symbol, timeframe, start, end,
     progress: null, result: null, error: null,
   });
   try {
-    const r = await downloadDataset({ symbol, timeframe, start, end, sid, jobId });
+    const r = await downloadDataset({ symbol, timeframe, start, end, sid, jobId, broker });
     setState({ busy: false, jobId: null, result: r });
     return r;
   } catch (e) {

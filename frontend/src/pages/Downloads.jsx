@@ -1,22 +1,81 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import Navbar from "../components/Navbar.jsx";
 import ConfirmModal, { TrashIcon } from "../components/ConfirmModal.jsx";
 import { listDatasets, deleteDataset } from "../services/api.js";
 import { waitForSocketId } from "../services/socket.js";
 import { getState as getDlState, subscribe as subscribeDl,
-         startDownload, clearResult as clearDlResult } from "../services/downloadStore.js";
+         startDownload } from "../services/downloadStore.js";
 
 const TFS = ["1m", "5m", "15m", "1h"];
-const SUGGESTED = ["BTCUSDT", "FETUSDT", "ETHUSDT", "SOLUSDT"];
+
+/**
+ * Asset-class tab definitions. Each declares its broker, default symbol,
+ * suggestion list (for the datalist), source label, and whether it's
+ * implemented yet. Adding a new asset class later = one entry in this list.
+ */
+const TABS = [
+  {
+    id: "crypto",
+    label: "Crypto",
+    broker: "binance",
+    source: "Binance via CCXT",
+    defaultSymbol: "BTCUSDT",
+    suggested: ["BTCUSDT", "FETUSDT", "LTCUSDT", "ETHUSDT", "SOLUSDT"],
+    enabled: true,
+    note: "Pair-shaped tickers (BASE+QUOTE concatenated, e.g. BTCUSDT). Re-running merges into the existing file.",
+  },
+  {
+    id: "commodity",
+    label: "Commodities",
+    broker: "dukascopy",
+    source: "Dukascopy (free tick history)",
+    defaultSymbol: "XAUUSD",
+    suggested: ["XAUUSD", "XAGUSD"],
+    enabled: true,
+    note: "Gold/silver via Dukascopy's public CDN. Real 23/5 trading hours (Friday close → Sunday open gap preserved).",
+  },
+  {
+    id: "forex",
+    label: "Forex",
+    broker: "dukascopy",
+    source: "Dukascopy (free tick history)",
+    defaultSymbol: "EURUSD",
+    suggested: ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"],
+    enabled: true,
+    note: "Major + minor pairs via Dukascopy. 24/5 trading hours.",
+  },
+  {
+    id: "stock",
+    label: "Stocks",
+    broker: null,
+    source: "Coming soon · capital.com or IG.com adapter",
+    defaultSymbol: "",
+    suggested: [],
+    enabled: false,
+    note: "Stocks require a broker adapter (capital.com or IG.com). Stage 5+ of the multi-asset roadmap.",
+  },
+  {
+    id: "index",
+    label: "Indices",
+    broker: null,
+    source: "Coming soon · capital.com or IG.com adapter",
+    defaultSymbol: "",
+    suggested: [],
+    enabled: false,
+    note: "Indices (US30, NAS100, SPX500, etc.) also wait on the same adapter as stocks.",
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Formatters
+// ---------------------------------------------------------------------------
 
 function isoDaysAgo(days) {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
 }
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
-}
+function todayIso() { return new Date().toISOString().slice(0, 10); }
 function fmtTime(epochSec) {
   if (!epochSec) return "—";
   return new Date(epochSec * 1000).toISOString().replace("T", " ").slice(0, 16) + "Z";
@@ -33,26 +92,37 @@ function fmtBytes(n) {
   return `${n.toFixed(1)} ${u[i]}`;
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 export default function Downloads() {
-  const [symbol, setSymbol] = useState("BTCUSDT");
+  const [activeTabId, setActiveTabId] = useState("crypto");
+  const tab = useMemo(() => TABS.find((t) => t.id === activeTabId) || TABS[0], [activeTabId]);
+
+  // Form state — re-initialized when the active tab changes.
+  const [symbol, setSymbol] = useState(tab.defaultSymbol);
   const [timeframe, setTimeframe] = useState("15m");
   const [start, setStart] = useState(isoDaysAgo(180));
   const [end, setEnd] = useState(todayIso());
 
-  // Download lifecycle lives in a module-level store so it survives navigation.
-  // useSyncExternalStore re-renders us whenever the store changes.
+  // Re-seed the symbol field when switching tabs.
+  useEffect(() => {
+    setSymbol(tab.defaultSymbol);
+  }, [tab.id, tab.defaultSymbol]);
+
+  // Download state lives in a module-level store so the in-flight POST + socket
+  // events survive navigation. useSyncExternalStore re-renders us on change.
   const dl = useSyncExternalStore(subscribeDl, getDlState);
   const { busy, progress, result, error } = dl;
 
   const [datasets, setDatasets] = useState([]);
-  const [confirmDel, setConfirmDel] = useState(null); // {symbol, timeframe} | null
+  const [confirmDel, setConfirmDel] = useState(null); // {symbol, timeframe, broker} | null
 
   const refresh = () => listDatasets().then(setDatasets).catch(() => {});
-
   useEffect(() => { refresh(); }, []);
 
-  // When a background download finishes while we were on another page, the
-  // dataset list shown here is stale — refresh once on (re-)mount-and-idle.
+  // Refresh the cached list when a background download finishes.
   useEffect(() => {
     if (!busy && result) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -60,28 +130,43 @@ export default function Downloads() {
 
   const onDownload = async (e) => {
     e?.preventDefault?.();
+    if (!tab.enabled) return;
     const sym = symbol.trim().toUpperCase();
-    const jobId = `${sym}_${timeframe}_${Date.now()}`;
-
+    const jobId = `${tab.broker}_${sym}_${timeframe}_${Date.now()}`;
     let sid = null;
     try { sid = await waitForSocketId(2000); } catch { /* progress just won't stream */ }
-
     try {
-      await startDownload({ symbol: sym, timeframe, start, end, sid, jobId });
+      await startDownload({ symbol: sym, timeframe, start, end, sid, jobId, broker: tab.broker });
     } catch { /* error already on the store */ }
   };
 
   const performDelete = async () => {
     if (!confirmDel) return;
-    const { symbol: s, timeframe: tf } = confirmDel;
+    const { symbol: s, timeframe: tf, broker: b } = confirmDel;
     setConfirmDel(null);
     try {
-      await deleteDataset({ symbol: s, timeframe: tf });
+      await deleteDataset({ symbol: s, timeframe: tf, broker: b });
       refresh();
     } catch (err) {
-      setError(err?.response?.data?.error || err.message || "delete failed");
+      // No place to surface this yet; refresh to at least keep the table accurate.
+      refresh();
     }
   };
+
+  // Datasets filtered to the active tab's asset class.
+  const tabDatasets = useMemo(() => {
+    return datasets.filter((d) => (d.asset_class || "crypto") === tab.id);
+  }, [datasets, tab.id]);
+
+  // Per-asset-class counts for the tab badges.
+  const countsByClass = useMemo(() => {
+    const c = {};
+    for (const d of datasets) {
+      const k = d.asset_class || "crypto";
+      c[k] = (c[k] || 0) + 1;
+    }
+    return c;
+  }, [datasets]);
 
   // Progress derived values
   const pct = progress && progress.expected
@@ -101,111 +186,160 @@ export default function Downloads() {
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Historical Data Downloads</h1>
           <p className="text-sm text-muted mt-1">
-            Pull OHLCV from Binance via CCXT and cache as Parquet under <span className="font-mono">backend/data/</span>.
+            Pull OHLCV by asset class and cache as Parquet under{" "}
+            <span className="font-mono">backend/data/{"{broker}"}/</span>.
             Once cached, the symbol becomes selectable on the Dashboard in Backtest mode.
-            Files persist across restarts.
           </p>
         </header>
 
-        {/* Form */}
-        <form
-          onSubmit={onDownload}
-          className="rounded-xl border border-line bg-bg-panel/60 p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end"
-        >
-          <div className="md:col-span-2">
-            <label className="block text-xs uppercase tracking-wider text-muted mb-1">Symbol (pair)</label>
-            <input
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              list="symbol-suggestions"
-              placeholder="e.g. BTCUSDT"
-              className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
-            />
-            <datalist id="symbol-suggestions">
-              {SUGGESTED.map((s) => <option key={s} value={s} />)}
-            </datalist>
-          </div>
+        {/* Tab strip */}
+        <div className="flex flex-wrap gap-1 border-b border-line">
+          {TABS.map((t) => {
+            const isActive = t.id === activeTabId;
+            const cnt = countsByClass[t.id] || 0;
+            return (
+              <button
+                key={t.id}
+                onClick={() => t.enabled && setActiveTabId(t.id)}
+                disabled={!t.enabled}
+                className={[
+                  "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition",
+                  isActive
+                    ? "border-accent-blue text-text"
+                    : "border-transparent text-muted hover:text-text",
+                  !t.enabled && "opacity-40 cursor-not-allowed hover:text-muted",
+                ].filter(Boolean).join(" ")}
+              >
+                {t.label}
+                {cnt > 0 && (
+                  <span className={`ml-2 inline-block min-w-[1.5em] px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                    isActive ? "bg-accent-blue/20 text-accent-blue" : "bg-bg-elev/60 text-muted"
+                  }`}>
+                    {cnt}
+                  </span>
+                )}
+                {!t.enabled && (
+                  <span className="ml-2 text-[10px] uppercase tracking-wider text-muted/60">soon</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
 
+        {/* Source + note */}
+        <div className="flex items-start justify-between gap-4 -mt-3">
           <div>
-            <label className="block text-xs uppercase tracking-wider text-muted mb-1">Timeframe</label>
-            <select
-              value={timeframe}
-              onChange={(e) => setTimeframe(e.target.value)}
-              className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
-            >
-              {TFS.map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
+            <div className="text-[10px] uppercase tracking-wider text-accent-blue">Source</div>
+            <div className="text-sm font-mono text-text mt-0.5">{tab.source}</div>
           </div>
+          <div className="text-[11px] text-muted/80 max-w-md text-right">{tab.note}</div>
+        </div>
 
-          <div>
-            <label className="block text-xs uppercase tracking-wider text-muted mb-1">Start</label>
-            <input
-              type="date"
-              value={start}
-              onChange={(e) => setStart(e.target.value)}
-              className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs uppercase tracking-wider text-muted mb-1">End</label>
-            <input
-              type="date"
-              value={end}
-              onChange={(e) => setEnd(e.target.value)}
-              className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
-            />
-          </div>
-
-          <div className="md:col-span-5 flex items-center gap-3">
-            <button
-              type="submit"
-              disabled={busy || !symbol || !start || !end}
-              className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
-            >
-              {busy ? "Downloading…" : "Download"}
-            </button>
-            <span className="text-xs text-muted">
-              Larger ranges + smaller TF = more time. Re-running merges into the existing file (idempotent).
-            </span>
-          </div>
-
-          {/* Progress */}
-          {busy && (
-            <div className="md:col-span-5 mt-2">
-              <div className="flex items-center justify-between text-xs font-mono text-muted mb-1">
-                <span>
-                  {progress?.status === "starting" && "queued…"}
-                  {progress?.status === "downloading" && (
-                    <>cursor at <span className="text-text">{fmtDateMs(progress.cursor_ms)}</span></>
-                  )}
-                  {!progress && "preparing…"}
-                </span>
-                <span>
-                  {busy && dl.symbol ? `${dl.symbol} ${dl.timeframe} · ` : ""}
-                  {(busy ? dl.start : start)} → {(busy ? dl.end : end)}
-                </span>
-              </div>
-
-              {/* Date-range cursor bar (visual %) */}
-              <div className="h-2 rounded-full bg-bg-elev border border-line overflow-hidden">
-                <div
-                  className="h-full bg-accent-grad transition-all duration-300"
-                  style={{ width: `${cursorPct ?? 0}%` }}
-                />
-              </div>
-
-              <div className="mt-2 flex items-center justify-between text-xs font-mono text-muted">
-                <span>
-                  {progress?.fetched?.toLocaleString?.() ?? 0}
-                  {" / "}
-                  ~{progress?.expected?.toLocaleString?.() ?? "?"} candles
-                </span>
-                <span>{pct != null ? `${pct}%` : ""}</span>
-              </div>
+        {/* Form (only when tab is enabled) */}
+        {tab.enabled ? (
+          <form
+            onSubmit={onDownload}
+            className="rounded-xl border border-line bg-bg-panel/60 p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end"
+          >
+            <div className="md:col-span-2">
+              <label className="block text-xs uppercase tracking-wider text-muted mb-1">Symbol</label>
+              <input
+                value={symbol}
+                onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+                list={`symbol-suggestions-${tab.id}`}
+                placeholder={tab.defaultSymbol}
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
+              />
+              <datalist id={`symbol-suggestions-${tab.id}`}>
+                {tab.suggested.map((s) => <option key={s} value={s} />)}
+              </datalist>
             </div>
-          )}
-        </form>
+
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-muted mb-1">Timeframe</label>
+              <select
+                value={timeframe}
+                onChange={(e) => setTimeframe(e.target.value)}
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
+              >
+                {TFS.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-muted mb-1">Start</label>
+              <input
+                type="date"
+                value={start}
+                onChange={(e) => setStart(e.target.value)}
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs uppercase tracking-wider text-muted mb-1">End</label>
+              <input
+                type="date"
+                value={end}
+                onChange={(e) => setEnd(e.target.value)}
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono focus:outline-none focus:border-accent-blue"
+              />
+            </div>
+
+            <div className="md:col-span-5 flex items-center gap-3">
+              <button
+                type="submit"
+                disabled={busy || !symbol || !start || !end}
+                className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
+              >
+                {busy ? "Downloading…" : `Download from ${tab.source.split(" ")[0]}`}
+              </button>
+              <span className="text-xs text-muted">
+                Larger ranges + smaller TF = more time. Re-runs merge into the existing file (idempotent).
+              </span>
+            </div>
+
+            {/* Progress */}
+            {busy && (
+              <div className="md:col-span-5 mt-2">
+                <div className="flex items-center justify-between text-xs font-mono text-muted mb-1">
+                  <span>
+                    {progress?.status === "starting" && "queued…"}
+                    {progress?.status === "downloading" && (
+                      <>cursor at <span className="text-text">{fmtDateMs(progress.cursor_ms)}</span></>
+                    )}
+                    {!progress && "preparing…"}
+                  </span>
+                  <span>
+                    {busy && dl.symbol ? `${dl.broker || ""} · ${dl.symbol} ${dl.timeframe} · ` : ""}
+                    {(busy ? dl.start : start)} → {(busy ? dl.end : end)}
+                  </span>
+                </div>
+
+                <div className="h-2 rounded-full bg-bg-elev border border-line overflow-hidden">
+                  <div
+                    className="h-full bg-accent-grad transition-all duration-300"
+                    style={{ width: `${cursorPct ?? 0}%` }}
+                  />
+                </div>
+
+                <div className="mt-2 flex items-center justify-between text-xs font-mono text-muted">
+                  <span>
+                    {progress?.fetched?.toLocaleString?.() ?? 0}
+                    {" / "}
+                    ~{progress?.expected?.toLocaleString?.() ?? "?"} candles
+                  </span>
+                  <span>{pct != null ? `${pct}%` : ""}</span>
+                </div>
+              </div>
+            )}
+          </form>
+        ) : (
+          <div className="rounded-xl border border-line/40 bg-bg-elev/20 p-8 text-center">
+            <div className="text-sm text-muted">{tab.note}</div>
+            <div className="mt-3 text-[11px] uppercase tracking-wider text-muted/60">Not available yet</div>
+          </div>
+        )}
 
         {error && (
           <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">
@@ -215,20 +349,24 @@ export default function Downloads() {
 
         {result && !busy && (
           <div className="rounded-md border border-accent-cyan/40 bg-accent-cyan/5 px-4 py-3 text-sm font-mono">
-            ✓ {result.symbol} {result.timeframe} — added {result.rows_added.toLocaleString()} rows
-            (total {result.rows_total.toLocaleString()}) · {fmtTime(result.first_time)} → {fmtTime(result.last_time)}
+            ✓ {result.broker || "binance"} · {result.symbol} {result.timeframe} — added{" "}
+            {result.rows_added?.toLocaleString?.() ?? "?"} rows (total{" "}
+            {result.rows_total?.toLocaleString?.() ?? "?"}) · {fmtTime(result.first_time)} → {fmtTime(result.last_time)}
           </div>
         )}
 
-        {/* Datasets table */}
+        {/* Filtered datasets table */}
         <section>
-          <h2 className="text-sm uppercase tracking-wider text-muted mb-3">Cached datasets ({datasets.length})</h2>
+          <h2 className="text-sm uppercase tracking-wider text-muted mb-3">
+            Cached {tab.label.toLowerCase()} datasets ({tabDatasets.length})
+          </h2>
           <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
             <table className="w-full text-sm">
               <thead className="text-xs uppercase tracking-wider text-muted bg-bg-elev/40">
                 <tr>
                   <th className="text-left px-4 py-2">Symbol</th>
                   <th className="text-left px-4 py-2">TF</th>
+                  <th className="text-left px-4 py-2">Broker</th>
                   <th className="text-right px-4 py-2">Rows</th>
                   <th className="text-left px-4 py-2">First</th>
                   <th className="text-left px-4 py-2">Last</th>
@@ -237,20 +375,25 @@ export default function Downloads() {
                 </tr>
               </thead>
               <tbody>
-                {datasets.length === 0 && (
-                  <tr><td colSpan={7} className="px-4 py-6 text-center text-muted text-xs">no datasets yet — fill the form above</td></tr>
+                {tabDatasets.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-6 text-center text-muted text-xs">
+                      no {tab.label.toLowerCase()} datasets yet — use the form above
+                    </td>
+                  </tr>
                 )}
-                {datasets.map((d) => (
-                  <tr key={`${d.symbol}_${d.timeframe}`} className="border-t border-line/60 hover:bg-bg-elev/30">
+                {tabDatasets.map((d) => (
+                  <tr key={`${d.broker}_${d.symbol}_${d.timeframe}`} className="border-t border-line/60 hover:bg-bg-elev/30">
                     <td className="px-4 py-2 font-mono">{d.symbol}</td>
                     <td className="px-4 py-2 font-mono">{d.timeframe}</td>
+                    <td className="px-4 py-2 font-mono text-muted text-xs">{d.broker || "binance"}</td>
                     <td className="px-4 py-2 font-mono text-right">{d.rows.toLocaleString()}</td>
                     <td className="px-4 py-2 font-mono text-muted">{fmtTime(d.first_time)}</td>
                     <td className="px-4 py-2 font-mono text-muted">{fmtTime(d.last_time)}</td>
                     <td className="px-4 py-2 font-mono text-right text-muted">{fmtBytes(d.size_bytes)}</td>
                     <td className="px-4 py-2 text-right">
                       <button
-                        onClick={() => setConfirmDel({ symbol: d.symbol, timeframe: d.timeframe })}
+                        onClick={() => setConfirmDel({ symbol: d.symbol, timeframe: d.timeframe, broker: d.broker || "binance" })}
                         title="Delete dataset"
                         aria-label={`Delete ${d.symbol} ${d.timeframe}`}
                         className="inline-flex items-center justify-center w-8 h-8 rounded-md text-muted hover:text-loss hover:bg-loss/10 transition"
@@ -273,8 +416,9 @@ export default function Downloads() {
           confirmDel ? (
             <>
               This will permanently delete the cached Parquet for{" "}
-              <span className="font-mono text-text">{confirmDel.symbol} {confirmDel.timeframe}</span>.
-              You can re-download it later from this page.
+              <span className="font-mono text-text">
+                {confirmDel.broker} · {confirmDel.symbol} {confirmDel.timeframe}
+              </span>. You can re-download it later from this page.
             </>
           ) : null
         }

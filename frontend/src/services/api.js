@@ -38,18 +38,19 @@ export async function listDatasets() {
   return data.datasets;
 }
 
-export async function downloadDataset({ symbol, timeframe, start, end, sid, jobId }) {
+export async function downloadDataset({ symbol, timeframe, start, end, sid, jobId, broker = "binance" }) {
   // start/end are 'YYYY-MM-DD' strings.
   // sid lets the backend stream `download_progress` Socket.IO events to us.
+  // broker selects which adapter handles the fetch (binance | dukascopy).
   const { data } = await api.post("/api/datasets/download", {
-    symbol, timeframe, start, end, sid, job_id: jobId,
+    symbol, timeframe, start, end, sid, job_id: jobId, broker,
   });
   return data;
 }
 
-export async function deleteDataset({ symbol, timeframe }) {
+export async function deleteDataset({ symbol, timeframe, broker = "binance" }) {
   const { data } = await api.delete("/api/datasets", {
-    params: { symbol, timeframe },
+    params: { symbol, timeframe, broker },
   });
   return data;
 }
