@@ -247,7 +247,7 @@ export default function GridSearch() {
           <div className="text-[11px] uppercase tracking-wider text-muted">Setup</div>
 
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-            <SymbolSelector value={symbol} options={symbols} onChange={setSymbol} />
+            <SymbolSelector value={symbol} options={symbols} datasets={datasets} onChange={setSymbol} />
             <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
             <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
           </div>

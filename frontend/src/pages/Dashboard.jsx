@@ -477,7 +477,7 @@ export default function Dashboard() {
 
       {/* Controls */}
       <div className="px-6 py-3 flex flex-wrap items-center gap-6 border-b border-line bg-bg-panel/30">
-        <SymbolSelector value={symbol} options={symbolList} onChange={setSymbol} />
+        <SymbolSelector value={symbol} options={symbolList} datasets={datasets} onChange={setSymbol} />
         <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
         {mode === "backtest" && (
           <BacktestKindToggle value={backtestKind} onChange={setBacktestKind} />
