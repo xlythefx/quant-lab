@@ -189,12 +189,17 @@ def download_range(
     start_ms: int,
     end_ms: int,
     progress_cb=None,
+    cancel_check=None,
 ) -> Dict:
     """
     Download a custom date range and write/merge into the Parquet for
     (symbol, timeframe). If a file already exists, the new rows are merged
     in (deduped) so the cache grows incrementally.
     Returns {rows_added, rows_total, path, first_time, last_time}.
+
+    `cancel_check`: optional callable returning True if the caller wants to
+    abort. Checked between pages — the partial result still gets merged into
+    the parquet so cancellation isn't a total loss.
     """
     if start_ms >= end_ms:
         raise ValueError("start must be before end")
@@ -208,6 +213,9 @@ def download_range(
     log.info("Downloading %s %s from %s to %s", symbol, timeframe, start_ms, end_ms)
 
     while since < end_ms:
+        if cancel_check is not None and cancel_check():
+            log.info("download_range cancelled at since=%s", since)
+            break
         try:
             rows = _exchange.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=page_limit)
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:

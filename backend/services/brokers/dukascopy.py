@@ -128,12 +128,17 @@ def download(
     *,
     workers: int = 6,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> pd.DataFrame:
     """Download Dukascopy ticks for `symbol` from `start` (UTC) to `end` (UTC,
     exclusive) and aggregate to OHLC bars at `timeframe`.
 
     Returns a DataFrame with columns: time (int seconds), open, high, low,
     close, volume. Same shape Quantlab's parquet cache uses everywhere else.
+
+    `cancel_check`: optional callable returning True if the caller wants to
+    stop. Checked between completed hour-fetches. Pending futures are
+    cancelled and the partial tick set is aggregated and returned.
     """
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
@@ -162,20 +167,32 @@ def download(
 
     all_ticks: list[tuple] = []
     completed = 0
+    cancelled = False
     session = requests.Session()
     # Modest concurrency. Dukas tolerates this but heavy hitting can briefly
     # rate-limit your IP. 6 workers + bounded retries is reliable.
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         futures = {pool.submit(_fetch_hour, symbol, hr, session, divisor): hr for hr in hours}
         for fut in as_completed(futures):
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                # cancel_futures=True asks Python (3.9+) to drop pending
+                # submitted-but-not-started tasks. In-flight ones still
+                # complete; their results just don't get harvested.
+                pool.shutdown(wait=False, cancel_futures=True)
+                break
             ticks = fut.result()
             if ticks:
                 all_ticks.extend(ticks)
             completed += 1
             if progress_cb and completed % 50 == 0:
                 progress_cb(completed, len(hours))
+    finally:
+        if not cancelled:
+            pool.shutdown(wait=True)
     if progress_cb:
-        progress_cb(len(hours), len(hours))
+        progress_cb(completed if cancelled else len(hours), len(hours))
 
     if not all_ticks:
         # Returns empty-but-typed DataFrame so callers don't have to special-case.

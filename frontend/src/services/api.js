@@ -40,11 +40,23 @@ export async function listDatasets() {
 
 export async function downloadDataset({ symbol, timeframe, start, end, sid, jobId, broker = "binance" }) {
   // start/end are 'YYYY-MM-DD' strings.
-  // sid lets the backend stream `download_progress` Socket.IO events to us.
-  // broker selects which adapter handles the fetch (binance | dukascopy).
+  // Returns immediately with {ok, job_id, ...}; actual progress + terminal
+  // state arrive via socket events (download_progress / download_complete /
+  // download_cancelled / download_error). broker selects which adapter
+  // handles the fetch (binance | dukascopy).
   const { data } = await api.post("/api/datasets/download", {
     symbol, timeframe, start, end, sid, job_id: jobId, broker,
   });
+  return data;
+}
+
+export async function cancelDownload() {
+  const { data } = await api.post("/api/datasets/download/cancel");
+  return data;
+}
+
+export async function getDownloadStatus() {
+  const { data } = await api.get("/api/datasets/download/status");
   return data;
 }
 
@@ -190,6 +202,12 @@ export async function aiAnalyzeWalkForward(wf_result) {
 
 export async function aiAnalyzeBacktestSection(result, section) {
   const { data } = await api.post("/api/ai/insights/backtest-section",
+    { result, section }, { timeout: 180_000 });
+  return data; // {text, model, usage}
+}
+
+export async function aiAnalyzeWalkForwardSection(result, section) {
+  const { data } = await api.post("/api/ai/insights/walkforward-section",
     { result, section }, { timeout: 180_000 });
   return data; // {text, model, usage}
 }

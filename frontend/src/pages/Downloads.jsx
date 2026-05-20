@@ -4,7 +4,8 @@ import ConfirmModal, { TrashIcon } from "../components/ConfirmModal.jsx";
 import { listDatasets, deleteDataset } from "../services/api.js";
 import { waitForSocketId } from "../services/socket.js";
 import { getState as getDlState, subscribe as subscribeDl,
-         startDownload } from "../services/downloadStore.js";
+         startDownload, cancelCurrent as cancelCurrentDl,
+         hydrate as hydrateDl } from "../services/downloadStore.js";
 
 const TFS = ["1m", "5m", "15m", "1h"];
 
@@ -92,6 +93,15 @@ function fmtBytes(n) {
   return `${n.toFixed(1)} ${u[i]}`;
 }
 
+function fmtDuration(sec) {
+  if (sec == null || !Number.isFinite(sec) || sec < 0) return "—";
+  if (sec < 60) return `${Math.round(sec)}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -114,13 +124,27 @@ export default function Downloads() {
   // Download state lives in a module-level store so the in-flight POST + socket
   // events survive navigation. useSyncExternalStore re-renders us on change.
   const dl = useSyncExternalStore(subscribeDl, getDlState);
-  const { busy, progress, result, error } = dl;
+  const { busy, progress, result, error, cancelled } = dl;
 
   const [datasets, setDatasets] = useState([]);
   const [confirmDel, setConfirmDel] = useState(null); // {symbol, timeframe, broker} | null
 
   const refresh = () => listDatasets().then(setDatasets).catch(() => {});
   useEffect(() => { refresh(); }, []);
+
+  // On mount: ask the backend whether a job is already running (e.g., user
+  // refreshed the page mid-download) and adopt its progress into the store.
+  useEffect(() => { hydrateDl(); }, []);
+
+  // Live-updating elapsed clock for the progress panel. Just bump a counter
+  // once a second while busy — the actual elapsed value is derived from
+  // dl.startedAt below.
+  const [, _tick] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    const id = setInterval(() => _tick((n) => (n + 1) % 1e9), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
 
   // Refresh the cached list when a background download finishes.
   useEffect(() => {
@@ -176,6 +200,12 @@ export default function Downloads() {
     ? Math.min(100, Math.max(0,
         ((progress.cursor_ms - progress.start_ms) /
           (progress.end_ms - progress.start_ms)) * 100))
+    : null;
+  // Elapsed + ETA based on the date-range cursor (preferred — more accurate
+  // than candle count for Dukas, where the candle estimate is approximate).
+  const elapsedSec = dl.startedAt ? (Date.now() - dl.startedAt) / 1000 : null;
+  const etaSec = (elapsedSec != null && cursorPct != null && cursorPct > 0.5 && cursorPct < 100)
+    ? Math.max(0, elapsedSec * (100 - cursorPct) / cursorPct)
     : null;
 
   return (
@@ -287,22 +317,32 @@ export default function Downloads() {
             </div>
 
             <div className="md:col-span-5 flex items-center gap-3">
-              <button
-                type="submit"
-                disabled={busy || !symbol || !start || !end}
-                className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
-              >
-                {busy ? "Downloading…" : `Download from ${tab.source.split(" ")[0]}`}
-              </button>
+              {busy ? (
+                <button
+                  type="button"
+                  onClick={() => cancelCurrentDl()}
+                  className="px-5 py-2 rounded-md bg-loss/15 text-loss border border-loss/40 text-sm font-medium"
+                >
+                  Cancel
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!symbol || !start || !end}
+                  className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
+                >
+                  Download from {tab.source.split(" ")[0]}
+                </button>
+              )}
               <span className="text-xs text-muted">
-                Larger ranges + smaller TF = more time. Re-runs merge into the existing file (idempotent).
+                Runs in the background — you can navigate away and come back. Re-runs merge into the existing file (idempotent).
               </span>
             </div>
 
             {/* Progress */}
             {busy && (
-              <div className="md:col-span-5 mt-2">
-                <div className="flex items-center justify-between text-xs font-mono text-muted mb-1">
+              <div className="md:col-span-5 mt-2 space-y-2">
+                <div className="flex items-center justify-between text-xs font-mono text-muted">
                   <span>
                     {progress?.status === "starting" && "queued…"}
                     {progress?.status === "downloading" && (
@@ -311,8 +351,8 @@ export default function Downloads() {
                     {!progress && "preparing…"}
                   </span>
                   <span>
-                    {busy && dl.symbol ? `${dl.broker || ""} · ${dl.symbol} ${dl.timeframe} · ` : ""}
-                    {(busy ? dl.start : start)} → {(busy ? dl.end : end)}
+                    {dl.broker ? `${dl.broker} · ${dl.symbol} ${dl.timeframe} · ` : ""}
+                    {fmtDateMs(progress?.start_ms) ?? "?"} → {fmtDateMs(progress?.end_ms) ?? "?"}
                   </span>
                 </div>
 
@@ -323,13 +363,20 @@ export default function Downloads() {
                   />
                 </div>
 
-                <div className="mt-2 flex items-center justify-between text-xs font-mono text-muted">
+                <div className="flex items-center justify-between text-xs font-mono text-muted">
                   <span>
                     {progress?.fetched?.toLocaleString?.() ?? 0}
                     {" / "}
                     ~{progress?.expected?.toLocaleString?.() ?? "?"} candles
                   </span>
                   <span>{pct != null ? `${pct}%` : ""}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs font-mono text-muted/80 pt-1 border-t border-line/30">
+                  <span>elapsed <span className="text-text">{fmtDuration(elapsedSec)}</span></span>
+                  <span>
+                    ETA <span className="text-text">{etaSec != null ? fmtDuration(etaSec) : "—"}</span>
+                  </span>
                 </div>
               </div>
             )}
@@ -352,6 +399,12 @@ export default function Downloads() {
             ✓ {result.broker || "binance"} · {result.symbol} {result.timeframe} — added{" "}
             {result.rows_added?.toLocaleString?.() ?? "?"} rows (total{" "}
             {result.rows_total?.toLocaleString?.() ?? "?"}) · {fmtTime(result.first_time)} → {fmtTime(result.last_time)}
+          </div>
+        )}
+
+        {cancelled && !busy && (
+          <div className="rounded-md border border-amber-400/40 bg-amber-400/5 px-4 py-3 text-sm font-mono text-amber-400">
+            ⨯ download cancelled · partial bars (if any) were merged into the cache
           </div>
         )}
 

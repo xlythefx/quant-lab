@@ -11,8 +11,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
 
 from config import SUPPORTED_SYMBOLS, TIMEFRAMES, MODES, DEFAULT_MODE, TIMEFRAME_SECONDS
-from services import market_data, event_bus, assets
-from services.brokers import dukascopy
+from services import market_data, event_bus, assets, download_jobs
 from utils.validators import (
     validate_symbol,
     validate_timeframe,
@@ -82,6 +81,10 @@ _BROKERS = ("binance", "dukascopy")
 
 @market_bp.post("/datasets/download")
 def datasets_download():
+    """Start a background download job. Returns immediately with the job_id;
+    the actual fetch runs in a daemon thread and streams progress via the
+    `download_progress` / `download_complete` / `download_error` /
+    `download_cancelled` socket events."""
     body = request.get_json(silent=True) or {}
     broker = (body.get("broker") or "binance").strip().lower()
     if broker not in _BROKERS:
@@ -98,148 +101,47 @@ def datasets_download():
     if end_ms <= start_ms:
         return jsonify({"error": "end must be after start"}), 400
 
-    sid = body.get("sid")  # Socket.IO id of the requesting client (for progress)
-    job_id = body.get("job_id") or f"{broker}_{symbol}_{tf}_{start_ms}_{end_ms}"
-
     tf_ms = TIMEFRAME_SECONDS[tf] * 1000
     expected = max(1, (end_ms - start_ms) // tf_ms)
 
-    # Initial event so the UI can render the bar at 0%.
-    event_bus.emit(
-        "download_progress",
-        {
-            "job_id": job_id,
-            "broker": broker,
-            "symbol": symbol, "timeframe": tf,
-            "fetched": 0, "expected": int(expected),
-            "start_ms": start_ms, "end_ms": end_ms,
-            "cursor_ms": start_ms,
-            "status": "starting",
-        },
-        to=sid,
-    )
+    spec = {
+        "broker": broker,
+        "symbol": symbol,
+        "timeframe": tf,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "expected": int(expected),
+        "sid": body.get("sid"),
+        "job_id": body.get("job_id") or f"{broker}_{symbol}_{tf}_{start_ms}_{end_ms}",
+    }
 
     try:
-        if broker == "binance":
-            meta = _download_binance(
-                symbol, tf, start_ms, end_ms, job_id, sid, expected,
-            )
-        else:  # dukascopy
-            meta = _download_dukascopy(
-                symbol, tf, start_ms, end_ms, job_id, sid, expected,
-            )
-    except FileNotFoundError as e:
-        event_bus.emit("download_progress", {"job_id": job_id, "status": "error", "error": str(e)}, to=sid)
-        return jsonify({"error": str(e)}), 404
+        job_id = download_jobs.start(spec)
     except ValueError as e:
-        event_bus.emit("download_progress", {"job_id": job_id, "status": "error", "error": str(e)}, to=sid)
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log.exception("download failed (broker=%s)", broker)
-        event_bus.emit("download_progress", {"job_id": job_id, "status": "error", "error": str(e)}, to=sid)
-        return jsonify({"error": str(e)}), 502
+        log.exception("download_jobs.start failed (broker=%s)", broker)
+        return jsonify({"error": str(e)}), 500
 
-    event_bus.emit(
-        "download_progress",
-        {
-            "job_id": job_id,
-            "broker": broker,
-            "symbol": symbol, "timeframe": tf,
-            "fetched": int(meta.get("rows_added", 0)),
-            "expected": int(expected),
-            "cursor_ms": end_ms,
-            "status": "done",
-        },
-        to=sid,
-    )
-
-    return jsonify({"symbol": symbol, "timeframe": tf, "broker": broker, "job_id": job_id, **meta})
+    return jsonify({
+        "ok": True,
+        "job_id": job_id,
+        "broker": broker,
+        "symbol": symbol,
+        "timeframe": tf,
+        "expected": int(expected),
+    })
 
 
-# ---------------------------------------------------------------------------
-# Broker-specific download dispatchers (called from datasets_download above)
-# ---------------------------------------------------------------------------
-
-def _download_binance(symbol, tf, start_ms, end_ms, job_id, sid, expected):
-    def progress_cb(p):
-        event_bus.emit(
-            "download_progress",
-            {
-                "job_id": job_id,
-                "broker": "binance",
-                "symbol": symbol, "timeframe": tf,
-                "fetched": int(p.get("fetched", 0)),
-                "expected": int(expected),
-                "start_ms": start_ms, "end_ms": end_ms,
-                "cursor_ms": int(p.get("last_ts") or start_ms),
-                "status": "downloading",
-            },
-            to=sid,
-        )
-    return market_data.download_range(symbol, tf, start_ms, end_ms, progress_cb=progress_cb)
+@market_bp.post("/datasets/download/cancel")
+def datasets_download_cancel():
+    ok = download_jobs.cancel_current()
+    return jsonify({"ok": ok})
 
 
-def _download_dukascopy(symbol, tf, start_ms, end_ms, job_id, sid, expected):
-    """Dukascopy fetches hour-files in parallel. We translate hour-level
-    progress into the same `download_progress` socket shape Binance uses, so
-    the UI doesn't need to know which broker is running."""
-    import os
-    from datetime import datetime, timezone
-    import pandas as pd
-
-    start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
-    end_dt   = datetime.fromtimestamp(end_ms   / 1000, tz=timezone.utc)
-
-    # Hour count drives the progress denominator; the per-bar `expected` is
-    # what the UI was already drawing for binance, so we keep emitting that
-    # but translate "X of Y hours done" into a cursor_ms position.
-    total_span_ms = max(1, end_ms - start_ms)
-
-    def progress_cb(done, total):
-        # Linear interpolation: done/total of the date range completed.
-        cursor_ms = start_ms + int(total_span_ms * (done / max(1, total)))
-        event_bus.emit(
-            "download_progress",
-            {
-                "job_id": job_id,
-                "broker": "dukascopy",
-                "symbol": symbol, "timeframe": tf,
-                "fetched": int(expected * (done / max(1, total))),
-                "expected": int(expected),
-                "start_ms": start_ms, "end_ms": end_ms,
-                "cursor_ms": cursor_ms,
-                "status": "downloading",
-            },
-            to=sid,
-        )
-
-    new_bars = dukascopy.download(symbol, start_dt, end_dt, tf, progress_cb=progress_cb)
-    if new_bars.empty:
-        raise ValueError(f"Dukascopy returned no ticks for {symbol} {tf} in that range")
-
-    # Merge into existing parquet (same idempotent semantics as Binance's
-    # download_range): load existing, concat, dedupe by time, sort, save.
-    path = market_data.parquet_path(symbol, tf, broker="dukascopy")
-    rows_before = 0
-    if os.path.exists(path):
-        try:
-            existing = pd.read_parquet(path)
-            rows_before = len(existing)
-            merged = pd.concat([existing, new_bars], ignore_index=True)
-        except Exception:
-            merged = new_bars  # corrupt existing → overwrite
-    else:
-        merged = new_bars
-    merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
-    merged.to_parquet(path, index=False)
-
-    return {
-        "rows_added": int(len(merged) - rows_before),
-        "rows_total": int(len(merged)),
-        "path": path,
-        "first_time": int(merged["time"].iloc[0]),
-        "last_time":  int(merged["time"].iloc[-1]),
-    }
+@market_bp.get("/datasets/download/status")
+def datasets_download_status():
+    return jsonify(download_jobs.get_status())
 
 
 @market_bp.delete("/datasets")
