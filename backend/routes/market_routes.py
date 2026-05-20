@@ -221,9 +221,9 @@ def backtest_prepare():
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
 
-    import os
-    path = market_data.parquet_path(symbol, tf)
-    if not os.path.exists(path):
+    # Look up the parquet across all broker namespaces (Stage 1 multi-broker).
+    path = market_data.find_parquet(symbol, tf)
+    if path is None:
         return jsonify({
             "error": f"No dataset for {symbol} {tf}. Open the Downloads page and pull a date range first.",
             "missing": True,

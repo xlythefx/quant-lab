@@ -18,7 +18,7 @@ import os
 import shutil
 import time
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import ccxt
 import numpy as np
@@ -348,12 +348,55 @@ def delete_dataset(symbol: str, timeframe: str, broker: str = BROKER_DEFAULT) ->
     return False
 
 
-def load_parquet(symbol: str, timeframe: str) -> pd.DataFrame:
-    path = parquet_path(symbol, timeframe)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"No dataset for {symbol} {timeframe}. Download it from the Downloads page first."
-        )
+def find_parquet(symbol: str, timeframe: str) -> Optional[str]:
+    """Locate the parquet for (symbol, timeframe) across any broker namespace.
+    Returns the absolute path, or None if not found.
+
+    Used by callers that know the symbol but not which broker it came from
+    (the backtest engine, walk-forward, streaming etc. pre-date the
+    multi-broker abstraction and just take a symbol string). Default-broker
+    path is tried first as a fast path; on miss, every broker subdir under
+    DATA_DIR is scanned.
+    """
+    if not os.path.isdir(DATA_DIR):
+        return None
+    default_path = parquet_path(symbol, timeframe, BROKER_DEFAULT)
+    if os.path.exists(default_path):
+        return default_path
+    for entry in sorted(os.listdir(DATA_DIR)):
+        full = os.path.join(DATA_DIR, entry)
+        if not os.path.isdir(full) or entry == "assets":
+            continue
+        candidate = os.path.join(full, f"{symbol}_{timeframe}.parquet")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def load_parquet(symbol: str, timeframe: str, broker: Optional[str] = None) -> pd.DataFrame:
+    """Load the cached parquet for (symbol, timeframe).
+
+    If `broker` is given, load strictly from that broker's namespace.
+    If `broker` is None, auto-discover: prefer the default broker's path,
+    fall back to scanning every broker subdir. Cross-broker disambiguation
+    is first-found wins — fine while no two brokers carry the same
+    (symbol, timeframe). When that day comes, every caller will need to
+    start passing `broker` explicitly.
+    """
+    if broker is not None:
+        path = parquet_path(symbol, timeframe, broker)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"No dataset for {symbol} {timeframe} on {broker}. "
+                f"Download it from the Downloads page first."
+            )
+    else:
+        path = find_parquet(symbol, timeframe)
+        if path is None:
+            raise FileNotFoundError(
+                f"No dataset for {symbol} {timeframe}. "
+                f"Download it from the Downloads page first."
+            )
     return pd.read_parquet(path)
 
 
