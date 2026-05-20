@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
 
 from config import SUPPORTED_SYMBOLS, TIMEFRAMES, MODES, DEFAULT_MODE, TIMEFRAME_SECONDS
-from services import market_data, event_bus
+from services import market_data, event_bus, assets
 from utils.validators import (
     validate_symbol,
     validate_timeframe,
@@ -50,7 +50,13 @@ def health():
 @market_bp.get("/symbols")
 def symbols():
     """Symbols are strictly what the user has downloaded. No fallbacks —
-    the Downloads page is the single source of truth."""
+    the Downloads page is the single source of truth.
+
+    As of Stage 1 of the multi-asset roadmap, each dataset row carries
+    `broker` + `asset_class` + `execution_model` fields. The top-level
+    `brokers` and `asset_classes` fields enumerate everything the catalog
+    knows about, so the frontend can render filters even before downloads
+    exist for some categories."""
     datasets = market_data.list_datasets()
     downloaded = sorted({d["symbol"] for d in datasets})
     return jsonify({
@@ -60,6 +66,8 @@ def symbols():
         "modes": MODES,
         "default_mode": DEFAULT_MODE,
         "datasets": datasets,
+        "brokers": assets.list_brokers(),
+        "asset_classes": list(assets.ASSET_CLASSES),
     })
 
 

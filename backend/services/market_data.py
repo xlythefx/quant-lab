@@ -7,8 +7,15 @@ Historical OHLCV via CCXT + Parquet cache for backtest replay.
 - load_parquet: read cached file as DataFrame for the backtest stream.
 
 All timestamps returned as integer SECONDS (Lightweight Charts convention).
+
+Parquet files are namespaced by broker under `data/{broker}/`. Pre-Stage-1
+installs stored them flat as `data/{symbol}_{tf}.parquet`; on first import
+we transparently migrate to `data/binance/{symbol}_{tf}.parquet`. The
+function signatures accept a `broker` argument that defaults to "binance"
+so every existing caller keeps working unchanged.
 """
 import os
+import shutil
 import time
 import logging
 from typing import List, Dict
@@ -22,10 +29,51 @@ from config import (
     BACKTEST_LOOKBACK_DAYS,
     TIMEFRAME_SECONDS,
 )
+from services import assets
 
 log = logging.getLogger(__name__)
 
+# Current default broker. Future stages introduce capital.com / ig.com etc.
+BROKER_DEFAULT = "binance"
+
 os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _broker_dir(broker: str) -> str:
+    return os.path.join(DATA_DIR, broker)
+
+
+def _migrate_flat_layout_to_broker_namespace() -> None:
+    """One-shot migration: move legacy `data/{symbol}_{tf}.parquet` files into
+    `data/binance/{symbol}_{tf}.parquet`. Idempotent — if the broker subdir
+    already exists, we still sweep the top level in case a partial run left
+    files behind. Never overwrites a file that already exists in the new
+    location.
+    """
+    if not os.path.isdir(DATA_DIR):
+        return
+    legacy = [
+        f for f in os.listdir(DATA_DIR)
+        if f.endswith(".parquet") and os.path.isfile(os.path.join(DATA_DIR, f))
+    ]
+    if not legacy:
+        return
+    target_dir = _broker_dir(BROKER_DEFAULT)
+    os.makedirs(target_dir, exist_ok=True)
+    for fname in legacy:
+        src = os.path.join(DATA_DIR, fname)
+        dst = os.path.join(target_dir, fname)
+        if os.path.exists(dst):
+            log.info("skipping migration of %s (target already exists)", fname)
+            continue
+        try:
+            shutil.move(src, dst)
+            log.info("migrated %s -> %s", src, dst)
+        except OSError as e:
+            log.warning("migration failed for %s: %s", fname, e)
+
+
+_migrate_flat_layout_to_broker_namespace()
 
 # Single shared CCXT client. enableRateLimit avoids hammering Binance.
 _exchange = ccxt.binance({"enableRateLimit": True, "timeout": 20000})
@@ -70,8 +118,10 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 500) -> List[Dict]:
     return _ohlcv_to_records(rows)
 
 
-def parquet_path(symbol: str, timeframe: str) -> str:
-    return os.path.join(DATA_DIR, f"{symbol}_{timeframe}.parquet")
+def parquet_path(symbol: str, timeframe: str, broker: str = BROKER_DEFAULT) -> str:
+    bdir = _broker_dir(broker)
+    os.makedirs(bdir, exist_ok=True)
+    return os.path.join(bdir, f"{symbol}_{timeframe}.parquet")
 
 
 def _is_fresh(path: str, max_age_seconds: int = 86400) -> bool:
@@ -228,43 +278,62 @@ def download_range(
 
 
 def list_datasets() -> List[Dict]:
-    """Scan data/ for *.parquet files and return metadata for each.
-    Skips empty/corrupt files so the dashboard never lists something
-    the seed endpoint can't actually serve."""
+    """Scan data/{broker}/ subdirs for *.parquet files and return metadata
+    for each, enriched with asset_class / execution_model / etc. from
+    services.assets.
+
+    Skips empty/corrupt files so the dashboard never lists something the
+    seed endpoint can't actually serve. Returned rows always include
+    `broker` and `asset_class` keys (Stage 1 of the multi-asset roadmap)."""
     out = []
     if not os.path.isdir(DATA_DIR):
         return out
-    for fname in sorted(os.listdir(DATA_DIR)):
-        if not fname.endswith(".parquet"):
+    # Each subdirectory of data/ that's not "assets" is treated as a broker.
+    broker_dirs = []
+    for entry in sorted(os.listdir(DATA_DIR)):
+        full = os.path.join(DATA_DIR, entry)
+        if not os.path.isdir(full):
             continue
-        stem = fname[:-len(".parquet")]
-        if "_" not in stem:
+        if entry == "assets":  # the metadata catalog dir, not a broker
             continue
-        symbol, tf = stem.rsplit("_", 1)
-        path = os.path.join(DATA_DIR, fname)
-        try:
-            if os.path.getsize(path) == 0:
-                log.warning("skipping empty parquet: %s", path)
+        broker_dirs.append((entry, full))
+
+    for broker, bdir in broker_dirs:
+        for fname in sorted(os.listdir(bdir)):
+            if not fname.endswith(".parquet"):
                 continue
-            df = pd.read_parquet(path, columns=["time"])
-            if len(df) == 0:
-                log.warning("skipping rowless parquet: %s", path)
+            stem = fname[: -len(".parquet")]
+            if "_" not in stem:
                 continue
-            out.append({
-                "symbol": symbol,
-                "timeframe": tf,
-                "rows": int(len(df)),
-                "first_time": int(df["time"].min()),
-                "last_time": int(df["time"].max()),
-                "size_bytes": os.path.getsize(path),
-            })
-        except Exception as e:
-            log.warning("could not read %s: %s", path, e)
+            symbol, tf = stem.rsplit("_", 1)
+            path = os.path.join(bdir, fname)
+            try:
+                if os.path.getsize(path) == 0:
+                    log.warning("skipping empty parquet: %s", path)
+                    continue
+                df = pd.read_parquet(path, columns=["time"])
+                if len(df) == 0:
+                    log.warning("skipping rowless parquet: %s", path)
+                    continue
+                meta = assets.get(symbol, broker)
+                out.append({
+                    "symbol": symbol,
+                    "timeframe": tf,
+                    "broker": broker,
+                    "asset_class": meta.asset_class,
+                    "execution_model": meta.execution_model,
+                    "rows": int(len(df)),
+                    "first_time": int(df["time"].min()),
+                    "last_time": int(df["time"].max()),
+                    "size_bytes": os.path.getsize(path),
+                })
+            except Exception as e:
+                log.warning("could not read %s: %s", path, e)
     return out
 
 
-def delete_dataset(symbol: str, timeframe: str) -> bool:
-    path = parquet_path(symbol, timeframe)
+def delete_dataset(symbol: str, timeframe: str, broker: str = BROKER_DEFAULT) -> bool:
+    path = parquet_path(symbol, timeframe, broker)
     if os.path.exists(path):
         os.remove(path)
         return True
