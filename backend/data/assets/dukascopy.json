@@ -1,0 +1,14 @@
+{
+  "XAUUSD": {
+    "asset_class": "commodity",
+    "execution_model": "commodity_cfd",
+    "base": "XAU",
+    "quote": "USD",
+    "contract_size": 100.0,
+    "tick_size": 0.01,
+    "market_hours_tz": "UTC",
+    "swap_long_pct": -2.5,
+    "swap_short_pct": 0.5,
+    "leverage_max": 20.0
+  }
+}
