@@ -21,6 +21,7 @@ from flask_socketio import SocketIO
 from config import CORS_ORIGINS, HOST, PORT, BACKTEST_DEFAULT_SPEED
 from routes.market_routes import market_bp
 from routes.strategy_routes import strategy_bp
+from routes.portfolio_routes import portfolio_bp
 from routes.settings_routes import settings_bp
 from routes.walkforward_routes import walkforward_bp
 from routes.grid_search_routes import grid_search_bp
@@ -49,6 +50,7 @@ def create_app():
     CORS(app, resources={r"/api/*": {"origins": CORS_ORIGINS}})
     app.register_blueprint(market_bp)
     app.register_blueprint(strategy_bp)
+    app.register_blueprint(portfolio_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(walkforward_bp)
     app.register_blueprint(grid_search_bp)

@@ -5,6 +5,7 @@ import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtTime } from "../services/format.js";
 import { downloadTradesCsv } from "../services/exportTrades.js";
 import { aiAnalyzeBacktestSection } from "../services/api.js";
 import { KpiCard, KV, Section, InsightCard, TabBar } from "../components/analytics/primitives.jsx";
+import { computeSubset } from "../services/portfolioSubset.js";
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -28,16 +29,127 @@ const TABS = [
   { id: "ai",           label: "AI Analysis" },
 ];
 
+const PORTFOLIO_TAB = { id: "skipped", label: "Skipped Signals" };
+
 export default function Analytics() {
   const [tab, setTab] = useState("overview");
   const [key, setKey] = useState(getKey());
+  // Set of strategy ids currently included in the view. Default = all.
+  const [selectedSids, setSelectedSids] = useState(() => new Set());
   useEffect(() => {
-    const onHash = () => setKey(getKey());
+    const onHash = () => { setKey(getKey()); setTab("overview"); };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const result = useLastResult(key);
+  const rawResult = useLastResult(key);
+  const isPortfolio = !!rawResult?.per_strategy;
+
+  // Available strategy ids (from the portfolio result).
+  const allSids = useMemo(() => {
+    if (!isPortfolio) return [];
+    return (rawResult.strategies || []).map((s) => s.strategy_id);
+  }, [rawResult, isPortfolio]);
+
+  // Initialise / reset the selection whenever the key (or strategy roster)
+  // changes — default to "all included" so the page renders the same as
+  // before by default.
+  useEffect(() => {
+    if (!isPortfolio) {
+      setSelectedSids(new Set());
+      return;
+    }
+    setSelectedSids(new Set(allSids));
+  }, [key, isPortfolio, allSids.join("|")]);
+
+  // Determine display mode from the selection.
+  //   none:   no strategies selected → empty state.
+  //   all:    every strategy selected → use raw portfolio aggregate.
+  //   single: exactly one selected → use per_strategy[sid].
+  //   subset: 2+ selected but not all → client-side recompute.
+  const viewMode = useMemo(() => {
+    if (!isPortfolio) return "single";
+    if (selectedSids.size === 0) return "none";
+    if (selectedSids.size === allSids.length) return "all";
+    if (selectedSids.size === 1) return "single";
+    return "subset";
+  }, [isPortfolio, selectedSids, allSids.length]);
+
+  // Build the single-result-shaped object that existing tab components consume.
+  const result = useMemo(() => {
+    if (!rawResult) return null;
+    if (!isPortfolio) return rawResult;
+    const firstSpec = rawResult.strategies?.[0] || {};
+
+    if (viewMode === "none") return null;
+
+    if (viewMode === "all") {
+      return {
+        strategy_id: "Portfolio",
+        symbol: firstSpec.symbol,
+        timeframe: firstSpec.timeframe,
+        risk_config: rawResult.risk_config,
+        params: {},
+        candles: [],
+        overlays: [],
+        trades: rawResult.trades || [],
+        equity: rawResult.equity || [],
+        stats: rawResult.stats || {},
+        analytics: rawResult.analytics || {},
+      };
+    }
+
+    if (viewMode === "single") {
+      const onlySid = [...selectedSids][0];
+      const psd = rawResult.per_strategy?.[onlySid];
+      if (!psd) return rawResult;
+      return {
+        strategy_id: onlySid,
+        symbol: psd.spec?.symbol || firstSpec.symbol,
+        timeframe: psd.spec?.timeframe || firstSpec.timeframe,
+        risk_config: rawResult.risk_config,
+        params: psd.spec?.params || {},
+        candles: psd.candles || [],
+        overlays: psd.overlays || [],
+        trades: psd.trades || [],
+        equity: psd.equity || [],
+        stats: psd.stats || {},
+        analytics: psd.analytics || {},
+      };
+    }
+
+    // viewMode === "subset"
+    return computeSubset(rawResult, selectedSids);
+  }, [rawResult, isPortfolio, viewMode, selectedSids]);
+
+  // Skipped Signals tab is portfolio-only. It's available in all/subset views
+  // (we filter the skipped list by selection). Hidden in single-strategy view.
+  const visibleTabs = useMemo(() => {
+    if (isPortfolio && (viewMode === "all" || viewMode === "subset")) {
+      const out = [...TABS];
+      out.splice(out.length - 1, 0, PORTFOLIO_TAB);
+      return out;
+    }
+    return TABS;
+  }, [isPortfolio, viewMode]);
+
+  // If user changes selection away from a tab that no longer exists, fall back.
+  useEffect(() => {
+    if (tab === "skipped" && !(isPortfolio && (viewMode === "all" || viewMode === "subset"))) {
+      setTab("overview");
+    }
+  }, [tab, isPortfolio, viewMode]);
+
+  // Helper actions for the selector.
+  const toggleSid = (sid) => {
+    setSelectedSids((prev) => {
+      const next = new Set(prev);
+      if (next.has(sid)) next.delete(sid); else next.add(sid);
+      return next;
+    });
+  };
+  const selectAll  = () => setSelectedSids(new Set(allSids));
+  const selectNone = () => setSelectedSids(new Set());
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -46,7 +158,9 @@ export default function Analytics() {
       <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-5">
         <header className="flex items-end justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Backtest Analytics</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {isPortfolio ? "Portfolio Analytics" : "Backtest Analytics"}
+            </h1>
             {result && (
               <div className="text-xs text-muted font-mono mt-0.5">
                 {result.strategy_id} · {result.symbol} · {result.timeframe}
@@ -66,11 +180,46 @@ export default function Analytics() {
           </div>
         )}
 
+        {/* Portfolio view selector — only when a portfolio result is loaded. */}
+        {rawResult && isPortfolio && (
+          <PortfolioViewSelector
+            result={rawResult}
+            selectedSids={selectedSids}
+            viewMode={viewMode}
+            onToggle={toggleSid}
+            onSelectAll={selectAll}
+            onSelectNone={selectNone}
+          />
+        )}
+
+        {rawResult && isPortfolio && viewMode === "none" && (
+          <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
+            <div className="text-base text-text mb-1">No strategies selected</div>
+            <div className="text-xs">Tick at least one strategy above to see analytics.</div>
+          </div>
+        )}
+
+        {/* Subset-mode banner: tells the user advanced quant metrics are not recomputed. */}
+        {result?._subset && (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-[11px] text-amber-300">
+            Subset view: stats, equity, heatmap, monthly, drawdown, and distribution are
+            recomputed client-side from {result._selected_sids.length} of {allSids.length} strategies.
+            Sessions and advanced quant metrics (Sortino / Calmar / deflated Sharpe / T-test)
+            are unavailable in subset mode — switch to <span className="text-amber-200">All</span> or a
+            single strategy to see them.
+          </div>
+        )}
+
         {result && (
           <>
-            <TabBar tabs={TABS} active={tab} onSelect={setTab} />
+            <TabBar tabs={visibleTabs} active={tab} onSelect={setTab} />
 
-            {tab === "overview"     && <OverviewTab     result={result} />}
+            {tab === "overview" && (
+              <OverviewTab
+                result={result}
+                portfolioResult={isPortfolio && viewMode === "all" ? rawResult : null}
+              />
+            )}
             {tab === "sessions"     && <SessionsTab     result={result} />}
             {tab === "heatmap"      && <HeatmapTab      result={result} />}
             {tab === "monthly"      && <MonthlyTab      result={result} />}
@@ -80,6 +229,13 @@ export default function Analytics() {
             {tab === "tradequality" && <TradeQualityTab result={result} />}
             {tab === "advanced"     && <AdvancedTab     result={result} />}
             {tab === "trades"       && <TradesTab       result={result} />}
+            {tab === "skipped"      && (
+              <SkippedSignalsTab
+                result={viewMode === "all"
+                  ? rawResult
+                  : { skipped_signals: result.skipped_signals || [] }}
+              />
+            )}
             {tab === "ai"           && <AITab            result={result} />}
           </>
         )}
@@ -89,10 +245,201 @@ export default function Analytics() {
 }
 
 // ---------------------------------------------------------------------------
+// PORTFOLIO VIEW SELECTOR — pills to switch between Aggregate and each strategy
+// ---------------------------------------------------------------------------
+
+function PortfolioViewSelector({ result, selectedSids, viewMode, onToggle, onSelectAll, onSelectNone }) {
+  const strategies = result?.strategies || [];
+  const total = strategies.length;
+  const n = selectedSids.size;
+
+  let label;
+  if (viewMode === "all")    label = `All ${total} strategies`;
+  else if (viewMode === "none")   label = "Nothing selected";
+  else if (viewMode === "single") label = "1 strategy";
+  else                            label = `Subset · ${n} of ${total}`;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 px-4 py-3 space-y-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] uppercase tracking-wider text-muted">View</span>
+          <span className="text-xs text-text font-mono">{label}</span>
+        </div>
+        <div className="flex items-center gap-2 text-[11px]">
+          <button onClick={onSelectAll}
+                  className="px-2 py-1 rounded text-muted hover:text-text border border-line">
+            Show all
+          </button>
+          <button onClick={onSelectNone}
+                  className="px-2 py-1 rounded text-muted hover:text-text border border-line">
+            Show none
+          </button>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        {strategies.map((s, i) => {
+          const on = selectedSids.has(s.strategy_id);
+          return (
+            <button
+              key={s.strategy_id}
+              onClick={() => onToggle(s.strategy_id)}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium border flex items-center gap-2 ${
+                on
+                  ? "bg-accent-grad text-white border-transparent"
+                  : "bg-bg-panel/40 text-muted hover:text-text border-line"
+              }`}
+              title={on ? "Click to exclude" : "Click to include"}
+            >
+              <span className={`w-3 h-3 rounded-sm flex items-center justify-center text-[9px] ${
+                on ? "bg-white/30 text-white" : "border border-line"
+              }`}>
+                {on ? "✓" : ""}
+              </span>
+              <span className="text-[10px] opacity-70">#{i + 1}</span>
+              <span>{s.strategy_id}</span>
+              <span className="text-[10px] opacity-60">· {s.symbol}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SKIPPED SIGNALS TAB — portfolio-mode diagnostic for cash-constrained skips
+// ---------------------------------------------------------------------------
+
+function SkippedSignalsTab({ result }) {
+  const skipped = result?.skipped_signals || [];
+  const total = skipped.length;
+
+  // Aggregate counterfactual P&L by strategy.
+  const bySid = useMemo(() => {
+    const map = {};
+    for (const sk of skipped) {
+      const e = map[sk.strategy_id] ||= { count: 0, cf_total: 0, cf_wins: 0, cf_losses: 0 };
+      e.count++;
+      if (sk.would_be_pnl != null) {
+        e.cf_total += sk.would_be_pnl;
+        if (sk.would_be_pnl > 0) e.cf_wins++;
+        else if (sk.would_be_pnl < 0) e.cf_losses++;
+      }
+    }
+    return map;
+  }, [skipped]);
+
+  const totalCf = Object.values(bySid).reduce((acc, v) => acc + v.cf_total, 0);
+
+  if (total === 0) {
+    return (
+      <Section title="Skipped Signals" hint="Entries that were dropped because cash was insufficient">
+        <div className="text-sm text-muted py-6 text-center">
+          No skipped signals. Every strategy entry fit within the available cash pool.
+        </div>
+      </Section>
+    );
+  }
+
+  return (
+    <>
+      <Section title="Skipped Signals" hint="Entries dropped because the shared cash pool was empty when this strategy's turn came (priority order)">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <KpiCard title="Total skipped" value={fmtInt(total)} />
+          <KpiCard title="Counterfactual P&L"
+                   value={fmtUsd(totalCf)}
+                   positive={totalCf >= 0}
+                   sub="if cash had been available" />
+          <KpiCard title="Would-be wins"
+                   value={fmtInt(Object.values(bySid).reduce((a, v) => a + v.cf_wins, 0))}
+                   positive />
+          <KpiCard title="Would-be losses"
+                   value={fmtInt(Object.values(bySid).reduce((a, v) => a + v.cf_losses, 0))}
+                   positive={false} />
+        </div>
+
+        <div className="mt-4 rounded-lg border border-line/60 overflow-hidden">
+          <div className="px-4 py-2 text-[10px] uppercase tracking-wider text-muted bg-bg-panel/40">
+            By strategy
+          </div>
+          <table className="w-full text-xs font-mono">
+            <thead className="text-muted border-b border-line/60">
+              <tr>
+                <th className="text-left px-3 py-2">Strategy</th>
+                <th className="text-right px-3 py-2">Skipped</th>
+                <th className="text-right px-3 py-2">CF P&L</th>
+                <th className="text-right px-3 py-2">CF W/L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(bySid).map(([sid, e]) => (
+                <tr key={sid} className="border-b border-line/30 last:border-0">
+                  <td className="px-3 py-2 text-text">{sid}</td>
+                  <td className="px-3 py-2 text-right">{fmtInt(e.count)}</td>
+                  <td className={`px-3 py-2 text-right ${e.cf_total >= 0 ? "text-profit" : "text-loss"}`}>
+                    {fmtUsd(e.cf_total)}
+                  </td>
+                  <td className="px-3 py-2 text-right text-muted">
+                    {e.cf_wins}W / {e.cf_losses}L
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Section>
+
+      <Section title="Full skip log" hint={`${total} entries`}>
+        <div className="overflow-x-auto rounded-lg border border-line/60">
+          <table className="w-full text-xs font-mono">
+            <thead className="text-muted bg-bg-panel/40 border-b border-line/60">
+              <tr>
+                <th className="text-left px-3 py-2">Time (UTC)</th>
+                <th className="text-left px-3 py-2">Strategy</th>
+                <th className="text-left px-3 py-2">Symbol</th>
+                <th className="text-left px-3 py-2">Side</th>
+                <th className="text-right px-3 py-2">Required $</th>
+                <th className="text-right px-3 py-2">Available cash $</th>
+                <th className="text-right px-3 py-2">Would-be P&L $</th>
+              </tr>
+            </thead>
+            <tbody>
+              {skipped.slice(0, 500).map((sk, i) => (
+                <tr key={i} className="border-b border-line/20 last:border-0">
+                  <td className="px-3 py-2">{fmtTime(sk.time)}</td>
+                  <td className="px-3 py-2 text-text">{sk.strategy_id}</td>
+                  <td className="px-3 py-2">{sk.symbol}</td>
+                  <td className="px-3 py-2">{sk.side}</td>
+                  <td className="px-3 py-2 text-right">{fmtUsd(sk.required_notional)}</td>
+                  <td className="px-3 py-2 text-right">{fmtUsd(sk.available_cash)}</td>
+                  <td className={`px-3 py-2 text-right ${
+                    sk.would_be_pnl == null ? "text-muted"
+                    : sk.would_be_pnl >= 0  ? "text-profit" : "text-loss"
+                  }`}>
+                    {sk.would_be_pnl == null ? "—" : fmtUsd(sk.would_be_pnl)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {skipped.length > 500 && (
+            <div className="px-3 py-2 text-[11px] text-muted text-center bg-bg-panel/30">
+              showing first 500 of {skipped.length}
+            </div>
+          )}
+        </div>
+      </Section>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // OVERVIEW
 // ---------------------------------------------------------------------------
 
-function OverviewTab({ result }) {
+function OverviewTab({ result, portfolioResult }) {
   const s = result.stats;
   const a = result.analytics;
   const rc = result.risk_config;
@@ -125,20 +472,90 @@ function OverviewTab({ result }) {
         <SidePanel title="Short" b={s.short} />
       </div>
 
+      {portfolioResult && (
+        <div className="lg:col-span-3">
+          <PerStrategyAttribution portfolioResult={portfolioResult} />
+        </div>
+      )}
+
       <div className="lg:col-span-3 rounded-xl border border-line bg-bg-panel/40 p-4">
         <div className="text-xs uppercase tracking-wider text-muted mb-2">Risk config in effect for this run</div>
-        <div className="grid grid-cols-6 gap-3 text-xs font-mono">
+        <div className="grid grid-cols-5 gap-3 text-xs font-mono">
           <KV label="Capital"    value={fmtUsd(rc?.starting_capital)} />
-          <KV label="Risk%"      value={`${fmtNum(rc?.risk_pct)}%`} />
           <KV label="Fee flat"   value={fmtUsd(rc?.fee_flat)} />
           <KV label="Fee %"      value={`${fmtNum(rc?.fee_pct)}%`} />
           <KV label="Slippage"   value={`${fmtNum(rc?.slippage_bps)} bps`} />
           <KV label="Pyramiding" value={fmtInt(rc?.pyramiding)} />
         </div>
+        <div className="text-[11px] text-muted mt-2">
+          risk_pct is per-strategy — see each strategy's params below.
+        </div>
       </div>
 
       <div className="lg:col-span-3">
         <ParamsCard params={result.params} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PER-STRATEGY ATTRIBUTION — shown on Overview when in aggregate portfolio view
+// ---------------------------------------------------------------------------
+
+function PerStrategyAttribution({ portfolioResult }) {
+  const perStrategy = portfolioResult?.per_strategy || {};
+  const aggTotal = portfolioResult?.stats?.total_return_dollars ?? 0;
+  const entries = Object.entries(perStrategy);
+  if (!entries.length) return null;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/40 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-xs uppercase tracking-wider text-muted">Per-strategy attribution</div>
+        <div className="text-[11px] text-muted">contributions to the shared cash pool</div>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-line/60">
+        <table className="w-full text-xs font-mono">
+          <thead className="text-muted bg-bg-panel/40 border-b border-line/60">
+            <tr>
+              <th className="text-left  px-3 py-2">Strategy</th>
+              <th className="text-left  px-3 py-2">Symbol</th>
+              <th className="text-right px-3 py-2">P&L $</th>
+              <th className="text-right px-3 py-2">Share</th>
+              <th className="text-right px-3 py-2">Trades</th>
+              <th className="text-right px-3 py-2">Win%</th>
+              <th className="text-right px-3 py-2">Sharpe</th>
+              <th className="text-right px-3 py-2">Max DD%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map(([sid, psd]) => {
+              const pnl = psd.stats?.total_return_dollars ?? 0;
+              const share = aggTotal !== 0 ? (pnl / aggTotal) * 100 : 0;
+              return (
+                <tr key={sid} className="border-b border-line/30 last:border-0">
+                  <td className="px-3 py-2 text-text">{sid}</td>
+                  <td className="px-3 py-2 text-muted">{psd.spec?.symbol || "—"}</td>
+                  <td className={`px-3 py-2 text-right ${pnl >= 0 ? "text-profit" : "text-loss"}`}>
+                    {fmtUsd(pnl)}
+                  </td>
+                  <td className="px-3 py-2 text-right text-muted">
+                    {aggTotal !== 0 ? `${fmtNum(share)}%` : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-right">{fmtInt(psd.stats?.trades)}</td>
+                  <td className="px-3 py-2 text-right">
+                    {psd.stats?.win_rate != null ? `${fmtNum(psd.stats.win_rate * 100)}%` : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-right">{fmtNum(psd.stats?.sharpe)}</td>
+                  <td className="px-3 py-2 text-right text-loss">
+                    {psd.stats?.max_drawdown_pct != null ? `${fmtNum(psd.stats.max_drawdown_pct)}%` : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

@@ -10,8 +10,10 @@ import CustomEquityChart from "../components/CustomEquityChart.jsx";
 import StatsPanel from "../components/StatsPanel.jsx";
 import StrategyCard from "../components/StrategyCard.jsx";
 import StrategyEditor from "../components/StrategyEditor.jsx";
+import PortfolioSummary from "../components/PortfolioSummary.jsx";
 import {
-  getSymbols, prepareBacktest, getStrategies, getOHLCV, runBacktest, getRiskConfig,
+  getSymbols, prepareBacktest, getStrategies, getOHLCV, runBacktest,
+  runPortfolioBacktest, getRiskConfig,
 } from "../services/api.js";
 import {
   setSpeed as wsSetSpeed,
@@ -19,7 +21,7 @@ import {
   startStrategy, stopStrategy, applyStrategy, clearAllStrategySubscriptions,
 } from "../services/socket.js";
 import {
-  useActiveStrategies, removeStrategy, updateParams,
+  useActiveStrategies, removeStrategy, updateParams, moveStrategy,
 } from "../services/strategiesStore.js";
 import { setLast as setLastResult, getLast as getLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
@@ -146,6 +148,9 @@ export default function Dashboard() {
 
   const [hindsightLoading, setHindsightLoading] = useState(false);
   const [hindsightError, setHindsightError] = useState(null);
+  const [portfolioResult, setPortfolioResult] = useState(
+    () => getLastResult(`__portfolio__|${symbol}|${timeframe}`) || null
+  );
   const inflightRef = useRef(0);
 
   const [editingId, setEditingId] = useState(null);
@@ -305,11 +310,17 @@ export default function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streaming, mode, symbol, timeframe, active.length]);
 
-  // ---- Hindsight runner (full sweep) ---------------------------
+  // ---- Hindsight runner (portfolio mode) -----------------------
+  //
+  // Single call into /api/backtest/portfolio walks all active strategies
+  // through ONE shared cash pool. N=1 degenerates to single-strategy.
+  // The portfolio response includes a per_strategy block we decompose into
+  // the same state shape the rest of the UI already expects.
   const runHindsight = async () => {
     if (!symbol || !active.length || !datasetExists) {
       setStaticData(null);
       setHindsightError(null);
+      setPortfolioResult(null);
       return;
     }
     const myReq = ++inflightRef.current;
@@ -318,13 +329,14 @@ export default function Dashboard() {
 
     try {
       const candlesP = getOHLCV({ symbol, timeframe, mode: "backtest", limit: 200000 });
-      const stratsP = active.map((s) =>
-        runBacktest({
-          strategy_id: s.id, symbol, timeframe, params: s.params,
-        }).then((r) => ({ s, r })).catch((e) => ({ s, error: e }))
-      );
+      const portfolioP = runPortfolioBacktest({
+        strategies: active.map((s, i) => ({
+          strategy_id: s.id, symbol, timeframe,
+          params: s.params, priority: i + 1,
+        })),
+      });
 
-      const [candles, ...stratResults] = await Promise.all([candlesP, ...stratsP]);
+      const [candles, portfolio] = await Promise.all([candlesP, portfolioP]);
       if (myReq !== inflightRef.current) return;  // stale
 
       const overlaysByStrategy = {};
@@ -332,29 +344,47 @@ export default function Dashboard() {
       const equityLocal = {};
       const statsLocal = {};
 
-      for (const { s, r, error } of stratResults) {
-        if (error) {
-          console.warn("strategy run failed:", s.id, error);
+      for (const s of active) {
+        const psd = portfolio.per_strategy?.[s.id];
+        if (!psd) {
+          console.warn("portfolio result missing strategy:", s.id);
           continue;
         }
-        overlaysByStrategy[s.id] = r.overlays || [];
-        markersByStrategyLocal[s.id] = tradesToMarkers(r.trades || []);
-        equityLocal[s.id] = (r.equity || []).map((e) => ({ time: e.time, value: e.value }));
+        overlaysByStrategy[s.id] = psd.overlays || [];
+        markersByStrategyLocal[s.id] = tradesToMarkers(psd.trades || []);
+        equityLocal[s.id] = (psd.equity || []).map((e) => ({ time: e.time, value: e.value }));
         statsLocal[s.id] = {
-          ...(r.stats || {}),
-          equity: r.stats?.final_equity ?? 0,
-          drawdown: r.stats?.max_drawdown_pct ?? 0,
-          trades: r.stats?.trades ?? 0,
-          win_rate: r.stats?.win_rate ?? 0,
+          ...(psd.stats || {}),
+          equity: psd.stats?.final_equity ?? 0,
+          drawdown: psd.stats?.max_drawdown_pct ?? 0,
+          trades: psd.stats?.trades ?? 0,
+          win_rate: psd.stats?.win_rate ?? 0,
         };
-        // Cache the full result for the Analytics page.
-        setLastResult(`${s.id}|${symbol}|${timeframe}`, r);
+        // Cache the per-strategy slice for the Analytics page.
+        // Reuse the existing legacy-shape so single-strategy Analytics
+        // works unchanged: pull the per_strategy block + risk_config.
+        setLastResult(`${s.id}|${symbol}|${timeframe}`, {
+          strategy_id: s.id, symbol, timeframe,
+          risk_config: portfolio.risk_config,
+          params: psd.spec?.params || s.params,
+          candles: psd.candles || [],
+          overlays: psd.overlays || [],
+          trades: psd.trades || [],
+          equity: psd.equity || [],
+          stats: psd.stats || {},
+          analytics: psd.analytics || {},
+        });
       }
+
+      // Cache the FULL portfolio result under a synthetic key so the
+      // Analytics page can render the polished portfolio view.
+      setLastResult(`__portfolio__|${symbol}|${timeframe}`, portfolio);
 
       setStaticData({ candles, overlaysByStrategy, markersByStrategy: markersByStrategyLocal });
       setEquityPoints(equityLocal);
       setStatsById(statsLocal);
       setMarkersByStrategy(markersByStrategyLocal);
+      setPortfolioResult(portfolio);
     } catch (e) {
       if (myReq !== inflightRef.current) return;
       const status = e?.response?.status;
@@ -376,6 +406,7 @@ export default function Dashboard() {
       setEquityPoints({});
       setMarkersByStrategy({});
       setStatsById({});
+      setPortfolioResult(null);
       return;
     }
     const restored = restoreFromCache(active, symbol, timeframe);
@@ -383,6 +414,7 @@ export default function Dashboard() {
     setEquityPoints(restored.equityPoints);
     setMarkersByStrategy(restored.markersByStrategy);
     setStatsById(restored.statsById);
+    setPortfolioResult(getLastResult(`__portfolio__|${symbol}|${timeframe}`) || null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, backtestKind, symbol, timeframe, active.length, datasetExists]);
 
@@ -464,12 +496,33 @@ export default function Dashboard() {
     return null;
   }, [active, catalogById]);
 
-  // Analytics / Monte Carlo deep-link targets — first active strategy's last result.
-  const resultKey = active.length > 0 && symbol
-    ? encodeURIComponent(`${active[0].id}|${symbol}|${timeframe}`)
+  // Equity-chart series. Per-strategy lines + a synthetic "Portfolio" line
+  // (the shared cash pool's aggregate MTM) when running 2+ strategies.
+  const SHOW_PORTFOLIO_LINE = active.length >= 2 && portfolioResult?.equity?.length > 0;
+  const chartStrategies = useMemo(() => {
+    if (!SHOW_PORTFOLIO_LINE) return active;
+    return [...active, { id: "__portfolio__", color: "#ffffff" }];
+  }, [active, SHOW_PORTFOLIO_LINE]);
+  const chartEquityPoints = useMemo(() => {
+    if (!SHOW_PORTFOLIO_LINE) return equityPoints;
+    return {
+      ...equityPoints,
+      __portfolio__: portfolioResult.equity.map((e) => ({ time: e.time, value: e.value })),
+    };
+  }, [equityPoints, portfolioResult, SHOW_PORTFOLIO_LINE]);
+
+  // Analytics deep-link target.
+  // - 2+ strategies with a cached portfolio result → portfolio view (all
+  //   strategies + per-strategy view selector + Skipped Signals tab).
+  // - Otherwise the single active strategy's last result.
+  // Monte Carlo now lives standalone — open it from the top nav. No
+  // dashboard-side deep-link needed.
+  const analyticsKey = active.length > 0 && symbol
+    ? (active.length >= 2 && portfolioResult
+        ? `__portfolio__|${symbol}|${timeframe}`
+        : `${active[0].id}|${symbol}|${timeframe}`)
     : null;
-  const analyticsHref  = resultKey ? `#analytics?key=${resultKey}`   : "#analytics";
-  const monteCarloHref = resultKey ? `#montecarlo?key=${resultKey}` : "#montecarlo";
+  const analyticsHref = analyticsKey ? `#analytics?key=${encodeURIComponent(analyticsKey)}` : "#analytics";
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -507,20 +560,12 @@ export default function Dashboard() {
             </button>
           )}
           {staticData && (
-            <>
-              <a
-                href={analyticsHref}
-                className="px-4 py-2 rounded-md border border-accent-blue/60 text-accent-blue hover:bg-accent-blue/10 text-sm font-medium"
-              >
-                View Analytics →
-              </a>
-              <a
-                href={monteCarloHref}
-                className="px-4 py-2 rounded-md border border-accent-blue/60 text-accent-blue hover:bg-accent-blue/10 text-sm font-medium"
-              >
-                Monte Carlo →
-              </a>
-            </>
+            <a
+              href={analyticsHref}
+              className="px-4 py-2 rounded-md border border-accent-blue/60 text-accent-blue hover:bg-accent-blue/10 text-sm font-medium"
+            >
+              View Analytics →
+            </a>
           )}
           <a
             href="#downloads"
@@ -548,14 +593,19 @@ export default function Dashboard() {
               {" "}<a href="#strategies" className="text-accent-blue hover:underline">browse the catalog →</a>
             </div>
           )}
-          {active.map((s) => (
+          {active.map((s, i) => (
             <StrategyCard
               key={s.id}
               strategy={catalogById[s.id]}
               color={s.color}
               stats={statsById[s.id]}
+              priority={active.length > 1 ? i + 1 : null}
+              canMoveUp={i > 0}
+              canMoveDown={i < active.length - 1}
               onSettings={() => setEditingId(s.id)}
               onRemove={() => removeStrategy(s.id)}
+              onMoveUp={active.length > 1 ? () => moveStrategy(s.id, "up") : undefined}
+              onMoveDown={active.length > 1 ? () => moveStrategy(s.id, "down") : undefined}
             />
           ))}
           {active.length > 0 && (
@@ -566,6 +616,18 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {/* Portfolio aggregate — shown when 2+ strategies share a cash pool. */}
+      {mode === "backtest" && backtestKind === "hindsight"
+        && active.length >= 2 && portfolioResult && (
+        <div className="px-4 pt-3">
+          <PortfolioSummary
+            result={portfolioResult}
+            symbol={symbol}
+            timeframe={timeframe}
+          />
+        </div>
+      )}
 
       {/* Charts */}
       <main className="flex-1 p-4 flex flex-col gap-3">
@@ -660,16 +722,22 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Equity panel */}
+        {/* Equity panel — per-strategy lines + aggregate "Portfolio" line on top */}
         <div className="relative h-[28vh] rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
           {active.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-muted">
               add strategies on the Strategies page to see equity curves here
             </div>
           )}
+          {active.length >= 2 && portfolioResult?.equity?.length > 0 && (
+            <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5 text-[10px] font-mono text-muted pointer-events-none">
+              <span className="w-3 h-[2px] bg-white" />
+              <span>Portfolio (shared)</span>
+            </div>
+          )}
           <CustomEquityChart
-            strategies={active}
-            pointsByStrategy={equityPoints}
+            strategies={chartStrategies}
+            pointsByStrategy={chartEquityPoints}
             startingCapital={riskConfig?.starting_capital ?? 100000}
           />
         </div>

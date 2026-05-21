@@ -80,6 +80,20 @@ export async function runBacktest({ strategy_id, symbol, timeframe, params, star
   return data;
 }
 
+/**
+ * Portfolio backtest — accepts 1..N strategies sharing one cash pool.
+ * `strategies` is `[{strategy_id, symbol, timeframe, params, priority}]`.
+ * Returns `{strategies, risk_config, equity, trades, skipped_signals,
+ *           stats, analytics, per_strategy: {sid: {trades, equity, stats,
+ *           analytics, candles, overlays, spec}}}`.
+ */
+export async function runPortfolioBacktest({ strategies, start_time, end_time }) {
+  const { data } = await api.post("/api/backtest/portfolio", {
+    strategies, start_time, end_time,
+  });
+  return data;
+}
+
 export async function getRiskConfig() {
   const { data } = await api.get("/api/risk-config");
   return data;
@@ -171,13 +185,15 @@ export async function getCostSweepLastResult() {
 // Monte Carlo
 // ---------------------------------------------------------------------------
 
-/** Run a Monte Carlo simulation against a strategy.
- *  method = "trade_bootstrap" | "block_bootstrap" | "synthetic". */
-export async function runMonteCarlo({ strategy_id, symbol, timeframe, params,
-                                      start_time, end_time, method,
-                                      n_sims, block_size, seed }) {
+/** Run a Monte Carlo simulation against 1..N strategies.
+ *  `strategies` is `[{strategy_id, symbol, timeframe, params, priority}]`.
+ *  method = "trade_bootstrap" | "block_bootstrap" | "synthetic".
+ *  N≥2 runs MC over the portfolio aggregate equity/trades. Synthetic
+ *  requires all strategies share the same (symbol, timeframe). */
+export async function runMonteCarlo({ strategies, start_time, end_time,
+                                      method, n_sims, block_size, seed }) {
   const { data } = await api.post("/api/montecarlo/run", {
-    strategy_id, symbol, timeframe, params, start_time, end_time,
+    strategies, start_time, end_time,
     method, n_sims, block_size, seed,
   });
   return data;

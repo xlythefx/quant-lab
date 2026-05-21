@@ -18,8 +18,6 @@ export default function StrategyEditor({
   const groups = useMemo(() => {
     const g = {};
     for (const spec of schema || []) {
-      // risk_pct is managed globally on the Risk page — never shown here.
-      if (spec.name === "risk_pct") continue;
       (g[spec.group] ||= []).push(spec);
     }
     return g;

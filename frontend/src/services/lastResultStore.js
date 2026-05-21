@@ -8,7 +8,9 @@
  */
 import { useEffect, useState } from "react";
 
-const KEY = "quantlab.lastResult.v1";
+// v2: risk_pct moved from global → per-strategy. Cached v1 results were
+// computed under the old global sizing; invalidate them.
+const KEY = "quantlab.lastResult.v2";
 
 function load() {
   try {

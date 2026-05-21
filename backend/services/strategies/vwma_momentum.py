@@ -109,7 +109,9 @@ class VwmaMomentumStrategy(Strategy):
                   {"long": True, "short": True},
                   group="Direction"),
         ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
-                  description="Max concurrent positions per side. Each tranche is sized at the global Risk%. Set to 1 to disable stacking."),
+                  description="Max concurrent positions per side. Each tranche is sized at the strategy's Risk%. Set to 1 to disable stacking."),
+        ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
+                  description="Position size as % of current equity per trade. Notional = equity × risk_pct ÷ entry_price."),
     ]
 
     META = StrategyMeta(

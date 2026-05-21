@@ -94,6 +94,9 @@ class LunarStrategy(Strategy):
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
                   group="Direction"),
+
+        ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
+                  description="Position size as % of current equity per trade. Notional = equity × risk_pct ÷ entry_price."),
     ]
 
     META = StrategyMeta(

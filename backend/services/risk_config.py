@@ -1,7 +1,8 @@
 """
 Global risk-management configuration shared by ALL strategies.
 
-Single source of truth for: starting capital, risk per trade, fees, slippage.
+Single source of truth for: starting capital, fees, slippage.
+risk_pct lives on each strategy's PARAM_SCHEMA (per-strategy sizing).
 Persisted to data/risk_config.json so it survives restarts.
 """
 from __future__ import annotations
@@ -21,11 +22,10 @@ _LOCK = Lock()
 
 DEFAULTS: dict = {
     "starting_capital": float(STARTING_CAPITAL),
-    "risk_pct": 3.0,             # % of equity per trade
     "fee_flat":   0.0,           # flat $ per trade (each side)
     "fee_pct":    0.04,          # % of notional per trade (each side)
     "slippage_bps": 1.0,         # basis points applied to fill price
-    "pyramiding": 10.0,          # max concurrent positions per strategy
+    "pyramiding": 10.0,          # legacy fallback; pyramiding is per-strategy
 }
 
 _cache: dict | None = None
@@ -39,7 +39,6 @@ def _coerce(d: dict) -> dict:
             except (TypeError, ValueError): pass
     # Sanity bounds.
     out["starting_capital"] = max(1.0, out["starting_capital"])
-    out["risk_pct"] = max(0.0, min(100.0, out["risk_pct"]))
     out["fee_flat"] = max(0.0, out["fee_flat"])
     out["fee_pct"] = max(0.0, min(10.0, out["fee_pct"]))
     out["slippage_bps"] = max(0.0, min(500.0, out["slippage_bps"]))

@@ -1,6 +1,5 @@
 {
   "starting_capital": 100000.0,
-  "risk_pct": 10.0,
   "fee_flat": 0.0,
   "fee_pct": 0.0,
   "slippage_bps": 0.0,

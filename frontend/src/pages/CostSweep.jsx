@@ -498,6 +498,8 @@ function FixedParamEditor({ schema, params, onChange }) {
       <div className="text-[11px] text-muted/70">
         Cost Sweep tests how these fixed params behave under different execution costs.
         Use Walk-Forward or Grid Search to find good params first.
+        Position sizing (<span className="font-mono">risk_pct</span>) is per-strategy —
+        edit it on the Strategies page; it's not shown here.
       </div>
 
       {Object.entries(groups).map(([group, specs]) => (

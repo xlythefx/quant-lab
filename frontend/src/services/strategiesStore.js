@@ -6,6 +6,9 @@
  * Shape:
  *   active: [{id, color, params}]
  *
+ * Array order IS the portfolio priority (index 0 = highest priority).
+ * The portfolio backtest uses this order for same-bar cash conflicts.
+ *
  * No external deps — uses the subscribe/snapshot pattern (compatible with
  * useSyncExternalStore, but we just expose a hook below).
  */
@@ -82,6 +85,16 @@ export function removeStrategy(id) {
 
 export function updateParams(id, params) {
   setState(state.map((s) => (s.id === id ? { ...s, params } : s)));
+}
+
+export function moveStrategy(id, direction) {
+  const i = state.findIndex((s) => s.id === id);
+  if (i < 0) return;
+  const j = i + (direction === "up" ? -1 : +1);
+  if (j < 0 || j >= state.length) return;
+  const next = state.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  setState(next);
 }
 
 export function clearAll() {

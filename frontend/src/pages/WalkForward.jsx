@@ -315,7 +315,7 @@ export default function WalkForward() {
   );
 
   const setupProps = {
-    symbols, symbol, setSymbol,
+    symbols, datasets, symbol, setSymbol,
     timeframe, setTimeframe, tfsForSymbol,
     range, setRange,
     currentDataset,
@@ -408,7 +408,7 @@ export default function WalkForward() {
 // ---------------------------------------------------------------------------
 
 function SetupTab({
-  symbols, symbol, setSymbol,
+  symbols, datasets, symbol, setSymbol,
   timeframe, setTimeframe, tfsForSymbol,
   range, setRange,
   currentDataset,

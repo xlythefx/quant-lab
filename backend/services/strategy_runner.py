@@ -281,9 +281,8 @@ class LiveRunner:
             return
         _emit_signal(self.strategy_id, self.sid, sig)
 
-        # risk_pct is now sourced from the GLOBAL risk_config (Risk page),
-        # not the strategy's PARAM_SCHEMA — strategies no longer carry it.
-        risk_pct = float(risk_config.get()["risk_pct"]) / 100.0
+        # risk_pct is per-strategy (lives on each strategy's PARAM_SCHEMA).
+        risk_pct = float(self.strategy.p.get("risk_pct", 3.0)) / 100.0
         ts = int(sig.time)
         trade_meta = None
 

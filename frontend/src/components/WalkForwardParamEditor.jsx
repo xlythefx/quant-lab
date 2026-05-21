@@ -106,6 +106,8 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
         <div>
           Toggle <span className="text-text">Search</span> on a param to sweep it over IS windows.
           Untoggled params use the fixed value below.
+          Position sizing (<span className="font-mono">risk_pct</span>) is per-strategy and
+          not searched — edit it on the Strategies page.
         </div>
         {perParam.entries.length > 0 ? (
           <div>

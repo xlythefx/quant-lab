@@ -86,6 +86,8 @@ export default function GridSearchParamEditor({ schema, baseParams, gridParams, 
         <div>
           Toggle <span className="text-text">Grid</span> on a param and enter a comma-separated
           list of values to test. Every combination is backtested exhaustively.
+          Position sizing (<span className="font-mono">risk_pct</span>) is per-strategy and
+          not swept — edit it on the Strategies page.
         </div>
         {gridParams && gridParams.length > 0 ? (
           <div>

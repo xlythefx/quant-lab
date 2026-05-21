@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Navbar from "../components/Navbar.jsx";
-import { useLastResult } from "../services/lastResultStore.js";
+import SymbolSelector from "../components/SymbolSelector.jsx";
+import TimeframeSelector from "../components/TimeframeSelector.jsx";
+import DateRangePicker from "../components/DateRangePicker.jsx";
+import MCStrategyPicker from "../components/MCStrategyPicker.jsx";
 import { fmtUsd, fmtNum, fmtPct, fmtInt } from "../services/format.js";
-import { runMonteCarlo, aiAnalyzeMonteCarlo } from "../services/api.js";
+import {
+  runMonteCarlo, aiAnalyzeMonteCarlo, getSymbols, getStrategies,
+} from "../services/api.js";
 import { TabBar, KpiCard } from "../components/analytics/primitives.jsx";
-
-function getKey() {
-  const m = window.location.hash.match(/key=([^&]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
 
 function getTabFromHash() {
   const m = window.location.hash.match(/tab=([^&]+)/);
@@ -16,11 +16,16 @@ function getTabFromHash() {
 }
 
 function setTabInHash(t) {
-  // Preserve any existing ?key=… so Open-in-Analytics-style deep links still work.
   const hash = window.location.hash;
   const stripped = hash.replace(/[?&]tab=[^&]*/g, "");
   const sep = stripped.includes("?") ? "&" : "?";
   window.location.hash = `${stripped || "#montecarlo"}${sep}tab=${encodeURIComponent(t)}`;
+}
+
+function isoToEpochSec(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso + "T00:00:00Z");
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
 }
 
 const MC_METHODS = [
@@ -42,21 +47,22 @@ const TABS = [
 ];
 
 export default function MonteCarlo() {
-  const [key, setKey] = useState(getKey());
   const [tab, setTab] = useState(getTabFromHash());
-
   useEffect(() => {
-    const onHash = () => {
-      setKey(getKey());
-      setTab(getTabFromHash());
-    };
+    const onHash = () => setTab(getTabFromHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const result = useLastResult(key);
+  // Setup state — Monte Carlo is now standalone (no Dashboard dependency).
+  const [symbolList, setSymbolList] = useState([]);
+  const [datasets, setDatasets] = useState([]);
+  const [catalog, setCatalog] = useState([]);
+  const [symbol, setSymbol] = useState(null);
+  const [timeframe, setTimeframe] = useState("15m");
+  const [strategies, setStrategies] = useState([]);   // [{id, params}]
+  const [dateRange, setDateRange] = useState({ start: "", end: "" });
 
-  // Run state lives at the top so it survives tab switches.
   const [method, setMethod] = useState("trade_bootstrap");
   const [nSims, setNSims] = useState(1000);
   const [blockSize, setBlockSize] = useState("");
@@ -67,6 +73,13 @@ export default function MonteCarlo() {
 
   const onTab = (id) => { setTabInHash(id); setTab(id); };
 
+  // Load symbol catalog + strategy catalog.
+  useEffect(() => {
+    getSymbols().then((d) => { setSymbolList(d.symbols || []); setDatasets(d.datasets || []); })
+                .catch(() => {});
+    getStrategies().then(setCatalog).catch(() => {});
+  }, []);
+
   // When a run completes, auto-flip from Setup to Distribution.
   const lastMcRef = useRef(null);
   useEffect(() => {
@@ -75,20 +88,25 @@ export default function MonteCarlo() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mc]);
 
+  const canRun = !!symbol && !!timeframe && strategies.length > 0 && !loading;
+
   async function onRun() {
-    if (!result) return;
+    if (!canRun) return;
     setLoading(true); setError(null);
     try {
-      const data = await runMonteCarlo({
-        strategy_id: result.strategy_id,
-        symbol: result.symbol,
-        timeframe: result.timeframe,
-        params: result.params,
+      const payload = {
+        strategies: strategies.map((s, i) => ({
+          strategy_id: s.id, symbol, timeframe,
+          params: s.params, priority: i + 1,
+        })),
+        start_time: isoToEpochSec(dateRange.start),
+        end_time:   isoToEpochSec(dateRange.end),
         method,
         n_sims: Number(nSims) || 1000,
         block_size: blockSize === "" ? undefined : Number(blockSize),
         seed: Number(seed) || 42,
-      });
+      };
+      const data = await runMonteCarlo(payload);
       setMc(data);
     } catch (e) {
       setError(e?.response?.data?.error || e.message || "MC run failed");
@@ -102,6 +120,13 @@ export default function MonteCarlo() {
     [mc],
   );
 
+  // Header context line — shows the MC config when a run is loaded.
+  const subtitle = mc
+    ? `${mc.is_portfolio ? `Portfolio · ${mc.strategies.length} strategies` : `${mc.strategies?.[0]?.strategy_id || "single"}`}`
+      + ` · ${mc.strategies?.[0]?.symbol || ""} · ${mc.strategies?.[0]?.timeframe || ""}`
+      + ` · ${mc.method} · ${mc.n_sims} sims`
+    : null;
+
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar view="montecarlo" />
@@ -110,59 +135,47 @@ export default function MonteCarlo() {
         <header className="flex items-end justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Monte Carlo</h1>
-            {result && (
-              <div className="text-xs text-muted font-mono mt-0.5">
-                {result.strategy_id} · {result.symbol} · {result.timeframe}
-              </div>
+            {subtitle && (
+              <div className="text-xs text-muted font-mono mt-0.5">{subtitle}</div>
             )}
           </div>
           <a href="#dashboard" className="text-xs text-accent-blue hover:underline">← Dashboard</a>
         </header>
 
-        {!result && (
-          <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
-            <div className="text-base text-text mb-1">No backtest result loaded</div>
-            <div className="text-xs">Run a strategy on the Dashboard first.</div>
-            <a href="#dashboard" className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm">
-              Open Dashboard →
-            </a>
-          </div>
+        <TabBar tabs={tabs} active={tab} onSelect={onTab} />
+
+        {tab === "setup" && (
+          <SetupTab
+            symbolList={symbolList} datasets={datasets} catalog={catalog}
+            symbol={symbol} setSymbol={setSymbol}
+            timeframe={timeframe} setTimeframe={setTimeframe}
+            strategies={strategies} setStrategies={setStrategies}
+            dateRange={dateRange} setDateRange={setDateRange}
+            method={method} setMethod={setMethod}
+            nSims={nSims} setNSims={setNSims}
+            blockSize={blockSize} setBlockSize={setBlockSize}
+            seed={seed} setSeed={setSeed}
+            onRun={onRun} loading={loading} error={error}
+            canRun={canRun} mc={mc}
+          />
         )}
+        {tab === "distribution" && mc && <DistributionTab mc={mc} />}
+        {tab === "paths"        && mc && <PathsTab mc={mc} />}
+        {tab === "drawdown"     && mc && <DrawdownTab mc={mc} />}
+        {tab === "sharpe"       && mc && <SharpeTab mc={mc} />}
+        {tab === "ai"           && mc && <AITab mc={mc} />}
 
-        {result && (
-          <>
-            <TabBar tabs={tabs} active={tab} onSelect={onTab} />
-
-            {tab === "setup" && (
-              <SetupTab
-                method={method} setMethod={setMethod}
-                nSims={nSims} setNSims={setNSims}
-                blockSize={blockSize} setBlockSize={setBlockSize}
-                seed={seed} setSeed={setSeed}
-                onRun={onRun} loading={loading} error={error}
-                tradesCount={result?.trades?.length || 0}
-                mc={mc}
-              />
-            )}
-            {tab === "distribution" && mc && <DistributionTab mc={mc} />}
-            {tab === "paths"        && mc && <PathsTab mc={mc} />}
-            {tab === "drawdown"     && mc && <DrawdownTab mc={mc} />}
-            {tab === "sharpe"       && mc && <SharpeTab mc={mc} />}
-            {tab === "ai"           && mc && <AITab mc={mc} />}
-
-            {!mc && tab !== "setup" && (
-              <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
-                <div className="text-base text-text mb-1">No Monte Carlo run yet</div>
-                <div className="text-xs">Run a simulation on the Setup tab first.</div>
-                <button
-                  onClick={() => onTab("setup")}
-                  className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm"
-                >
-                  Go to Setup →
-                </button>
-              </div>
-            )}
-          </>
+        {!mc && tab !== "setup" && (
+          <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
+            <div className="text-base text-text mb-1">No Monte Carlo run yet</div>
+            <div className="text-xs">Configure the Setup tab and click Run.</div>
+            <button
+              onClick={() => onTab("setup")}
+              className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm"
+            >
+              Go to Setup →
+            </button>
+          </div>
         )}
       </main>
     </div>
@@ -174,18 +187,47 @@ export default function MonteCarlo() {
 // ---------------------------------------------------------------------------
 
 function SetupTab({
-  method, setMethod,
-  nSims, setNSims,
-  blockSize, setBlockSize,
-  seed, setSeed,
-  onRun, loading, error,
-  tradesCount, mc,
+  symbolList, datasets, catalog,
+  symbol, setSymbol, timeframe, setTimeframe,
+  strategies, setStrategies, dateRange, setDateRange,
+  method, setMethod, nSims, setNSims, blockSize, setBlockSize, seed, setSeed,
+  onRun, loading, error, canRun, mc,
 }) {
-  const effNSims = method === "synthetic" ? Math.min(Number(nSims) || 1000, 200) : (Number(nSims) || 1000);
-  const methodDef = MC_METHODS.find((m) => m.id === method);
+  const portfolioCap   = 50;
+  const singleCap      = 200;
+  const isPortfolio    = strategies.length >= 2;
+  const effNSimsCap    = method === "synthetic" ? (isPortfolio ? portfolioCap : singleCap) : (Number(nSims) || 1000);
+  const cappedNSims    = method === "synthetic" ? Math.min(Number(nSims) || 1000, effNSimsCap) : (Number(nSims) || 1000);
+  const methodDef      = MC_METHODS.find((m) => m.id === method);
 
   return (
     <div className="space-y-4">
+      {/* ---- Market + date range ---- */}
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+        <div className="text-[10px] uppercase tracking-wider text-muted">Market</div>
+        <div className="flex flex-wrap items-center gap-4">
+          <SymbolSelector value={symbol} options={symbolList} datasets={datasets} onChange={setSymbol} />
+          <TimeframeSelector value={timeframe} onChange={setTimeframe} />
+          <DateRangePicker start={dateRange.start} end={dateRange.end} onChange={setDateRange} />
+        </div>
+      </div>
+
+      {/* ---- Strategies (the basket) ---- */}
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[10px] uppercase tracking-wider text-muted">
+            Strategies {strategies.length > 0 && <span className="text-text">({strategies.length})</span>}
+          </div>
+          <div className="text-[10px] text-muted">
+            {isPortfolio
+              ? "Portfolio mode — shared cash pool, priority by order"
+              : "Single-strategy mode — pick more to run a portfolio MC"}
+          </div>
+        </div>
+        <MCStrategyPicker catalog={catalog} strategies={strategies} onChange={setStrategies} />
+      </div>
+
+      {/* ---- Method + sim settings ---- */}
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
         <div className="flex flex-wrap items-end gap-4">
           <div className="flex-1 min-w-[260px]">
@@ -207,19 +249,24 @@ function SetupTab({
           )}
           <NumField label="Seed" value={seed} onChange={setSeed} step={1} />
 
-          <button onClick={onRun} disabled={loading}
+          <button onClick={onRun} disabled={!canRun}
             className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50">
             {loading ? "Running…" : (mc ? "Re-run" : "Run")}
           </button>
         </div>
         <div className="text-xs text-muted">{methodDef.blurb}</div>
-        {method === "synthetic" && effNSims < (Number(nSims) || 0) && (
+        {method === "synthetic" && cappedNSims < (Number(nSims) || 0) && (
           <div className="text-xs text-amber-400/80">
-            Synthetic re-runs the engine per path; capped at {effNSims} sims.
+            Synthetic re-runs the {isPortfolio ? "portfolio runner" : "engine"} per path
+            {isPortfolio && ` (${strategies.length} strategies per path)`} —
+            capped at {cappedNSims} sims.
           </div>
         )}
-        {method === "trade_bootstrap" && tradesCount === 0 && (
-          <div className="text-xs text-loss">This run has no trades — pick another method or run a strategy that trades.</div>
+        {method === "synthetic" && isPortfolio && (
+          <div className="text-[11px] text-amber-400/70">
+            All strategies must share the same (symbol, timeframe). Backend will reject
+            mixed-symbol baskets in synthetic mode.
+          </div>
         )}
       </div>
 
@@ -228,8 +275,15 @@ function SetupTab({
       )}
 
       {!mc && !loading && !error && (
-        <div className="rounded-xl border border-line bg-bg-panel/40 p-10 text-center text-muted text-sm">
-          Click <span className="text-text">Run</span> to simulate {Number(nSims) || 1000}× variations of this strategy.
+        <div className="rounded-xl border border-line bg-bg-panel/40 p-6 text-center text-muted text-sm">
+          {!symbol
+            ? "Pick a symbol to begin."
+            : strategies.length === 0
+              ? "Add at least one strategy to run."
+              : <>Click <span className="text-text">Run</span> to simulate
+                  {" "}{Number(nSims) || 1000}× variations of
+                  {" "}{isPortfolio ? `this ${strategies.length}-strategy basket` : "this strategy"}.</>
+          }
         </div>
       )}
     </div>

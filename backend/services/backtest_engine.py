@@ -4,8 +4,8 @@ Hindsight backtest engine.
 Single REST round-trip: load parquet → strategy.vectorized() → walk-forward
 sim → return everything (candles, overlays, trades, equity, stats, analytics).
 
-GLOBAL risk_config (services.risk_config) drives starting capital, risk
-per trade, fees, and slippage. Strategy-level risk_pct is now ignored.
+GLOBAL risk_config (services.risk_config) drives starting capital, fees,
+and slippage. risk_pct is per-strategy (in each PARAM_SCHEMA).
 """
 from __future__ import annotations
 
@@ -103,21 +103,30 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     monkey-patching the loader at module scope.
 
     `risk_overrides`: dict of risk-config keys (slippage_bps, fee_pct, fee_flat,
-    starting_capital, risk_pct, pyramiding) to override for this single call.
-    Local-only, does not mutate the global config. Used by Cost Sweep to test
-    how the strategy's edge holds up under elevated execution costs."""
+    starting_capital, pyramiding) — or `risk_pct` to override the strategy's
+    per-trade sizing — for this single call. Local-only, does not mutate the
+    global config. Used by Cost Sweep to test how the strategy's edge holds up
+    under elevated execution costs."""
 
     rc = risk_config.get()
     if risk_overrides:
         rc = {**rc, **risk_overrides}
     starting_capital = float(rc["starting_capital"])
-    risk_frac        = float(rc["risk_pct"]) / 100.0
     fee_flat         = float(rc["fee_flat"])
     fee_pct          = float(rc["fee_pct"]) / 100.0
     slippage         = float(rc["slippage_bps"]) / 10000.0
 
     cls = get_strategy_class(strategy_id)
     strategy = cls(params or {})
+
+    # risk_pct is per-strategy (in PARAM_SCHEMA). A risk_overrides["risk_pct"]
+    # takes precedence (e.g. Cost Sweep). Final fallback is 3.0 to match the
+    # historical default.
+    risk_pct_param = (
+        risk_overrides.get("risk_pct") if risk_overrides and "risk_pct" in risk_overrides
+        else strategy.p.get("risk_pct", 3.0)
+    )
+    risk_frac = float(risk_pct_param) / 100.0
 
     # Pyramiding is per-strategy (in PARAM_SCHEMA). Fall back to the global
     # risk_config value if the strategy doesn't declare it.

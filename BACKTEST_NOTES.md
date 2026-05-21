@@ -30,11 +30,13 @@ Things to verify periodically:
 
 ## Fills, slippage, fees
 
-Fills happen at the next bar's open. Slippage and fees come from `backend/data/risk_config.json`:
+Fills happen at the next bar's open. Slippage and fees come from `backend/data/risk_config.json` — these are *infrastructure* settings, shared by every strategy in a portfolio (one Binance account, one set of fee tiers):
 
 - `slippage_bps` — basis points applied to the fill (against you, both sides).
 - `fee_flat` — flat dollars per trade, each side.
 - `fee_pct` — percent of notional per trade, each side.
+
+Position-sizing values (`risk_pct`, `pyramiding`) are NOT in this file — they live on each strategy's `PARAM_SCHEMA` so different strategies in a portfolio can use different sizing. See "Position sizing" below.
 
 There is one source of truth for fees in the whole system — risk config. Backtest, Monte Carlo, and walk-forward all run through `backtest_engine.run()`, so changing the config changes every metric at once.
 
@@ -49,18 +51,18 @@ Things to verify:
 
 ## Position sizing
 
-Each tranche is sized as `(current_equity × risk_pct) / fill_price`.
+Each tranche is sized as `(current_equity × risk_pct) / fill_price`. **`risk_pct` lives on each strategy's `PARAM_SCHEMA`** (default 3.0). Edit it via the strategy Settings panel, not the global Risk page.
 
 A few consequences worth knowing:
 
-- "Current equity" means MTM equity at the close of bar `t-1`, including unrealized PnL of any open tranches. As equity grows, new tranches grow with it (compounding). As equity drops, new tranches shrink (drawdown protection).
+- "Current equity" means MTM equity at the close of bar `t-1`, including unrealized PnL of any open tranches. In single-strategy mode this is the strategy's own equity; in **portfolio mode** it's the *aggregate* portfolio equity (the shared cash pool) — so a strategy's 3% sizes against the whole portfolio, not its own slice.
 - This is **not** "fixed cash per trade" like TradingView's `strategy.cash` mode. To match a TV script that uses fixed cash, you need to either (a) match the dollar amount only at the first trade and accept divergence over time, or (b) we'd need a `qty_type=fixed_cash` mode added to the engine. See "Possible paths" below.
 - With pyramiding > 1, total notional can exceed equity. That's by design — but be aware when reading Sharpe and max-drawdown values.
 
 Things to verify:
 
-- `risk_pct` in `risk_config.json` is on a percent scale (10 = 10%, not 0.10).
-- `pyramiding` value matches your intent. Default is 1. Strategies that stack into trends or mean reversions usually want higher.
+- Per-strategy `risk_pct` is on a percent scale (10 = 10%, not 0.10). Default 3.0.
+- `pyramiding` is per-strategy too (default 1). Strategies that stack into trends or mean reversions usually want higher.
 
 ---
 
@@ -146,10 +148,10 @@ Things to verify:
 
 ## Pyramiding
 
-Engine-level, controlled by `risk_config.pyramiding`.
+Per-strategy, declared in each strategy's `PARAM_SCHEMA` (default 1).
 
 - Each new entry signal opens a new tranche, up to `max_tranches`.
-- Each tranche is sized independently off current MTM equity.
+- Each tranche is sized independently off current MTM equity (aggregate in portfolio mode).
 - Exits close all tranches on that side.
 - ATR stops are per-tranche: each tranche records its `atr_at_entry` at fill time and uses that to compute its own stop level.
 
@@ -157,6 +159,26 @@ Things to verify:
 
 - Pyramiding matches your TradingView `pyramiding=` setting.
 - For a strategy you intend to "trade once, hold until reversion", `pyramiding=1` is correct.
+
+---
+
+## Portfolio mode
+
+The `services/portfolio_runner.py` module walks 1..N strategies through ONE shared cash pool. The legacy `POST /api/strategies/run` now wraps this runner with `N=1` and unwraps the response to the legacy shape — so single-strategy callers see no change. `POST /api/backtest/portfolio` is the multi-strategy entrypoint.
+
+Key contracts:
+
+- **Shared cash, one pool.** Each strategy's `risk_pct` is applied to the aggregate portfolio equity, not its own attribution slice. This matches how a single Binance account actually behaves.
+- **No netting on symbol overlap.** If Strategy A is long BTC and Strategy B shorts BTC at the same time, both positions exist independently and both consume cash. The aggregate equity reflects the true exposure.
+- **Cash gating.** When a new entry needs more notional than the pool has cash for, the signal is **skipped** (no partial fill — partial fills would silently shift the strategy's risk model). The skip is logged with the entry context plus a *counterfactual P&L* (what the trade would have earned if it had filled, computed by looking ahead to the strategy's next same-side exit signal).
+- **Priority order.** Same-bar conflicts are resolved by the user-set `priority` per strategy (low number wins). Exits run before entries each bar, so freeing capital can make room for the next strategy's entry in the same step.
+- **Per-strategy attribution.** Each closed trade is tagged with `strategy_id`. The aggregate equity curve is `cash + sum(open-position MTM)`. A synthetic per-strategy equity curve is also emitted (starting capital + cumulative attributed P&L) for "what did each strategy contribute?" diagnostics.
+- **`N=1` parity.** With one strategy, the portfolio runner produces results that match `backtest_engine.run()` exactly (trades, equity, stats) for typical settings (`pyramiding=1`). For high pyramiding the cash check can trigger where the legacy engine would have allowed unlimited stacking — that's a correctness improvement, not a regression.
+
+Things to verify:
+
+- The frontend Dashboard now always uses the portfolio endpoint (even for N=1). The legacy `/strategies/run` endpoint still exists for other callers (Monte Carlo, walk-forward, cost sweep) that drive `backtest_engine.run()` directly.
+- Cached results in `lastResultStore` are versioned by key — `__portfolio__|{symbol}|{tf}` for the full portfolio response, and `{sid}|{symbol}|{tf}` per strategy. The cache version was bumped to `.v2` when `risk_pct` moved per-strategy; old `.v1` results were invalidated.
 
 ---
 
@@ -219,4 +241,8 @@ Things we could build if you want closer parity with reference platforms or more
 
 **Realistic stop modeling combined with gap detection.** When `open[t]` gaps past the stop level, fill at the open (worse than the stop, like reality). When intra-bar low touches stop without gapping, fill at the stop. Two-tier model.
 
-**Multi-symbol portfolio backtest.** Today each strategy runs against one symbol. A portfolio mode would aggregate equity across multiple symbols with a shared starting capital and per-symbol risk allocation.
+**Drag-to-reorder priority.** The strategy cards currently expose ↑/↓ priority buttons. Drag-and-drop with a visual handle would be more discoverable but is mostly cosmetic.
+
+**Mixed-timeframe portfolios.** The portfolio runner correctly handles different *symbols* on the same timeframe today. Different *timeframes* in one portfolio (e.g. a 1h trend strategy + 15m mean-reversion) work via the unified-timestamp walk, but per-strategy bars get filled at their own bar opens — there are subtle alignment edge cases worth thinking through before relying on mixed-TF portfolios for live decisions.
+
+**Live multi-strategy runner.** The backtest side is done; the streaming `LiveRunner` still only runs one strategy at a time per browser. Wiring a `LivePortfolioRunner` that mirrors the backtest contract (shared cash, priority, skip-and-log) is the next step toward real live signals.

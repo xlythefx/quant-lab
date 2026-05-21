@@ -28,7 +28,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from services import backtest_engine, market_data, risk_config
+from services import backtest_engine, market_data, portfolio_runner, risk_config
+from services.portfolio_runner import StrategySpec
 from services.strategy_registry import get_strategy_class
 
 log = logging.getLogger(__name__)
@@ -45,25 +46,48 @@ _PCTS = (5, 25, 50, 75, 95)
 # ---------------------------------------------------------------------------
 
 def run(method: str,
-        strategy_id: str,
-        symbol: str,
-        timeframe: str,
-        params: Optional[dict] = None,
+        strategies: list[dict],
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         n_sims: int = 1000,
         block_size: Optional[int] = None,
         seed: int = 42) -> dict:
-    """Dispatch to a method-specific engine."""
+    """Dispatch to a method-specific engine.
+
+    `strategies` is a non-empty list of `{strategy_id, symbol, timeframe,
+    params, priority}` dicts. N=1 uses `backtest_engine.run()` for the base
+    backtest (existing fast path); N≥2 uses `portfolio_runner.run_portfolio()`
+    so the bootstrap operates on the basket's aggregate trades / equity.
+    """
     if method not in ("trade_bootstrap", "block_bootstrap", "synthetic"):
         raise ValueError(f"unknown method: {method}")
+    if not strategies:
+        raise ValueError("strategies must be a non-empty list")
+
+    is_portfolio = len(strategies) >= 2
 
     # All three methods start from a base backtest so we have something to
-    # resample and compare against.
-    base = backtest_engine.run(
-        strategy_id, symbol, timeframe, params or {},
-        start_time=start_time, end_time=end_time,
-    )
+    # resample and compare against. N=1 keeps the fast direct-engine path.
+    if is_portfolio:
+        specs = [
+            StrategySpec(
+                strategy_id=s["strategy_id"],
+                symbol=s["symbol"],
+                timeframe=s["timeframe"],
+                params=s.get("params") or {},
+                priority=int(s.get("priority", i + 1)),
+            )
+            for i, s in enumerate(strategies)
+        ]
+        base = portfolio_runner.run_portfolio(
+            specs, start_time=start_time, end_time=end_time,
+        )
+    else:
+        s0 = strategies[0]
+        base = backtest_engine.run(
+            s0["strategy_id"], s0["symbol"], s0["timeframe"], s0.get("params") or {},
+            start_time=start_time, end_time=end_time,
+        )
 
     rng = np.random.default_rng(int(seed))
     starting_capital = float(base["stats"]["starting_capital"])
@@ -74,16 +98,41 @@ def run(method: str,
         bs = int(block_size) if block_size else _default_block_size(len(base["equity"]))
         result = _block_bootstrap(base, starting_capital, int(n_sims), bs, rng)
     else:
-        bs = int(block_size) if block_size else _default_block_size(len(base["candles"]))
-        n_sims = max(1, min(int(n_sims), 200))   # cap synthetic — engine re-runs
-        result = _synthetic_paths(strategy_id, symbol, timeframe, params or {},
-                                  start_time, end_time, n_sims, bs, rng, base)
+        # Synthetic paths in portfolio mode require shared (symbol, timeframe)
+        # so one synthesised OHLC stream feeds every strategy. Cost is also
+        # ~N× heavier so the sim cap is tighter.
+        if is_portfolio:
+            symbols    = {s["symbol"] for s in strategies}
+            timeframes = {s["timeframe"] for s in strategies}
+            if len(symbols) > 1 or len(timeframes) > 1:
+                raise ValueError(
+                    "synthetic_paths requires all strategies on the same "
+                    "(symbol, timeframe). Use trade_bootstrap or block_bootstrap "
+                    "for mixed-symbol baskets."
+                )
+            n_sims = max(1, min(int(n_sims), 50))    # tighter cap for portfolio
+        else:
+            n_sims = max(1, min(int(n_sims), 200))   # original single-strategy cap
+        bs = int(block_size) if block_size else _default_block_size(len(base["candles"]) if base.get("candles") else len(base["equity"]))
+        result = _synthetic_paths(strategies, start_time, end_time,
+                                  n_sims, bs, rng, base, is_portfolio)
 
     # Attach reference metadata.
     result["method"] = method
     result["n_sims"] = int(n_sims)
     result["seed"] = int(seed)
     result["starting_capital"] = starting_capital
+    result["is_portfolio"] = is_portfolio
+    result["strategies"] = [
+        {
+            "strategy_id": s["strategy_id"],
+            "symbol":      s["symbol"],
+            "timeframe":   s["timeframe"],
+            "params":      s.get("params") or {},
+            "priority":    int(s.get("priority", i + 1)),
+        }
+        for i, s in enumerate(strategies)
+    ]
     result["original"] = {
         "final_equity":         float(base["stats"]["final_equity"]),
         "total_return_pct":     float(base["stats"]["total_return_pct"]),
@@ -184,11 +233,12 @@ def _block_bootstrap(base: dict, starting_capital: float, n_sims: int,
 # Method 3: synthetic price paths (block bootstrap of OHLC ratios)
 # ---------------------------------------------------------------------------
 
-def _synthetic_paths(strategy_id: str, symbol: str, timeframe: str,
-                     params: dict, start_time: Optional[int],
+def _synthetic_paths(strategies: list[dict],
+                     start_time: Optional[int],
                      end_time: Optional[int],
                      n_sims: int, block_size: int,
-                     rng: np.random.Generator, base: dict) -> dict:
+                     rng: np.random.Generator, base: dict,
+                     is_portfolio: bool) -> dict:
     """Generate N synthetic OHLC series and re-run the backtest on each.
 
     The synthetic bars are built from a circular block bootstrap of the
@@ -200,8 +250,14 @@ def _synthetic_paths(strategy_id: str, symbol: str, timeframe: str,
 
     For each path, we seed with the original first open and walk forward,
     reconstructing OHLC from a resampled bar template each step.
+
+    Portfolio mode: all strategies must share the same (symbol, timeframe);
+    the same synthetic OHLC feeds every strategy via `df_by_spec`.
     """
-    df = market_data.load_parquet(symbol, timeframe)
+    # All strategies share (symbol, timeframe) — caller validated this.
+    sym = strategies[0]["symbol"]
+    tf  = strategies[0]["timeframe"]
+    df = market_data.load_parquet(sym, tf)
     if start_time is not None:
         df = df[df["time"] >= int(start_time)]
     if end_time is not None:
@@ -271,7 +327,7 @@ def _synthetic_paths(strategy_id: str, symbol: str, timeframe: str,
         })
 
         try:
-            sub = _run_engine_on_df(strategy_id, symbol, timeframe, params, synth_df)
+            sub = _run_on_df(strategies, synth_df, is_portfolio)
         except Exception as e:
             log.warning("synthetic path %d failed: %s", s, e)
             continue
@@ -312,15 +368,34 @@ def _synthetic_paths(strategy_id: str, symbol: str, timeframe: str,
     return summary
 
 
-def _run_engine_on_df(strategy_id: str, symbol: str, timeframe: str,
-                      params: dict, synth_df: pd.DataFrame) -> dict:
-    """Run backtest_engine.run against an injected dataframe.
+def _run_on_df(strategies: list[dict], synth_df: pd.DataFrame,
+               is_portfolio: bool) -> dict:
+    """Run a base backtest against an injected synthetic dataframe.
 
-    Uses backtest_engine.run's `df` kwarg — thread-safe alternative to
-    monkey-patching the module-level loader (which races with concurrent
-    backtests fired by other jobs).
+    Single-strategy → `backtest_engine.run(..., df=synth_df)`.
+    Portfolio      → `portfolio_runner.run_portfolio(..., df_by_spec=...)`
+                     with every spec receiving the same synthesised OHLC.
+    Both paths are thread-safe (no module-level state mutation).
     """
-    return backtest_engine.run(strategy_id, symbol, timeframe, params, df=synth_df)
+    if is_portfolio:
+        specs = [
+            StrategySpec(
+                strategy_id=s["strategy_id"],
+                symbol=s["symbol"],
+                timeframe=s["timeframe"],
+                params=s.get("params") or {},
+                priority=int(s.get("priority", i + 1)),
+            )
+            for i, s in enumerate(strategies)
+        ]
+        # Same synthetic OHLC feeds every strategy — they share the symbol/TF.
+        df_by_spec = {i: synth_df for i in range(len(specs))}
+        return portfolio_runner.run_portfolio(specs, df_by_spec=df_by_spec)
+    s0 = strategies[0]
+    return backtest_engine.run(
+        s0["strategy_id"], s0["symbol"], s0["timeframe"],
+        s0.get("params") or {}, df=synth_df,
+    )
 
 
 # ---------------------------------------------------------------------------

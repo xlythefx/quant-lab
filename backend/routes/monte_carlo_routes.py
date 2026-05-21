@@ -2,10 +2,14 @@
 Monte Carlo simulation endpoint.
 
 POST /api/montecarlo/run
-  body: {strategy_id, symbol, timeframe, params?, start_time?, end_time?,
-         method: "trade_bootstrap" | "block_bootstrap" | "synthetic",
-         n_sims?, block_size?, seed?}
-  returns: full simulation result (see services/monte_carlo.py)
+  body: {
+    strategies: [{strategy_id, symbol, timeframe, params?, priority?}, ...],
+    method:      "trade_bootstrap" | "block_bootstrap" | "synthetic",
+    n_sims?:     int, block_size?: int, seed?: int,
+    start_time?: int, end_time?:   int
+  }
+  returns: full simulation result with `is_portfolio` flag + `strategies` echo
+           (see services/monte_carlo.py).
 """
 import logging
 from flask import Blueprint, jsonify, request
@@ -21,27 +25,43 @@ monte_carlo_bp = Blueprint("monte_carlo", __name__, url_prefix="/api/montecarlo"
 @monte_carlo_bp.post("/run")
 def run_mc():
     body = request.get_json(silent=True) or {}
+    raw_specs = body.get("strategies") or []
+    if not isinstance(raw_specs, list) or not raw_specs:
+        return jsonify({"error": "strategies must be a non-empty array"}), 400
+
     try:
-        strategy_id = (body.get("strategy_id") or "").strip()
-        if not strategy_id:
-            raise ValidationError("strategy_id is required")
-        symbol = validate_symbol(body.get("symbol"))
-        tf = validate_timeframe(body.get("timeframe"))
+        strategies = []
+        for i, raw in enumerate(raw_specs):
+            if not isinstance(raw, dict):
+                raise ValidationError(f"strategies[{i}] must be an object")
+            sid = (raw.get("strategy_id") or "").strip()
+            if not sid:
+                raise ValidationError(f"strategies[{i}].strategy_id is required")
+            strategies.append({
+                "strategy_id": sid,
+                "symbol":   validate_symbol(raw.get("symbol")),
+                "timeframe": validate_timeframe(raw.get("timeframe")),
+                "params":   raw.get("params") or {},
+                "priority": int(raw.get("priority", i + 1)),
+            })
+
         method = (body.get("method") or "trade_bootstrap").strip()
         n_sims = int(body.get("n_sims") or 1000)
         block_size = body.get("block_size")
+        if block_size is not None:
+            block_size = int(block_size)
         seed = int(body.get("seed") or 42)
-        params = body.get("params") or {}
         start_time = body.get("start_time")
         end_time = body.get("end_time")
+        if start_time is not None: start_time = int(start_time)
+        if end_time   is not None: end_time   = int(end_time)
     except (ValidationError, TypeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
 
     try:
         result = monte_carlo.run(
-            method=method,
-            strategy_id=strategy_id, symbol=symbol, timeframe=tf,
-            params=params, start_time=start_time, end_time=end_time,
+            method=method, strategies=strategies,
+            start_time=start_time, end_time=end_time,
             n_sims=n_sims, block_size=block_size, seed=seed,
         )
     except ValueError as e:

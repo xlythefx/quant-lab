@@ -16,15 +16,13 @@ import { TZ_PRESETS, getTz, setTz, convertUtcHHmm } from "../services/timezone.j
 const FIELDS = [
   { key: "starting_capital", label: "Starting Capital",     unit: "$",   step: 1000, min: 1,
     hint: "Same baseline applied to every backtest." },
-  { key: "risk_pct",         label: "Risk per Trade",       unit: "%",   step: 0.1,  min: 0, max: 100,
-    hint: "Position sizing: equity × risk% / entry_price." },
   { key: "fee_flat",         label: "Flat Fee per Side",    unit: "$",   step: 0.1,  min: 0,
     hint: "Charged on both entry and exit." },
   { key: "fee_pct",          label: "Fee % per Side",       unit: "%",   step: 0.01, min: 0, max: 10,
     hint: "Of notional. Charged on both entry and exit." },
   { key: "slippage_bps",     label: "Slippage",             unit: "bps", step: 0.5,  min: 0, max: 500,
     hint: "Adverse fill price applied to each entry & exit." },
-  // pyramiding is now configured per-strategy in the strategy Settings panel.
+  // risk_pct and pyramiding are now configured per-strategy in the strategy Settings panel.
 ];
 
 export default function RiskSettings() {
@@ -80,8 +78,8 @@ export default function RiskSettings() {
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Risk Management</h1>
           <p className="text-sm text-muted mt-1">
-            Global settings applied to <span className="text-text">all strategies</span>.
-            Strategy-level <span className="font-mono">risk_pct</span> is ignored — these win.
+            Global infrastructure settings shared by <span className="text-text">all strategies</span>.
+            Position sizing (<span className="font-mono">risk_pct</span>) and pyramiding live on each strategy.
           </p>
         </header>
 
@@ -113,7 +111,6 @@ export default function RiskSettings() {
           <div className="text-xs uppercase tracking-wider text-muted mb-2">Current effective</div>
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 font-mono text-sm">
             <div className="text-muted">Starting capital</div><div className="text-text">{fmtUsd(cfg.starting_capital)}</div>
-            <div className="text-muted">Risk per trade</div>  <div className="text-text">{fmtNum(cfg.risk_pct)}%</div>
             <div className="text-muted">Flat fee</div>        <div className="text-text">{fmtUsd(cfg.fee_flat)}</div>
             <div className="text-muted">Fee %</div>           <div className="text-text">{fmtNum(cfg.fee_pct)}%</div>
             <div className="text-muted">Slippage</div>        <div className="text-text">{fmtNum(cfg.slippage_bps)} bps</div>
