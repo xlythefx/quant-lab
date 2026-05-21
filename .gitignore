@@ -10,3 +10,13 @@ frontend/dist/
 backend/.env
 .env
 .claude/
+
+# Local scratch files (contain VPS credentials — never commit)
+_vps_*.py
+_bar_exporter.txt
+
+# Reference copies pulled from external machines (may contain .env / tokens)
+vendor/
+
+# Raw broker/strategy CSV data — kept local
+backend/data/tradestation/
