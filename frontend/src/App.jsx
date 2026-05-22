@@ -8,6 +8,7 @@ import WalkForward from "./pages/WalkForward.jsx";
 import GridSearch from "./pages/GridSearch.jsx";
 import MonteCarlo from "./pages/MonteCarlo.jsx";
 import CostSweep from "./pages/CostSweep.jsx";
+import LiveAlerts from "./pages/LiveAlerts.jsx";
 
 function getView() {
   // Hash like "#analytics?key=..." → strip query and route by base name.
@@ -32,5 +33,6 @@ export default function App() {
   if (view === "gridsearch")  return <GridSearch />;
   if (view === "montecarlo")  return <MonteCarlo />;
   if (view === "costsweep")   return <CostSweep />;
+  if (view === "livealerts")  return <LiveAlerts />;
   return <Dashboard />;
 }

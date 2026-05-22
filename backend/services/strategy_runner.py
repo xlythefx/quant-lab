@@ -46,7 +46,8 @@ def _emit_equity(strategy_id: str, sid: str, ts: int, equity: float,
     event_bus.emit("equity_update", payload, to=sid)
 
 
-def _emit_signal(strategy_id: str, sid: str, sig: Signal):
+def _emit_signal(strategy_id: str, sid: str, sig: Signal, *,
+                 symbol: str | None = None, mode: str | None = None):
     event_bus.emit("signal_update", {
         "strategy_id": strategy_id,
         "time": int(sig.time),
@@ -55,6 +56,11 @@ def _emit_signal(strategy_id: str, sid: str, sig: Signal):
         "price": float(sig.price),
         "reason": sig.reason,
     }, to=sid)
+    if mode == "live" and symbol:
+        # Local import — avoids a hard dependency cycle and keeps backtest
+        # imports clean if the alerter ever pulls in something heavier.
+        from services import live_alerter
+        live_alerter.dispatch(strategy_id, symbol, sig)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +285,7 @@ class LiveRunner:
         sig = self.strategy.on_candle(candle, self._state)
         if sig is None:
             return
-        _emit_signal(self.strategy_id, self.sid, sig)
+        _emit_signal(self.strategy_id, self.sid, sig, symbol=self.symbol, mode="live")
 
         # risk_pct is per-strategy (lives on each strategy's PARAM_SCHEMA).
         risk_pct = float(self.strategy.p.get("risk_pct", 3.0)) / 100.0

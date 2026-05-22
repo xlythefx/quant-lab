@@ -28,6 +28,7 @@ from routes.grid_search_routes import grid_search_bp
 from routes.cost_sweep_routes import cost_sweep_bp
 from routes.monte_carlo_routes import monte_carlo_bp
 from routes.ai_routes import ai_bp
+from routes.live_alerts_routes import live_alerts_bp
 from services.socket_manager import SocketManager
 from services.strategy_manager import StrategyManager
 from services import event_bus
@@ -57,6 +58,7 @@ def create_app():
     app.register_blueprint(cost_sweep_bp)
     app.register_blueprint(monte_carlo_bp)
     app.register_blueprint(ai_bp)
+    app.register_blueprint(live_alerts_bp)
 
     socketio = SocketIO(
         app,

@@ -233,3 +233,22 @@ export async function aiSuggestWalkForward(meta) {
     meta, { timeout: 180_000 });
   return data; // {suggestion: {is_bars, oos_bars, n_trials, metric, rationale, expected_windows}, ...}
 }
+
+// ---------------------------------------------------------------------------
+// Live Alerts (webhook dispatcher for live strategy signals)
+// ---------------------------------------------------------------------------
+
+export async function getLiveAlerts() {
+  const { data } = await api.get("/api/live-alerts");
+  return data.rules; // [{strategy_id, symbol, enabled, webhook_url, secret, strategy_alias, leverage}]
+}
+
+export async function saveLiveAlerts(rules) {
+  const { data } = await api.put("/api/live-alerts", { rules });
+  return data.rules;
+}
+
+export async function testLiveAlert({ strategy_id, symbol }) {
+  const { data } = await api.post("/api/live-alerts/test", { strategy_id, symbol });
+  return data; // {ok, url?, payload?: {secret redacted}, error?}
+}
