@@ -400,6 +400,171 @@ def load_parquet(symbol: str, timeframe: str, broker: Optional[str] = None) -> p
     return pd.read_parquet(path)
 
 
+# ---------------------------------------------------------------------------
+# Manual CSV import (TradeStation export format)
+# ---------------------------------------------------------------------------
+
+_CSV_TF_OFFSETS = {
+    "1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+    "1h": "1h", "4h": "4h", "1d": "D",
+}
+
+
+def import_csv_tradestation(
+    file_bytes: bytes,
+    symbol: str,
+    timeframes: List[str],
+    source_tz: str = "America/New_York",
+) -> List[Dict]:
+    """Parse a manually-exported TradeStation OHLCV CSV, resample to each
+    requested timeframe, and merge-write to data/tradestation/.
+
+    Handles the two most common TradeStation 1-minute export layouts:
+      • With header:   Date, Time, Open, High, Low, Close, Up, Down
+      • Without header: MM/DD/YYYY, HH:MM, O, H, L, C, [Volume | Up, Down]
+
+    Timestamps in the CSV are assumed to be in `source_tz` (default Eastern
+    Time — standard for CME futures in TradeStation) and are converted to UTC
+    before writing to Parquet.
+
+    Returns [{timeframe, rows_added, rows_total, first_time, last_time}, ...]
+    """
+    import io
+
+    # UTF-8 with optional BOM
+    content = file_bytes.decode("utf-8-sig", errors="replace")
+    lines = [l for l in content.splitlines() if l.strip() and not l.startswith("#")]
+    if not lines:
+        raise ValueError("CSV file is empty")
+
+    # Detect header: a date row starts with two digits (e.g. "01/...")
+    first_field = lines[0].split(",")[0].strip().strip('"')
+    has_header = not (len(first_field) >= 2 and first_field[:2].isdigit())
+
+    df = pd.read_csv(
+        io.StringIO("\n".join(lines)),
+        header=0 if has_header else None,
+        dtype=str,
+    )
+
+    # Normalize column names
+    if has_header:
+        df.columns = [c.strip().strip('"').lower().replace(" ", "_") for c in df.columns]
+    else:
+        ncols = len(df.columns)
+        names = ["date", "time", "open", "high", "low", "close"]
+        if ncols >= 8:
+            names += ["up", "down"]
+        elif ncols >= 7:
+            names += ["volume"]
+        df.columns = (names + [f"_x{i}" for i in range(ncols)])[:ncols]
+
+    # Column aliases
+    for src, dst in [("vol", "volume"), ("tot_vol", "volume"), ("total_volume", "volume"),
+                     ("open_interest", "_oi")]:
+        if src in df.columns and dst not in df.columns:
+            df.rename(columns={src: dst}, inplace=True)
+
+    # Build volume from Up/Down tick columns when no Volume column present
+    if "volume" not in df.columns:
+        def _get_col(names_to_try):
+            for n in names_to_try:
+                if n in df.columns:
+                    return df[n]
+            return pd.Series(["0"] * len(df))
+
+        up_s = _get_col(["up", "up_volume"])
+        dn_s = _get_col(["down", "down_volume"])
+        df["volume"] = (
+            pd.to_numeric(up_s.str.strip('"'), errors="coerce").fillna(0.0)
+            + pd.to_numeric(dn_s.str.strip('"'), errors="coerce").fillna(0.0)
+        )
+
+    # Parse datetime
+    date_s = df["date"].astype(str).str.strip().str.strip('"')
+    time_s = df["time"].astype(str).str.strip().str.strip('"')
+    combined = date_s + " " + time_s
+
+    dt = None
+    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            dt = pd.to_datetime(combined, format=fmt, errors="raise")
+            break
+        except Exception:
+            continue
+    if dt is None:
+        dt = pd.to_datetime(combined, infer_datetime_format=True, errors="coerce")
+
+    # Localize source timezone → UTC
+    try:
+        dt = dt.dt.tz_localize(source_tz, ambiguous="NaT", nonexistent="NaT").dt.tz_convert("UTC")
+    except Exception:
+        log.warning("import_csv: tz_localize failed for %s, treating as UTC", source_tz)
+        dt = dt.dt.tz_localize("UTC", nonexistent="NaT")
+
+    # OHLCV as float
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col].astype(str).str.strip('"'), errors="coerce")
+
+    df["datetime"] = dt
+    df = df.dropna(subset=["datetime", "open", "high", "low", "close"])
+    df = df.sort_values("datetime").drop_duplicates(subset=["datetime"]).reset_index(drop=True)
+
+    if df.empty:
+        raise ValueError("No valid OHLCV rows found in CSV after parsing")
+
+    log.info("import_csv: parsed %d rows for %s, resampling to %s", len(df), symbol, timeframes)
+
+    results = []
+    for tf in timeframes:
+        offset = _CSV_TF_OFFSETS.get(tf)
+        if offset is None:
+            log.warning("import_csv: unsupported timeframe %s — skipped", tf)
+            continue
+
+        resampled = (
+            df.set_index("datetime")[["open", "high", "low", "close", "volume"]]
+            .resample(offset)
+            .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+            .dropna(subset=["open"])
+        )
+
+        if resampled.empty:
+            continue
+
+        out_df = resampled.copy()
+        # Use timedelta arithmetic — resolution-independent across pandas versions
+        # (pandas 2.x changed internal dtype from ns to µs, breaking // 1e9)
+        out_df["time"] = (
+            (resampled.index - pd.Timestamp("1970-01-01", tz="UTC"))
+            .total_seconds()
+            .astype("int64")
+        )
+        out_df = out_df.reset_index(drop=True)[["time", "open", "high", "low", "close", "volume"]]
+
+        path = parquet_path(symbol, tf, broker="tradestation")
+        rows_before = 0
+        if os.path.exists(path):
+            existing = pd.read_parquet(path)
+            rows_before = len(existing)
+            merged = pd.concat([existing, out_df], ignore_index=True)
+        else:
+            merged = out_df
+
+        merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
+        merged.to_parquet(path, index=False)
+        log.info("import_csv: wrote %s %s → %d rows (added %d)", symbol, tf, len(merged), len(merged) - rows_before)
+
+        results.append({
+            "timeframe": tf,
+            "rows_added": int(len(merged) - rows_before),
+            "rows_total": int(len(merged)),
+            "first_time": int(merged["time"].min()),
+            "last_time": int(merged["time"].max()),
+        })
+
+    return results
+
 def tail_parquet(symbol: str, timeframe: str, limit: int) -> List[Dict]:
     """Last N rows from Parquet, ready for the chart's setData()."""
     df = load_parquet(symbol, timeframe).tail(limit)

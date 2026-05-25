@@ -512,6 +512,39 @@ def analyze_backtest_section(payload: dict) -> dict:
     return _format_text_response(msg)
 
 
+_WF_CHAT_SYSTEM = """You are a quantitative trading assistant with deep expertise in walk-forward optimization (WFA). The user has run a WFA and you have access to the compacted result below.
+
+Answer questions concisely and precisely. Reference specific numbers from the result when relevant. If asked about something not in the data, say so rather than guessing. Use plain text — no markdown headers or code fences unless the user specifically asks for code.
+
+Walk-forward result data:
+{wf_compact}"""
+
+
+def chat_walkforward(body: dict) -> dict:
+    """Free-form multi-turn chat about a walk-forward result.
+    body: {messages: [{role, content}...], wf_result: {...}}
+    Returns {text, model, usage}.
+    """
+    messages = body.get("messages") or []
+    wf_result = body.get("wf_result") or {}
+    if not messages:
+        raise ValueError("messages array is required")
+    compact = _compact_wf(wf_result) if wf_result else {}
+    system_text = _WF_CHAT_SYSTEM.format(wf_compact=json.dumps(compact, default=str))
+    client = _client()
+    msg = client.messages.create(
+        model=_MODEL,
+        max_tokens=_MAX_TOKENS,
+        system=[{
+            "type": "text",
+            "text": system_text,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=messages,
+    )
+    return _format_text_response(msg)
+
+
 def suggest_walkforward(meta: dict) -> dict:
     """meta: {strategy_id, symbol, timeframe, rows, first_time, last_time,
              search_space_len, search_space, timeframe_seconds}

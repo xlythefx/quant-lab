@@ -719,11 +719,15 @@ function PathRankings({ mc }) {
 }
 
 function FanChart({ mc, startingCapital }) {
-  const innerRef = useRef(null);
+  const measureRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 360 });
+  const [animKey, setAnimKey] = useState(0);
+
+  // Re-trigger draw animation whenever mc result changes.
+  useEffect(() => { setAnimKey((k) => k + 1); }, [mc]);
 
   useEffect(() => {
-    const el = innerRef.current; if (!el) return;
+    const el = measureRef.current; if (!el) return;
     const ro = new ResizeObserver(() => {
       const r = el.getBoundingClientRect();
       setSize({ w: Math.max(200, Math.floor(r.width)), h: 360 });
@@ -787,6 +791,11 @@ function FanChart({ mc, startingCapital }) {
     return { xv, x: xOf(xv), anchor: i === 0 ? "start" : i === 4 ? "end" : "middle" };
   });
 
+  const paths = mc.paths || [];
+  const n = Math.max(1, paths.length - 1);
+  // Paths stagger from 0.25 s → 0.75 s; median draws last at 0.9 s.
+  const pathDelay = (i) => (0.25 + (i / n) * 0.5).toFixed(2);
+
   return (
     <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
       <div className="flex items-center justify-between mb-2">
@@ -799,37 +808,87 @@ function FanChart({ mc, startingCapital }) {
           <LegendSwatch color="#3b82f6" label="median" line />
         </div>
       </div>
-      <div ref={innerRef} className="relative w-full">
-        <svg width={size.w} height={size.h} className="block">
-          <line x1={pad.l} x2={size.w - pad.r} y1={yOf(startingCapital)} y2={yOf(startingCapital)}
-                stroke="rgba(229,231,235,0.25)" strokeWidth="0.6" strokeDasharray="2 3" />
 
-          <path d={bandOf(p05, p95)} fill="rgba(59,130,246,0.12)" />
-          <path d={bandOf(p25, p75)} fill="rgba(59,130,246,0.25)" />
+      <div ref={measureRef} className="relative w-full">
+        <div>
+          <svg key={animKey} width={size.w} height={size.h} className="block">
+            <defs>
+              <style>{`
+                @keyframes mc-draw {
+                  from { stroke-dashoffset: 1; opacity: 0; }
+                  to   { stroke-dashoffset: 0; opacity: 1; }
+                }
+                @keyframes mc-fade {
+                  from { opacity: 0; }
+                  to   { opacity: 1; }
+                }
+                @keyframes mc-glow {
+                  0%   { filter: drop-shadow(0 0 0px #3b82f6); }
+                  60%  { filter: drop-shadow(0 0 5px #3b82f6cc); }
+                  100% { filter: drop-shadow(0 0 2px #3b82f680); }
+                }
+              `}</style>
+              <linearGradient id="mc-band-grad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stopColor="#3b82f6" stopOpacity="0.35" />
+                <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.08" />
+              </linearGradient>
+            </defs>
 
-          {(mc.paths || []).map((s, i) => (
-            <path key={i} d={lineOf(s)} fill="none" stroke="rgba(229,231,235,0.18)" strokeWidth="0.6" />
-          ))}
+            <line x1={pad.l} x2={size.w - pad.r} y1={yOf(startingCapital)} y2={yOf(startingCapital)}
+                  stroke="rgba(229,231,235,0.25)" strokeWidth="0.6" strokeDasharray="2 3"
+                  style={{ animation: "mc-fade 0.3s ease-out 0.05s both" }} />
 
-          <path d={lineOf(p50)} fill="none" stroke="#3b82f6" strokeWidth="1.6" />
+            {/* Bands — fade in first */}
+            <path d={bandOf(p05, p95)} fill="url(#mc-band-grad)"
+                  style={{ animation: "mc-fade 0.5s ease-out 0.05s both" }} />
+            <path d={bandOf(p25, p75)} fill="rgba(59,130,246,0.22)"
+                  style={{ animation: "mc-fade 0.5s ease-out 0.15s both" }} />
 
-          {yTicks.map((tk, i) => (
-            <g key={i}>
-              <line x1={pad.l} x2={size.w - pad.r} y1={tk.y} y2={tk.y}
-                    stroke="rgba(229,231,235,0.06)" />
-              <text x={pad.l - 6} y={tk.y + 3} textAnchor="end"
-                    className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
-                {fmtUsd(tk.v)}
+            {/* Individual paths — staggered draw left→right */}
+            {paths.map((s, i) => (
+              <path
+                key={i}
+                d={lineOf(s)}
+                fill="none"
+                stroke={`rgba(229,231,235,${0.13 + (i % 5) * 0.025})`}
+                strokeWidth="0.6"
+                pathLength="1"
+                strokeDasharray="1"
+                style={{ animation: `mc-draw 0.9s ease-out ${pathDelay(i)}s both` }}
+              />
+            ))}
+
+            {/* Median — draws last with a glow pulse */}
+            <path
+              d={lineOf(p50)}
+              fill="none"
+              stroke="#3b82f6"
+              strokeWidth="2"
+              pathLength="1"
+              strokeDasharray="1"
+              style={{ animation: "mc-draw 1.1s ease-out 0.85s both, mc-glow 1.4s ease-out 1.9s both" }}
+            />
+
+            {yTicks.map((tk, i) => (
+              <g key={i} style={{ animation: "mc-fade 0.4s ease-out 0.6s both" }}>
+                <line x1={pad.l} x2={size.w - pad.r} y1={tk.y} y2={tk.y}
+                      stroke="rgba(229,231,235,0.06)" />
+                <text x={pad.l - 6} y={tk.y + 3} textAnchor="end"
+                      className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
+                  {fmtUsd(tk.v)}
+                </text>
+              </g>
+            ))}
+            {xTicks.map((tk, i) => (
+              <text key={i} x={tk.x} y={size.h - 8} textAnchor={tk.anchor}
+                    className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace"
+                    style={{ animation: "mc-fade 0.4s ease-out 0.65s both" }}>
+                {xLabelFor(tk.xv)}
               </text>
-            </g>
-          ))}
-          {xTicks.map((tk, i) => (
-            <text key={i} x={tk.x} y={size.h - 8} textAnchor={tk.anchor}
-                  className="fill-muted" fontSize="10" fontFamily="JetBrains Mono, monospace">
-              {xLabelFor(tk.xv)}
-            </text>
-          ))}
-        </svg>
+            ))}
+          </svg>
+        </div>
+
       </div>
     </div>
   );

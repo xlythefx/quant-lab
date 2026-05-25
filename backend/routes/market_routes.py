@@ -76,7 +76,7 @@ def datasets():
     return jsonify({"datasets": market_data.list_datasets()})
 
 
-_BROKERS = ("binance", "dukascopy")
+_BROKERS = ("binance", "dukascopy", "yahoo", "tradestation")
 
 
 @market_bp.post("/datasets/download")
@@ -142,6 +142,56 @@ def datasets_download_cancel():
 @market_bp.get("/datasets/download/status")
 def datasets_download_status():
     return jsonify(download_jobs.get_status())
+
+
+_IMPORT_TFS = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+
+
+@market_bp.post("/datasets/import")
+def datasets_import():
+    """Import a manually-exported TradeStation CSV file.
+
+    Multipart form fields:
+      file       — the .csv upload
+      symbol     — ticker symbol (e.g. ES)
+      timeframes — one or more target timeframes (may be repeated or comma-separated)
+      source_tz  — optional IANA timezone of the CSV timestamps (default America/New_York)
+    """
+    if "file" not in request.files:
+        return jsonify({"error": "no file provided"}), 400
+    f = request.files["file"]
+    if not f.filename.lower().endswith(".csv"):
+        return jsonify({"error": "only .csv files are supported"}), 400
+
+    raw_symbol = (request.form.get("symbol") or "").strip().upper()
+    if not raw_symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    try:
+        symbol = validate_symbol(raw_symbol)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # Accept repeated field or comma-separated string
+    tfs_raw = request.form.getlist("timeframes")
+    if not tfs_raw:
+        tfs_raw = (request.form.get("timeframes") or "15m,1h").split(",")
+    timeframes = [t.strip() for t in tfs_raw if t.strip()]
+    invalid = [t for t in timeframes if t not in _IMPORT_TFS]
+    if invalid:
+        return jsonify({"error": f"invalid timeframe(s): {invalid}; allowed: {sorted(_IMPORT_TFS)}"}), 400
+
+    source_tz = (request.form.get("source_tz") or "America/New_York").strip()
+
+    try:
+        file_bytes = f.read()
+        results = market_data.import_csv_tradestation(file_bytes, symbol, timeframes, source_tz)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.exception("CSV import failed (symbol=%s)", symbol)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True, "symbol": symbol, "results": results})
 
 
 @market_bp.delete("/datasets")

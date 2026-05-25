@@ -22,6 +22,7 @@ import {
 } from "../services/socket.js";
 import {
   useActiveStrategies, removeStrategy, updateParams, moveStrategy,
+  saveUserDefaults, getUserDefaults,
 } from "../services/strategiesStore.js";
 import { setLast as setLastResult, getLast as getLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
@@ -499,16 +500,48 @@ export default function Dashboard() {
   // Equity-chart series. Per-strategy lines + a synthetic "Portfolio" line
   // (the shared cash pool's aggregate MTM) when running 2+ strategies.
   const SHOW_PORTFOLIO_LINE = active.length >= 2 && portfolioResult?.equity?.length > 0;
-  const chartStrategies = useMemo(() => {
-    if (!SHOW_PORTFOLIO_LINE) return active;
-    return [...active, { id: "__portfolio__", color: "#ffffff" }];
-  }, [active, SHOW_PORTFOLIO_LINE]);
+
+  // Track which series are hidden (clicked off in the legend). Reset whenever
+  // the active set or portfolio-mode toggle changes so we don't carry stale
+  // hide-flags into a different chart.
+  const [hiddenSeries, setHiddenSeries] = useState(() => new Set());
+  useEffect(() => {
+    setHiddenSeries(new Set());
+  }, [active.length, SHOW_PORTFOLIO_LINE]);
+  const toggleSeriesHidden = (id) => {
+    setHiddenSeries((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  // Series advertised to the chart's legend (full list, regardless of hidden
+  // state). Per-strategy entries carry their human-readable name from the
+  // catalog so the legend reads "VWMA Momentum" rather than "vwma_momentum".
+  const allChartSeries = useMemo(() => {
+    const out = active.map((s) => ({
+      id: s.id,
+      color: s.color,
+      label: catalogById[s.id]?.name || s.id,
+    }));
+    if (SHOW_PORTFOLIO_LINE) {
+      out.push({ id: "__portfolio__", color: "#ffffff", label: "Portfolio (shared)" });
+    }
+    return out;
+  }, [active, catalogById, SHOW_PORTFOLIO_LINE]);
+
+  // Filter down to the series that should actually be drawn.
+  const chartStrategies = useMemo(
+    () => allChartSeries.filter((s) => !hiddenSeries.has(s.id)),
+    [allChartSeries, hiddenSeries],
+  );
   const chartEquityPoints = useMemo(() => {
-    if (!SHOW_PORTFOLIO_LINE) return equityPoints;
-    return {
-      ...equityPoints,
-      __portfolio__: portfolioResult.equity.map((e) => ({ time: e.time, value: e.value })),
-    };
+    const base = { ...equityPoints };
+    if (SHOW_PORTFOLIO_LINE) {
+      base.__portfolio__ = portfolioResult.equity.map((e) => ({ time: e.time, value: e.value }));
+    }
+    return base;
   }, [equityPoints, portfolioResult, SHOW_PORTFOLIO_LINE]);
 
   // Analytics deep-link target.
@@ -631,7 +664,7 @@ export default function Dashboard() {
 
       {/* Charts */}
       <main className="flex-1 p-4 flex flex-col gap-3">
-        <div className="relative h-[26vh] rounded-xl border border-line bg-bg-panel/60 overflow-hidden shadow-2xl shadow-black/40">
+        <div className="relative h-[52vh] rounded-xl border border-line bg-bg-panel/60 overflow-hidden shadow-2xl shadow-black/40">
           {/* Idle states for backtest hindsight */}
           {mode === "backtest" && backtestKind === "hindsight" && !staticData && !hindsightLoading && (
             <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-bg/70 backdrop-blur">
@@ -722,17 +755,42 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* Equity panel — per-strategy lines + aggregate "Portfolio" line on top */}
+        {/* Equity panel — per-strategy lines + aggregate "Portfolio" line on top.
+            Clickable legend toggles each series. The "shared" line shows the
+            portfolio's actual MTM (cash + open positions); strategy lines are
+            each strategy's standalone attribution. */}
         <div className="relative h-[28vh] rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
           {active.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-muted">
               add strategies on the Strategies page to see equity curves here
             </div>
           )}
-          {active.length >= 2 && portfolioResult?.equity?.length > 0 && (
-            <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5 text-[10px] font-mono text-muted pointer-events-none">
-              <span className="w-3 h-[2px] bg-white" />
-              <span>Portfolio (shared)</span>
+          {allChartSeries.length > 0 && (
+            <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5 flex-wrap justify-end max-w-[70%]">
+              {allChartSeries.map((s) => {
+                const off = hiddenSeries.has(s.id);
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => toggleSeriesHidden(s.id)}
+                    title={off ? "Click to show" : "Click to hide"}
+                    className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono border transition ${
+                      off
+                        ? "border-line/40 text-muted/50 bg-bg-panel/30"
+                        : "border-line/60 text-muted hover:text-text bg-bg-panel/60"
+                    }`}
+                  >
+                    <span
+                      className="w-3 h-[2px] rounded-sm"
+                      style={{
+                        background: s.color,
+                        opacity: off ? 0.3 : 1,
+                      }}
+                    />
+                    <span className={off ? "line-through" : ""}>{s.label}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
           <CustomEquityChart
@@ -757,11 +815,12 @@ export default function Dashboard() {
             params={s.params}
             onClose={() => setEditingId(null)}
             onApply={(p) => { onApplyParams(s.id, p); setEditingId(null); }}
+            onSaveAsDefault={(p) => saveUserDefaults(s.id, p)}
             onResetDefaults={() => {
+              // Start from code-level defaults.
               const defaults = {};
               for (const spec of meta.schema) defaults[spec.name] = spec.default;
-              // Per-symbol preset overrides (sparse). For nested dicts
-              // (sessions / sides) merge sub-keys rather than replacing.
+              // Layer 1: per-symbol preset overrides from the strategy schema.
               const preset = meta.symbol_defaults?.[symbol];
               if (preset) {
                 for (const [k, v] of Object.entries(preset)) {
@@ -784,7 +843,10 @@ export default function Dashboard() {
                   }
                 }
               }
-              onApplyParams(s.id, defaults);
+              // Layer 2: user-saved defaults override everything.
+              const userDefaults = getUserDefaults(s.id);
+              const resolved = userDefaults ? { ...defaults, ...userDefaults } : defaults;
+              onApplyParams(s.id, resolved);
             }}
             onChange={() => {}}
           />

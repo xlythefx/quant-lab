@@ -10,9 +10,10 @@ const SESSION_LABELS = {
 };
 
 export default function StrategyEditor({
-  open, schema, params, onChange, onClose, onApply, onResetDefaults, color,
+  open, schema, params, onChange, onClose, onApply, onResetDefaults, onSaveAsDefault, color,
 }) {
   const [draft, setDraft] = useState(params || {});
+  const [saved, setSaved] = useState(false);
   useEffect(() => { setDraft(params || {}); }, [params, open]);
 
   const groups = useMemo(() => {
@@ -54,14 +55,28 @@ export default function StrategyEditor({
         ))}
       </div>
 
-      <div className="px-5 py-3 border-t border-line flex items-center justify-between">
-        <button onClick={onResetDefaults} className="text-xs text-muted hover:text-text">Reset Defaults</button>
-        <button
-          onClick={() => onApply?.(draft)}
-          className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold"
-        >
-          Apply &amp; Re-run
-        </button>
+      <div className="px-5 py-3 border-t border-line flex items-center justify-between gap-2">
+        <button onClick={onResetDefaults} className="text-xs text-muted hover:text-text shrink-0">Reset Defaults</button>
+        <div className="flex items-center gap-2">
+          {onSaveAsDefault && (
+            <button
+              onClick={() => {
+                onSaveAsDefault(draft);
+                setSaved(true);
+                setTimeout(() => setSaved(false), 2000);
+              }}
+              className="text-xs text-accent-blue hover:text-accent-blue/80 border border-accent-blue/30 hover:border-accent-blue/60 px-3 py-1.5 rounded-md transition"
+            >
+              {saved ? "Saved ✓" : "Save as Default"}
+            </button>
+          )}
+          <button
+            onClick={() => onApply?.(draft)}
+            className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold"
+          >
+            Apply &amp; Re-run
+          </button>
+        </div>
       </div>
     </div>
   );

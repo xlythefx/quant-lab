@@ -20,6 +20,13 @@ const SESSION_BAND_COLORS = {
   ny_pm:  "rgba(139,92,246,0.07)",   // violet
 };
 
+function _priceFormat(sym) {
+  const btc = sym && sym.startsWith("BTC");
+  return btc
+    ? { type: "price", precision: 4, minMove: 0.0001 }
+    : { type: "price", precision: 6, minMove: 0.000001 };
+}
+
 function _hhmmToSec(s) {
   const m = (s || "").match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return 0;
@@ -105,6 +112,10 @@ export default function TradingChart({
     }
   };
 
+  useEffect(() => {
+    seriesRef.current?.applyOptions({ priceFormat: _priceFormat(symbol) });
+  }, [symbol]);
+
   // Re-render bands when sessions prop changes.
   useEffect(() => { _renderSessionBands(); }, [sessions]);
 
@@ -152,6 +163,7 @@ export default function TradingChart({
       borderDownColor: "#ef4444",
       wickUpColor: "#60a5fa",
       wickDownColor: "#f87171",
+      priceFormat: _priceFormat(symbol),
     });
 
     const volume = chart.addHistogramSeries({
@@ -458,7 +470,7 @@ export default function TradingChart({
         <span className="text-xs text-muted font-mono">{symbol} · {timeframe}</span>
         {last && (
           <span className="text-sm font-mono text-text">
-            {Number(last.close).toFixed(symbol.startsWith("BTC") ? 2 : 4)}
+            {Number(last.close).toFixed(symbol.startsWith("BTC") ? 4 : 6)}
           </span>
         )}
       </div>

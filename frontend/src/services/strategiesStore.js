@@ -101,6 +101,28 @@ export function clearAll() {
   setState([]);
 }
 
+// ---------------------------------------------------------------------------
+// User-saved param defaults (separate from the active-strategy state).
+// Persisted under per-strategy keys so they survive strategy removal.
+// ---------------------------------------------------------------------------
+
+const _defaultsPrefix = "ql.user_defaults.";
+
+export function saveUserDefaults(id, params) {
+  try {
+    localStorage.setItem(_defaultsPrefix + id, JSON.stringify(params));
+  } catch {}
+}
+
+export function getUserDefaults(id) {
+  try {
+    const raw = localStorage.getItem(_defaultsPrefix + id);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getCount() { return state.length; }
 
 export function useActiveStrategies() {

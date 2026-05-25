@@ -505,9 +505,12 @@ def _side_block(trades) -> dict:
 # ---------------------------------------------------------------------------
 
 def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
-                       wf_trials=None) -> dict:
+                       wf_trials=None, sessions_cfg_override=None) -> dict:
     """Heavy stuff for the Analytics page tabs."""
-    sessions_cfg = (strategy.p.get("sessions") or {}) if hasattr(strategy, "p") else {}
+    if sessions_cfg_override is not None:
+        sessions_cfg = sessions_cfg_override
+    else:
+        sessions_cfg = (strategy.p.get("sessions") or {}) if hasattr(strategy, "p") else {}
 
     # ---- per-session breakdown
     by_session_dict: dict = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl_dollars": 0.0,

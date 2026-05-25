@@ -1,0 +1,44 @@
+{
+  "NQ": {
+    "ts_symbol": "@NQ",
+    "canonical": "NQ_CONT",
+    "asset_class": "future",
+    "exchange": "CME",
+    "description": "Nasdaq-100 E-mini Futures (continuous)"
+  },
+  "ES": {
+    "ts_symbol": "@ES",
+    "canonical": "ES_CONT",
+    "asset_class": "future",
+    "exchange": "CME",
+    "description": "S&P 500 E-mini Futures (continuous)"
+  },
+  "RTY": {
+    "ts_symbol": "@RTY",
+    "canonical": "RTY_CONT",
+    "asset_class": "future",
+    "exchange": "CME",
+    "description": "Russell 2000 E-mini Futures (continuous)"
+  },
+  "YM": {
+    "ts_symbol": "@YM",
+    "canonical": "YM_CONT",
+    "asset_class": "future",
+    "exchange": "CBOT",
+    "description": "Dow Jones E-mini Futures (continuous)"
+  },
+  "GC": {
+    "ts_symbol": "@GC",
+    "canonical": "GC_CONT",
+    "asset_class": "future",
+    "exchange": "COMEX",
+    "description": "Gold Futures (continuous)"
+  },
+  "CL": {
+    "ts_symbol": "@CL",
+    "canonical": "CL_CONT",
+    "asset_class": "future",
+    "exchange": "NYMEX",
+    "description": "Crude Oil Futures (continuous)"
+  }
+}

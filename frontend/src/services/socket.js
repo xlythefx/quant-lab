@@ -1,10 +1,10 @@
 import { io } from "socket.io-client";
 
-const url = "http://localhost:5050";
+const url = import.meta.env.DEV ? "http://localhost:6173" : undefined;
 
 export const socket = io(url, {
   autoConnect: true,
-  transports: ["websocket"],
+  transports: ["polling", "websocket"],
   reconnection: true,
   reconnectionDelay: 500,
   reconnectionDelayMax: 5000,

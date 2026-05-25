@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const baseURL = "http://localhost:5050";
+const baseURL = import.meta.env.DEV ? "http://localhost:6173" : "";
 
 export const api = axios.create({
   baseURL,
@@ -57,6 +57,19 @@ export async function cancelDownload() {
 
 export async function getDownloadStatus() {
   const { data } = await api.get("/api/datasets/download/status");
+  return data;
+}
+
+export async function importCsvDataset({ file, symbol, timeframes, sourceTz = "America/New_York" }) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("symbol", symbol);
+  timeframes.forEach((tf) => form.append("timeframes", tf));
+  form.append("source_tz", sourceTz);
+  const { data } = await api.post("/api/datasets/import", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 120_000,
+  });
   return data;
 }
 
@@ -228,6 +241,12 @@ export async function aiAnalyzeWalkForwardSection(result, section) {
   return data; // {text, model, usage}
 }
 
+export async function aiChatWalkForward(messages, wf_result) {
+  const { data } = await api.post("/api/ai/chat/walkforward",
+    { messages, wf_result }, { timeout: 180_000 });
+  return data; // {text, model, usage}
+}
+
 export async function aiSuggestWalkForward(meta) {
   const { data } = await api.post("/api/ai/suggest/walkforward",
     meta, { timeout: 180_000 });
@@ -248,7 +267,7 @@ export async function saveLiveAlerts(rules) {
   return data.rules;
 }
 
-export async function testLiveAlert({ strategy_id, symbol }) {
-  const { data } = await api.post("/api/live-alerts/test", { strategy_id, symbol });
+export async function testLiveAlert({ rule_name, action = "BUY" }) {
+  const { data } = await api.post("/api/live-alerts/test", { rule_name, action });
   return data; // {ok, url?, payload?: {secret redacted}, error?}
 }

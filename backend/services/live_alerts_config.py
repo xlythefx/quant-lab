@@ -1,19 +1,24 @@
 """
-Per-(strategy_id, symbol) webhook alert rules.
+Per-rule webhook alert config.
 
-Persisted to data/live_alerts.json. Mirrors risk_config.py: atomic read/write,
-in-memory cache, defaults if the file is missing.
+Persisted to data/live_alerts.json. Rules are keyed by `name` (the new
+uniqueness field), so multiple rules can target the same (strategy_id, symbol)
+— e.g. one per VPS endpoint — mirroring TradingView's per-alert model.
 
 Each rule shape:
   {
+    "name":           "VWMA BTC → VPS1",
     "strategy_id":    "vwma_reversion",
     "symbol":         "BTCUSDT",
     "enabled":        true,
-    "webhook_url":    "http://localhost:5051/binance_webhook",
+    "webhook_url":    "https://api1.example.com/binance_webhook",
     "secret":         "<shared token>",
-    "strategy_alias": "VWMA-Reversion",   # what the acceptor expects in `strategy`
+    "strategy_alias": "VWMA-Reversion",
     "leverage":       25
   }
+
+Backwards compat: old rules without `name` get one auto-generated from
+strategy_id + symbol on first load.
 """
 from __future__ import annotations
 
@@ -29,16 +34,23 @@ log = logging.getLogger(__name__)
 _PATH = os.path.join(DATA_DIR, "live_alerts.json")
 _LOCK = Lock()
 
-_REQUIRED = ("strategy_id", "symbol", "webhook_url", "secret", "strategy_alias")
+_REQUIRED = ("name", "strategy_id", "symbol", "webhook_url", "secret", "strategy_alias")
 _cache: list[dict] | None = None
 
 
-def _coerce_rule(r: dict) -> dict | None:
+def _coerce_rule(r: dict, *, fallback_index: int = 0) -> dict | None:
     if not isinstance(r, dict):
         return None
+    strategy_id = str(r.get("strategy_id") or "").strip()
+    symbol      = str(r.get("symbol") or "").strip().upper()
+    name        = str(r.get("name") or "").strip()
+    if not name:
+        # backwards compat: generate from strategy+symbol
+        name = f"{strategy_id}_{symbol}" if (strategy_id and symbol) else f"rule_{fallback_index}"
     out = {
-        "strategy_id":    str(r.get("strategy_id") or "").strip(),
-        "symbol":         str(r.get("symbol") or "").strip().upper(),
+        "name":           name,
+        "strategy_id":    strategy_id,
+        "symbol":         symbol,
         "enabled":        bool(r.get("enabled", True)),
         "webhook_url":    str(r.get("webhook_url") or "").strip(),
         "secret":         str(r.get("secret") or "").strip(),
@@ -64,16 +76,15 @@ def _to_int(v, *, default: int, lo: int, hi: int) -> int:
 def _coerce_rules(rules) -> list[dict]:
     if not isinstance(rules, list):
         return []
-    seen = set()
+    seen_names: set[str] = set()
     out: list[dict] = []
-    for r in rules:
-        c = _coerce_rule(r)
+    for i, r in enumerate(rules):
+        c = _coerce_rule(r, fallback_index=i)
         if not c:
             continue
-        key = (c["strategy_id"], c["symbol"])
-        if key in seen:
+        if c["name"] in seen_names:
             continue
-        seen.add(key)
+        seen_names.add(c["name"])
         out.append(c)
     return out
 
@@ -109,10 +120,16 @@ def save_rules(rules) -> list[dict]:
         return [dict(r) for r in _cache]
 
 
-def find_rule(strategy_id: str, symbol: str) -> dict | None:
+def find_rules(strategy_id: str, symbol: str) -> list[dict]:
+    """Return all enabled rules matching (strategy_id, symbol)."""
     sid = (strategy_id or "").strip()
     sym = (symbol or "").strip().upper()
+    return [r for r in load_rules() if r["strategy_id"] == sid and r["symbol"] == sym]
+
+
+def find_rule_by_name(name: str) -> dict | None:
+    name = (name or "").strip()
     for r in load_rules():
-        if r["strategy_id"] == sid and r["symbol"] == sym:
+        if r["name"] == name:
             return r
     return None

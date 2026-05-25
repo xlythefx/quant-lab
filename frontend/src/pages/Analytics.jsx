@@ -5,7 +5,6 @@ import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtTime } from "../services/format.js";
 import { downloadTradesCsv } from "../services/exportTrades.js";
 import { aiAnalyzeBacktestSection } from "../services/api.js";
 import { KpiCard, KV, Section, InsightCard, TabBar } from "../components/analytics/primitives.jsx";
-import { computeSubset } from "../services/portfolioSubset.js";
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -63,10 +62,14 @@ export default function Analytics() {
   }, [key, isPortfolio, allSids.join("|")]);
 
   // Determine display mode from the selection.
-  //   none:   no strategies selected → empty state.
-  //   all:    every strategy selected → use raw portfolio aggregate.
-  //   single: exactly one selected → use per_strategy[sid].
-  //   subset: 2+ selected but not all → client-side recompute.
+  //   none:    no strategies selected → empty state.
+  //   all:     every strategy selected → use raw portfolio aggregate.
+  //   single:  exactly one selected → use per_strategy[sid].
+  //   subset:  2+ selected but not all → SAME data as "all" (full aggregate
+  //            KPIs/charts), but lists that have a strategy_id column
+  //            (trades, skipped signals, per-strategy attribution) are
+  //            filtered down to the selection. Pure visual hide — no
+  //            recompute. Stats and analytics stay full-portfolio.
   const viewMode = useMemo(() => {
     if (!isPortfolio) return "single";
     if (selectedSids.size === 0) return "none";
@@ -76,28 +79,14 @@ export default function Analytics() {
   }, [isPortfolio, selectedSids, allSids.length]);
 
   // Build the single-result-shaped object that existing tab components consume.
+  // For "all" + "subset" we hand them the full aggregate; the *tabs* with
+  // per-row data (Trades, Skipped Signals, attribution) filter visibly.
   const result = useMemo(() => {
     if (!rawResult) return null;
     if (!isPortfolio) return rawResult;
     const firstSpec = rawResult.strategies?.[0] || {};
 
     if (viewMode === "none") return null;
-
-    if (viewMode === "all") {
-      return {
-        strategy_id: "Portfolio",
-        symbol: firstSpec.symbol,
-        timeframe: firstSpec.timeframe,
-        risk_config: rawResult.risk_config,
-        params: {},
-        candles: [],
-        overlays: [],
-        trades: rawResult.trades || [],
-        equity: rawResult.equity || [],
-        stats: rawResult.stats || {},
-        analytics: rawResult.analytics || {},
-      };
-    }
 
     if (viewMode === "single") {
       const onlySid = [...selectedSids][0];
@@ -118,9 +107,42 @@ export default function Analytics() {
       };
     }
 
-    // viewMode === "subset"
-    return computeSubset(rawResult, selectedSids);
+    // viewMode === "all" or "subset" — both use the aggregate result.
+    return {
+      strategy_id: "Portfolio",
+      symbol: firstSpec.symbol,
+      timeframe: firstSpec.timeframe,
+      risk_config: rawResult.risk_config,
+      params: {},
+      candles: [],
+      overlays: [],
+      trades: rawResult.trades || [],
+      equity: rawResult.equity || [],
+      stats: rawResult.stats || {},
+      analytics: rawResult.analytics || {},
+    };
   }, [rawResult, isPortfolio, viewMode, selectedSids]);
+
+  // For tabs that filter visibly in subset mode.
+  const isSubset = viewMode === "subset";
+  const filteredTrades = useMemo(() => {
+    if (!isSubset || !result?.trades) return result?.trades || [];
+    return result.trades.filter((t) => selectedSids.has(t.strategy_id));
+  }, [isSubset, result, selectedSids]);
+  const filteredSkipped = useMemo(() => {
+    if (!rawResult?.skipped_signals) return [];
+    if (!isSubset) return rawResult.skipped_signals;
+    return rawResult.skipped_signals.filter((sk) => selectedSids.has(sk.strategy_id));
+  }, [rawResult, isSubset, selectedSids]);
+  const filteredPerStrategy = useMemo(() => {
+    if (!rawResult?.per_strategy) return null;
+    if (!isSubset) return rawResult.per_strategy;
+    const out = {};
+    for (const sid of selectedSids) {
+      if (rawResult.per_strategy[sid]) out[sid] = rawResult.per_strategy[sid];
+    }
+    return out;
+  }, [rawResult, isSubset, selectedSids]);
 
   // Skipped Signals tab is portfolio-only. It's available in all/subset views
   // (we filter the skipped list by selection). Hidden in single-strategy view.
@@ -140,16 +162,19 @@ export default function Analytics() {
     }
   }, [tab, isPortfolio, viewMode]);
 
-  // Helper actions for the selector.
+  // Helper actions for the selector. The view must always have at least one
+  // strategy selected — otherwise the page goes blank. Unchecking the LAST
+  // selected pill is a no-op; the "Show none" action is gone for the same reason.
   const toggleSid = (sid) => {
     setSelectedSids((prev) => {
+      // Refuse to remove the last selection.
+      if (prev.has(sid) && prev.size <= 1) return prev;
       const next = new Set(prev);
       if (next.has(sid)) next.delete(sid); else next.add(sid);
       return next;
     });
   };
-  const selectAll  = () => setSelectedSids(new Set(allSids));
-  const selectNone = () => setSelectedSids(new Set());
+  const selectAll = () => setSelectedSids(new Set(allSids));
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -188,10 +213,11 @@ export default function Analytics() {
             viewMode={viewMode}
             onToggle={toggleSid}
             onSelectAll={selectAll}
-            onSelectNone={selectNone}
           />
         )}
 
+        {/* Defensive: viewMode "none" should be unreachable since toggleSid
+            refuses to remove the last selection — but keep a friendly fallback. */}
         {rawResult && isPortfolio && viewMode === "none" && (
           <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
             <div className="text-base text-text mb-1">No strategies selected</div>
@@ -199,14 +225,12 @@ export default function Analytics() {
           </div>
         )}
 
-        {/* Subset-mode banner: tells the user advanced quant metrics are not recomputed. */}
-        {result?._subset && (
-          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-[11px] text-amber-300">
-            Subset view: stats, equity, heatmap, monthly, drawdown, and distribution are
-            recomputed client-side from {result._selected_sids.length} of {allSids.length} strategies.
-            Sessions and advanced quant metrics (Sortino / Calmar / deflated Sharpe / T-test)
-            are unavailable in subset mode — switch to <span className="text-amber-200">All</span> or a
-            single strategy to see them.
+        {/* Subset-mode hint: KPIs/charts stay full-portfolio; only lists filter. */}
+        {isSubset && (
+          <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 px-4 py-2 text-[11px] text-muted">
+            Showing <span className="text-text">{selectedSids.size} of {allSids.length}</span> strategies.
+            Trades, Skipped Signals, and the per-strategy attribution panel are filtered to your selection.
+            KPIs and charts still reflect the <span className="text-text">full portfolio</span> — pick a single strategy to drill in, or tick all to clear the filter.
           </div>
         )}
 
@@ -217,7 +241,8 @@ export default function Analytics() {
             {tab === "overview" && (
               <OverviewTab
                 result={result}
-                portfolioResult={isPortfolio && viewMode === "all" ? rawResult : null}
+                portfolioResult={isPortfolio && (viewMode === "all" || viewMode === "subset") ? rawResult : null}
+                filteredPerStrategy={filteredPerStrategy}
               />
             )}
             {tab === "sessions"     && <SessionsTab     result={result} />}
@@ -228,12 +253,14 @@ export default function Analytics() {
             {tab === "ttest"        && <TTestTab        result={result} />}
             {tab === "tradequality" && <TradeQualityTab result={result} />}
             {tab === "advanced"     && <AdvancedTab     result={result} />}
-            {tab === "trades"       && <TradesTab       result={result} />}
+            {tab === "trades"       && (
+              <TradesTab
+                result={isSubset ? { ...result, trades: filteredTrades } : result}
+              />
+            )}
             {tab === "skipped"      && (
               <SkippedSignalsTab
-                result={viewMode === "all"
-                  ? rawResult
-                  : { skipped_signals: result.skipped_signals || [] }}
+                result={{ skipped_signals: filteredSkipped }}
               />
             )}
             {tab === "ai"           && <AITab            result={result} />}
@@ -245,17 +272,22 @@ export default function Analytics() {
 }
 
 // ---------------------------------------------------------------------------
-// PORTFOLIO VIEW SELECTOR — pills to switch between Aggregate and each strategy
+// PORTFOLIO VIEW SELECTOR — multi-select inclusion/exclusion of strategies.
 // ---------------------------------------------------------------------------
 
-function PortfolioViewSelector({ result, selectedSids, viewMode, onToggle, onSelectAll, onSelectNone }) {
+function PortfolioViewSelector({
+  result, selectedSids, viewMode, onToggle, onSelectAll,
+}) {
   const strategies = result?.strategies || [];
   const total = strategies.length;
   const n = selectedSids.size;
+  // The view must always have at least 1 selection — unchecking the last
+  // pill is a no-op (enforced in toggleSid). Mark that pill non-removable
+  // so the disabled state is visible.
+  const isLastSelected = (sid) => n === 1 && selectedSids.has(sid);
 
   let label;
-  if (viewMode === "all")    label = `All ${total} strategies`;
-  else if (viewMode === "none")   label = "Nothing selected";
+  if (viewMode === "all")         label = `All ${total} strategies`;
   else if (viewMode === "single") label = "1 strategy";
   else                            label = `Subset · ${n} of ${total}`;
 
@@ -271,26 +303,26 @@ function PortfolioViewSelector({ result, selectedSids, viewMode, onToggle, onSel
                   className="px-2 py-1 rounded text-muted hover:text-text border border-line">
             Show all
           </button>
-          <button onClick={onSelectNone}
-                  className="px-2 py-1 rounded text-muted hover:text-text border border-line">
-            Show none
-          </button>
         </div>
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
         {strategies.map((s, i) => {
-          const on = selectedSids.has(s.strategy_id);
+          const on   = selectedSids.has(s.strategy_id);
+          const last = isLastSelected(s.strategy_id);
           return (
             <button
               key={s.strategy_id}
               onClick={() => onToggle(s.strategy_id)}
+              disabled={last}
               className={`px-3 py-1.5 rounded-md text-xs font-medium border flex items-center gap-2 ${
                 on
                   ? "bg-accent-grad text-white border-transparent"
                   : "bg-bg-panel/40 text-muted hover:text-text border-line"
-              }`}
-              title={on ? "Click to exclude" : "Click to include"}
+              } ${last ? "cursor-not-allowed opacity-90" : ""}`}
+              title={last
+                ? "At least one strategy must stay selected"
+                : on ? "Click to exclude" : "Click to include"}
             >
               <span className={`w-3 h-3 rounded-sm flex items-center justify-center text-[9px] ${
                 on ? "bg-white/30 text-white" : "border border-line"
@@ -439,7 +471,7 @@ function SkippedSignalsTab({ result }) {
 // OVERVIEW
 // ---------------------------------------------------------------------------
 
-function OverviewTab({ result, portfolioResult }) {
+function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
   const s = result.stats;
   const a = result.analytics;
   const rc = result.risk_config;
@@ -474,7 +506,10 @@ function OverviewTab({ result, portfolioResult }) {
 
       {portfolioResult && (
         <div className="lg:col-span-3">
-          <PerStrategyAttribution portfolioResult={portfolioResult} />
+          <PerStrategyAttribution
+            portfolioResult={portfolioResult}
+            filteredPerStrategy={filteredPerStrategy}
+          />
         </div>
       )}
 
@@ -503,8 +538,12 @@ function OverviewTab({ result, portfolioResult }) {
 // PER-STRATEGY ATTRIBUTION — shown on Overview when in aggregate portfolio view
 // ---------------------------------------------------------------------------
 
-function PerStrategyAttribution({ portfolioResult }) {
-  const perStrategy = portfolioResult?.per_strategy || {};
+function PerStrategyAttribution({ portfolioResult, filteredPerStrategy }) {
+  // Use the filter map when in subset view so hidden strategies drop out
+  // of the attribution table. Fall back to the full per_strategy map.
+  const perStrategy = filteredPerStrategy ?? portfolioResult?.per_strategy ?? {};
+  // Share % is always relative to the FULL portfolio P&L — so a row's share
+  // reads consistently regardless of which rows are filtered out.
   const aggTotal = portfolioResult?.stats?.total_return_dollars ?? 0;
   const entries = Object.entries(perStrategy);
   if (!entries.length) return null;

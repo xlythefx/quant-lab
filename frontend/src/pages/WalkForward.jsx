@@ -10,7 +10,7 @@ import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
 import {
   getSymbols, getStrategies,
   startWalkForward, cancelWalkForward, getWalkForwardStatus, getWalkForwardLastResult,
-  aiSuggestWalkForward, aiAnalyzeWalkForwardSection,
+  aiSuggestWalkForward, aiAnalyzeWalkForwardSection, aiChatWalkForward,
 } from "../services/api.js";
 import { subscribeWalkForward } from "../services/socket.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
@@ -22,6 +22,7 @@ import {
   ProgressPanel,
   WFVerdict, Kpi,
   BestParamRankings, TopCombinations, WindowRankings, WindowHeatmap,
+  PnlHeatmapGrid, SessionsEditor,
   useParamStats,
 } from "../components/walkforward/widgets.jsx";
 
@@ -30,6 +31,8 @@ const METRICS = [
   { id: "profit_factor", label: "Profit Factor" },
   { id: "total_return",  label: "Total Return" },
 ];
+
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const TF_SECONDS = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
 
@@ -103,6 +106,7 @@ export default function WalkForward() {
 
   const [baseParams, setBaseParams]   = usePersistentState("ql.wf.base", {});
   const [searchSpace, setSearchSpace] = usePersistentState("ql.wf.search", []);
+  const [sessions, setSessions]       = usePersistentState("ql.wf.sessions", []);
   const lastStrategyId = useRef(strategyId);
   useEffect(() => {
     if (lastStrategyId.current && lastStrategyId.current !== strategyId) {
@@ -118,6 +122,9 @@ export default function WalkForward() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const liveWindows = useRef([]);
+  const mainRef = useRef(null);
+  const progressRef = useRef(null);
+  const [chatOpen, setChatOpen] = useState(false);
 
   // ---- AI Suggest state ------------------------------------------------
   const [aiSuggestLoading, setAiSuggestLoading] = useState(false);
@@ -271,11 +278,24 @@ export default function WalkForward() {
 
   const running = jobState?.state === "running" || jobState?.state === "starting";
 
+  useEffect(() => {
+    if (running) {
+      progressRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [running]);
+
   const onStart = async () => {
     setError(null);
     liveWindows.current = [];
     setJobState({ state: "starting" });
+    mainRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     try {
+      // Convert sessions array → dict keyed by name for the backend.
+      const sessions_cfg = Object.fromEntries(
+        (sessions || [])
+          .filter((s) => s.name && s.enabled)
+          .map((s) => [s.name, { enabled: true, start: s.start, end: s.end }])
+      );
       await startWalkForward({
         strategy_id: strategyId,
         symbol,
@@ -291,6 +311,7 @@ export default function WalkForward() {
         metric,
         embargo_bars: embargoBars,
         purge_radius: purgeRadius,
+        sessions_cfg: Object.keys(sessions_cfg).length > 0 ? sessions_cfg : null,
       });
     } catch (e) {
       setError(e?.response?.data?.error || e.message);
@@ -307,6 +328,24 @@ export default function WalkForward() {
     const k = wfKey(result);
     setLastResult(k, result);
     window.location.hash = `#analytics?key=${encodeURIComponent(k)}`;
+  };
+
+  const onOpenInCostSweep = () => {
+    if (!result) return;
+    const windows = result.windows || [];
+    if (!windows.length) return;
+    const first = windows[0];
+    const last  = windows[windows.length - 1];
+    const handoff = {
+      strategy_id: result.strategy_id,
+      symbol:      result.symbol,
+      timeframe:   result.timeframe,
+      params:      last.best_params || {},
+      oos_start:   first.oos_start,
+      oos_end:     last.oos_end,
+    };
+    localStorage.setItem("ql.cs.wf_import", JSON.stringify(handoff));
+    window.location.hash = "#costsweep";
   };
 
   const tabs = useMemo(
@@ -327,6 +366,7 @@ export default function WalkForward() {
     nWorkers, setNWorkers, maxWorkers,
     embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius,
     searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
+    sessions, setSessions,
     onStart, onCancel,
   };
 
@@ -334,8 +374,9 @@ export default function WalkForward() {
     <div className="min-h-screen flex flex-col">
       <Navbar view="walkforward" />
 
-      <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-5">
-        <header className="flex items-start justify-between gap-4">
+      <div className="flex-1 flex overflow-hidden">
+        <main ref={mainRef} className="flex-1 p-6 overflow-y-auto space-y-5 min-w-0 max-w-7xl w-full mx-auto">
+          <header className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Walk-Forward Optimization</h1>
             <p className="text-sm text-muted mt-1">
@@ -345,59 +386,88 @@ export default function WalkForward() {
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            {result && (
+              {result && (
+                <button
+                  onClick={onOpenInCostSweep}
+                  className="px-3 py-1.5 rounded-md text-xs font-semibold border border-accent-blue/50 text-accent-blue hover:bg-accent-blue/10 transition"
+                >
+                  Cost Sweep →
+                </button>
+              )}
+              {result && (
+                <button
+                  onClick={onOpenInAnalytics}
+                  className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent-grad text-white"
+                >
+                  Open in Analytics →
+                </button>
+              )}
               <button
-                onClick={onOpenInAnalytics}
-                className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent-grad text-white"
+                onClick={() => setShowGuide(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line text-xs text-muted hover:text-text hover:border-accent-blue"
+                title="What do IS / OOS / trials / workers mean?"
               >
-                Open in Analytics →
+                <span className="w-4 h-4 rounded-full bg-accent-blue/15 text-accent-blue flex items-center justify-center text-[10px] font-bold">?</span>
+                Guide
               </button>
-            )}
-            <button
-              onClick={() => setShowGuide(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line text-xs text-muted hover:text-text hover:border-accent-blue"
-              title="What do IS / OOS / trials / workers mean?"
-            >
-              <span className="w-4 h-4 rounded-full bg-accent-blue/15 text-accent-blue flex items-center justify-center text-[10px] font-bold">?</span>
-              Guide
-            </button>
-          </div>
-        </header>
+            </div>
+          </header>
 
-        {error && (
-          <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{error}</div>
+          {error && (
+            <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{error}</div>
+          )}
+
+          {/* Progress banner sits ABOVE the tab bar so it's visible from any tab */}
+          {(running || jobState?.state === "cancelled") && (
+            <div ref={progressRef}>
+              <ProgressPanel jobState={jobState} />
+            </div>
+          )}
+
+          <TabBar tabs={tabs} active={tab} onSelect={onTab} />
+
+          {tab === "setup"      && <SetupTab {...setupProps} />}
+          {tab === "overview"   && result && <OverviewTab   result={result} />}
+          {tab === "folds"      && result && <FoldsTab      result={result} />}
+          {tab === "parameters" && result && <ParametersTab result={result} />}
+          {tab === "optuna"     && result && <OptunaTab     result={result} />}
+          {tab === "robustness" && result && <RobustnessTab result={result} />}
+          {tab === "regime"     && result && <RegimeTab     result={result} />}
+          {tab === "ai"         && result && <AITab         result={result} />}
+
+          {!result && tab !== "setup" && (
+            <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
+              <div className="text-base text-text mb-1">No walk-forward result loaded</div>
+              <div className="text-xs">Configure and start a run on the Setup tab.</div>
+              <button
+                onClick={() => onTab("setup")}
+                className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm"
+              >
+                Go to Setup →
+              </button>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Floating chat toggle button */}
+      <button
+        onClick={() => setChatOpen((o) => !o)}
+        title={chatOpen ? "Close assistant" : "Open assistant"}
+        className="fixed bottom-6 right-6 z-50 w-12 h-12 rounded-full bg-accent-grad shadow-lg flex items-center justify-center hover:opacity-90 transition-opacity"
+      >
+        {chatOpen ? (
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        ) : (
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
         )}
+      </button>
 
-        {/* Progress banner sits ABOVE the tab bar so it's visible from any tab */}
-        {(running || jobState?.state === "cancelled") && (
-          <ProgressPanel jobState={jobState} />
-        )}
-
-        <TabBar tabs={tabs} active={tab} onSelect={onTab} />
-
-        {tab === "setup"      && <SetupTab {...setupProps} />}
-        {tab === "overview"   && result && <OverviewTab   result={result} />}
-        {tab === "folds"      && result && <FoldsTab      result={result} />}
-        {tab === "parameters" && result && <ParametersTab result={result} />}
-        {tab === "optuna"     && result && <OptunaTab     result={result} />}
-        {tab === "robustness" && result && <RobustnessTab result={result} />}
-        {tab === "regime"     && result && <RegimeTab     result={result} />}
-        {tab === "ai"         && result && <AITab         result={result} />}
-
-        {!result && tab !== "setup" && (
-          <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
-            <div className="text-base text-text mb-1">No walk-forward result loaded</div>
-            <div className="text-xs">Configure and start a run on the Setup tab.</div>
-            <button
-              onClick={() => onTab("setup")}
-              className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm"
-            >
-              Go to Setup →
-            </button>
-          </div>
-        )}
-      </main>
-
+      <WFChatSidebar open={chatOpen} onClose={() => setChatOpen(false)} result={result} />
       <WalkForwardGuide open={showGuide} onClose={() => setShowGuide(false)} />
     </div>
   );
@@ -420,6 +490,7 @@ function SetupTab({
   nWorkers, setNWorkers, maxWorkers,
   embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius,
   searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
+  sessions, setSessions,
   onStart, onCancel,
 }) {
   return (
@@ -543,6 +614,10 @@ function SetupTab({
 
       <BudgetHint searchSpaceLen={searchSpace.length} nTrials={nTrials} isBars={isBars} oosBars={oosBars} />
 
+      <div className="pt-2 border-t border-line/40">
+        <SessionsEditor value={sessions} onChange={setSessions} />
+      </div>
+
       {activeStrategy && (
         <div className="pt-2 border-t border-line/40">
           <WalkForwardParamEditor
@@ -585,13 +660,15 @@ function SetupTab({
 
 function OverviewTab({ result }) {
   const s = result.stats || {};
+  const lng = s.long || {};
+  const sht = s.short || {};
   const windows = result.windows || [];
   const equityPts = (result.equity || []).map((p) => ({ time: p.time, value: p.value }));
+  const sessions = (result.analytics?.by_session || []).sort((a, b) => b.pnl_dollars - a.pnl_dollars);
+  const pnlGrid  = result.analytics?.heatmap?.pnl   || [];
+  const cntGrid  = result.analytics?.heatmap?.count || [];
 
-  // Stitched buy-and-hold series, chained from per-window bh_return_pct.
-  // Each window contributes one segment from oos_start (carry equity) to oos_end
-  // (carry * (1 + bh_return)). Linear interpolation between window endpoints —
-  // not a tick-accurate B&H curve, but close enough to spot trend regimes.
+  // Stitched buy-and-hold series.
   const bhPts = useMemo(() => {
     let value = 100;
     const pts = [];
@@ -626,6 +703,7 @@ function OverviewTab({ result }) {
 
       <WFVerdict result={result} />
 
+      {/* ── Headline KPIs ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Kpi title="OOS Final Equity"   value={fmtUsd(s.final_equity)} sub={`from ${fmtUsd(s.starting_capital)}`} />
         <Kpi title="OOS Total Return"   value={fmtPct(s.total_return_pct)}
@@ -638,6 +716,80 @@ function OverviewTab({ result }) {
         <Kpi title="OOS Avg Trade"      value={fmtUsd(s.avg_pnl_dollars)} />
       </div>
 
+      {/* ── Long vs Short ─────────────────────────────────────────────── */}
+      {(lng.trades > 0 || sht.trades > 0) && (
+        <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+          <div className="text-[11px] uppercase tracking-wider text-muted">Long vs Short</div>
+          <div className="grid grid-cols-2 gap-4">
+            {/* Long side */}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-profit/80 uppercase tracking-wider">Longs</div>
+              <div className="grid grid-cols-2 gap-2">
+                <Kpi title="Trades"   value={fmtInt(lng.trades)} />
+                <Kpi title="Win Rate" value={`${fmtNum((lng.win_rate ?? 0) * 100)}%`} />
+                <Kpi title="PnL"      value={fmtUsd(lng.pnl_dollars)} positive={lng.pnl_dollars >= 0} />
+                <Kpi title="Avg Trade" value={fmtUsd(lng.avg_pnl_dollars)} positive={lng.avg_pnl_dollars >= 0} />
+              </div>
+            </div>
+            {/* Short side */}
+            <div className="space-y-2">
+              <div className="text-xs font-semibold text-loss/80 uppercase tracking-wider">Shorts</div>
+              <div className="grid grid-cols-2 gap-2">
+                <Kpi title="Trades"   value={fmtInt(sht.trades)} />
+                <Kpi title="Win Rate" value={`${fmtNum((sht.win_rate ?? 0) * 100)}%`} />
+                <Kpi title="PnL"      value={fmtUsd(sht.pnl_dollars)} positive={sht.pnl_dollars >= 0} />
+                <Kpi title="Avg Trade" value={fmtUsd(sht.avg_pnl_dollars)} positive={sht.avg_pnl_dollars >= 0} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Session Breakdown ─────────────────────────────────────────── */}
+      {sessions.length > 0 && (
+        <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
+          <div className="px-4 py-2 border-b border-line/40">
+            <span className="text-[11px] uppercase tracking-wider text-muted">Session Breakdown</span>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="text-[10px] uppercase tracking-wider text-muted bg-bg-elev/40">
+              <tr>
+                <th className="text-left px-4 py-2">Session</th>
+                <th className="text-right px-4 py-2">Trades</th>
+                <th className="text-right px-4 py-2">Win%</th>
+                <th className="text-right px-4 py-2">PnL</th>
+                <th className="text-right px-4 py-2 border-l border-line/40">Long PnL</th>
+                <th className="text-right px-4 py-2">Short PnL</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono text-sm">
+              {sessions.map((r) => (
+                <tr key={r.session} className="border-t border-line/40 hover:bg-bg-elev/30">
+                  <td className="px-4 py-2 text-text">{r.session}</td>
+                  <td className="px-4 py-2 text-right">{fmtInt(r.trades)}</td>
+                  <td className="px-4 py-2 text-right">{fmtNum(r.win_rate * 100)}%</td>
+                  <td className={`px-4 py-2 text-right ${r.pnl_dollars >= 0 ? "text-profit" : "text-loss"}`}>
+                    {fmtUsd(r.pnl_dollars)}
+                  </td>
+                  <td className={`px-4 py-2 text-right border-l border-line/40 ${r.long_pnl_dollars >= 0 ? "text-profit" : "text-loss"}`}>
+                    {fmtUsd(r.long_pnl_dollars)}
+                  </td>
+                  <td className={`px-4 py-2 text-right ${r.short_pnl_dollars >= 0 ? "text-profit" : "text-loss"}`}>
+                    {fmtUsd(r.short_pnl_dollars)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── PnL Heatmap ───────────────────────────────────────────────── */}
+      {pnlGrid.length > 0 && (
+        <PnlHeatmapGrid pnlGrid={pnlGrid} cntGrid={cntGrid} />
+      )}
+
+      {/* ── Equity Chart ──────────────────────────────────────────────── */}
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-[11px] uppercase tracking-wider text-muted">Stitched OOS Equity</div>
@@ -1875,5 +2027,161 @@ function AITab({ result }) {
         )}
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CHAT SIDEBAR
+// ---------------------------------------------------------------------------
+
+function WFChatSidebar({ open, onClose, result }) {
+  if (!open) return null;
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const send = async () => {
+    const text = input.trim();
+    if (!text || loading) return;
+    const userMsg = { role: "user", content: text };
+    const next = [...messages, userMsg];
+    setMessages(next);
+    setInput("");
+    setLoading(true);
+    try {
+      const res = await aiChatWalkForward(next, result || {});
+      setMessages((m) => [...m, { role: "assistant", content: res.text, _meta: res }]);
+    } catch (e) {
+      const err = e?.response?.data?.error || e.message || "Request failed";
+      setMessages((m) => [...m, { role: "assistant", content: `Error: ${err}`, _error: true }]);
+    } finally {
+      setLoading(false);
+      setTimeout(() => textareaRef.current?.focus(), 0);
+    }
+  };
+
+  const onKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  };
+
+  return (
+    <aside className="fixed right-0 top-0 bottom-0 w-80 z-40 border-l border-line flex flex-col bg-bg-panel shadow-2xl">
+      <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+        <div>
+          <div className="text-xs font-semibold text-text">Assistant</div>
+          <div className="text-[10px] text-muted mt-0.5">Ask anything about this walk-forward run</div>
+        </div>
+        <div className="flex items-center gap-2">
+          {messages.length > 0 && (
+            <button
+              onClick={() => setMessages([])}
+              className="text-[10px] text-muted hover:text-loss transition"
+              title="Clear chat"
+            >
+              Clear
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            title="Close"
+            className="text-muted hover:text-text transition"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-3 text-xs">
+        {messages.length === 0 && (
+          <div className="text-muted text-[11px] space-y-2 pt-2">
+            <p>Ask Claude about your walk-forward results. For example:</p>
+            <ul className="space-y-1 list-none">
+              {[
+                "Is this strategy ready to paper trade?",
+                "Which windows were the worst performers?",
+                "Did the parameters drift a lot?",
+                "What's the Sharpe across folds?",
+              ].map((q) => (
+                <li key={q}>
+                  <button
+                    onClick={() => { setInput(q); textareaRef.current?.focus(); }}
+                    className="text-left text-accent-blue/80 hover:text-accent-blue underline-offset-2 hover:underline"
+                  >
+                    {q}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {!result && (
+              <p className="text-muted/60 pt-2">Run a walk-forward first to get data-aware answers.</p>
+            )}
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+            <div
+              className={`max-w-[90%] rounded-lg px-3 py-2 leading-relaxed whitespace-pre-wrap ${
+                m.role === "user"
+                  ? "bg-accent-blue/20 text-text"
+                  : m._error
+                  ? "bg-loss/10 text-loss border border-loss/30"
+                  : "bg-bg-elev text-text border border-line/50"
+              }`}
+            >
+              {m.content}
+              {m._meta?.usage && (
+                <div className="text-[9px] text-muted/60 mt-1.5 font-mono">
+                  {m._meta.model?.split("-").slice(-2).join("-")} · {m._meta.usage.output_tokens}t out
+                  {m._meta.usage.cache_read_input_tokens > 0 && " · cached"}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {loading && (
+          <div className="flex justify-start">
+            <div className="bg-bg-elev border border-line/50 rounded-lg px-3 py-2 text-muted font-mono text-[11px]">
+              Claude is thinking…
+            </div>
+          </div>
+        )}
+
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="px-3 py-3 border-t border-line">
+        <div className="flex gap-2 items-end">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKey}
+            rows={2}
+            placeholder="Ask about the results… (Enter to send)"
+            className="flex-1 resize-none rounded-md border border-line bg-bg-elev px-2.5 py-2 text-xs text-text placeholder:text-muted focus:outline-none focus:border-accent-blue/60 leading-relaxed"
+          />
+          <button
+            onClick={send}
+            disabled={!input.trim() || loading}
+            className="px-3 py-2 rounded-md bg-accent-grad text-white text-xs font-semibold disabled:opacity-40 shrink-0"
+          >
+            Send
+          </button>
+        </div>
+      </div>
+    </aside>
   );
 }

@@ -24,8 +24,8 @@ def put_live_alerts():
 @live_alerts_bp.post("/live-alerts/test")
 def test_live_alert():
     body = request.get_json(silent=True) or {}
-    strategy_id = (body.get("strategy_id") or "").strip()
-    symbol = (body.get("symbol") or "").strip().upper()
-    if not strategy_id or not symbol:
-        return jsonify({"ok": False, "error": "strategy_id and symbol required"}), 400
-    return jsonify(live_alerter.test_dispatch(strategy_id, symbol))
+    rule_name = (body.get("rule_name") or "").strip()
+    action = (body.get("action") or "BUY").strip().upper()
+    if not rule_name:
+        return jsonify({"ok": False, "error": "rule_name required"}), 400
+    return jsonify(live_alerter.test_dispatch(rule_name, action))

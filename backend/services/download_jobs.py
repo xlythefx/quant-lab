@@ -31,11 +31,12 @@ from typing import Optional
 import pandas as pd
 
 from services import market_data, event_bus
-from services.brokers import dukascopy
+from services.brokers import dukascopy, yahoo
+from services.brokers import tradestation
 
 log = logging.getLogger(__name__)
 
-_BROKERS = ("binance", "dukascopy")
+_BROKERS = ("binance", "dukascopy", "yahoo", "tradestation")
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +194,10 @@ class DownloadJob:
             self._record_progress(status="starting")
             if self.spec["broker"] == "binance":
                 meta = self._run_binance()
+            elif self.spec["broker"] == "yahoo":
+                meta = self._run_yahoo()
+            elif self.spec["broker"] == "tradestation":
+                meta = self._run_tradestation()
             else:
                 meta = self._run_dukascopy()
             if self.cancel_flag:
@@ -268,6 +273,110 @@ class DownloadJob:
 
         # Idempotent merge into broker-namespaced parquet.
         path = market_data.parquet_path(s["symbol"], s["timeframe"], broker="dukascopy")
+        rows_before = 0
+        if os.path.exists(path):
+            try:
+                existing = pd.read_parquet(path)
+                rows_before = len(existing)
+                merged = pd.concat([existing, new_bars], ignore_index=True)
+            except Exception:
+                merged = new_bars
+        else:
+            merged = new_bars
+        merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
+        merged.to_parquet(path, index=False)
+
+        return {
+            "rows_added": int(len(merged) - rows_before),
+            "rows_total": int(len(merged)),
+            "path": path,
+            "first_time": int(merged["time"].iloc[0]),
+            "last_time":  int(merged["time"].iloc[-1]),
+        }
+
+    def _run_yahoo(self) -> dict:
+        s = self.spec
+        start_dt = datetime.fromtimestamp(s["start_ms"] / 1000, tz=timezone.utc)
+        end_dt   = datetime.fromtimestamp(s["end_ms"]   / 1000, tz=timezone.utc)
+
+        # Yahoo returns the full range in one HTTP call, so progress is binary
+        # (0% → 100%). Emit a single mid-fetch ping so the UI doesn't appear
+        # stalled while yfinance is in flight.
+        def progress_cb(done, total):
+            ratio = (done or 0) / max(1, total)
+            cursor_ms = s["start_ms"] + int((s["end_ms"] - s["start_ms"]) * ratio)
+            self._record_progress(
+                fetched=int(s["expected"] * ratio),
+                cursor_ms=cursor_ms,
+                status="downloading",
+            )
+
+        def cancel_check() -> bool:
+            return self.cancel_flag
+
+        new_bars = yahoo.download(
+            s["symbol"], start_dt, end_dt, s["timeframe"],
+            progress_cb=progress_cb,
+            cancel_check=cancel_check,
+        )
+        if self.cancel_flag:
+            return {"rows_added": 0, "rows_total": 0, "first_time": None, "last_time": None}
+        if new_bars.empty:
+            raise ValueError(f"Yahoo returned no bars for {s['symbol']} {s['timeframe']} in that range")
+
+        path = market_data.parquet_path(s["symbol"], s["timeframe"], broker="yahoo")
+        rows_before = 0
+        if os.path.exists(path):
+            try:
+                existing = pd.read_parquet(path)
+                rows_before = len(existing)
+                merged = pd.concat([existing, new_bars], ignore_index=True)
+            except Exception:
+                merged = new_bars
+        else:
+            merged = new_bars
+        merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
+        merged.to_parquet(path, index=False)
+
+        return {
+            "rows_added": int(len(merged) - rows_before),
+            "rows_total": int(len(merged)),
+            "path": path,
+            "first_time": int(merged["time"].iloc[0]),
+            "last_time":  int(merged["time"].iloc[-1]),
+        }
+
+    def _run_tradestation(self) -> dict:
+        s = self.spec
+        start_dt = datetime.fromtimestamp(s["start_ms"] / 1000, tz=timezone.utc)
+        end_dt   = datetime.fromtimestamp(s["end_ms"]   / 1000, tz=timezone.utc)
+
+        def progress_cb(done, total):
+            ratio = (done or 0) / max(1, total)
+            cursor_ms = s["start_ms"] + int((s["end_ms"] - s["start_ms"]) * ratio)
+            self._record_progress(
+                fetched=int(s["expected"] * ratio),
+                cursor_ms=cursor_ms,
+                status="downloading",
+            )
+
+        def cancel_check() -> bool:
+            return self.cancel_flag
+
+        new_bars = tradestation.download(
+            s["symbol"], start_dt, end_dt, s["timeframe"],
+            progress_cb=progress_cb,
+            cancel_check=cancel_check,
+        )
+        if self.cancel_flag:
+            return {"rows_added": 0, "rows_total": 0, "first_time": None, "last_time": None}
+        if new_bars.empty:
+            raise ValueError(
+                f"TradeStation returned no bars for {s['symbol']} {s['timeframe']} in that range. "
+                "Check that credentials are set in .env and the market was open during this period."
+            )
+
+        path = market_data.parquet_path(s["symbol"], s["timeframe"], broker="tradestation")
         rows_before = 0
         if os.path.exists(path):
             try:

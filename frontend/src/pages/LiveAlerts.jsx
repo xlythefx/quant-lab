@@ -6,11 +6,16 @@ import {
   getStrategies, getSymbols,
 } from "../services/api.js";
 
+const WEBHOOK_PRESETS = [
+  { label: "ngrok · local test", url: "https://shakira-adducible-roentgenographically.ngrok-free.dev" },
+];
+
 const BLANK_RULE = {
+  name: "",
   strategy_id: "",
   symbol: "",
   enabled: true,
-  webhook_url: "http://localhost:5051/binance_webhook",
+  webhook_url: "",
   secret: "",
   strategy_alias: "",
   leverage: 25,
@@ -21,6 +26,7 @@ export default function LiveAlerts() {
   const [strategies, setStrategies] = useState([]);
   const [symbols, setSymbols] = useState([]);
   const [draft, setDraft] = useState({ ...BLANK_RULE });
+  const [editIdx, setEditIdx] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
@@ -59,16 +65,34 @@ export default function LiveAlerts() {
   };
 
   const addRule = async () => {
-    if (!draft.strategy_id || !draft.symbol || !draft.webhook_url || !draft.secret || !draft.strategy_alias) {
-      setErr("strategy, symbol, webhook URL, secret, and alias are required");
+    if (!draft.name || !draft.strategy_id || !draft.symbol || !draft.webhook_url || !draft.secret || !draft.strategy_alias) {
+      setErr("name, strategy, symbol, webhook URL, secret, and alias are required");
       return;
     }
-    const others = rules.filter(
-      (r) => !(r.strategy_id === draft.strategy_id && r.symbol === draft.symbol),
-    );
-    const next = [...others, { ...draft, leverage: Number(draft.leverage) || 1 }];
+    if (editIdx === null && rules.some((r) => r.name === draft.name)) {
+      setErr(`a rule named "${draft.name}" already exists — use a unique name`);
+      return;
+    }
+    const normalized = { ...draft, leverage: Number(draft.leverage) || 1 };
+    const next = editIdx !== null
+      ? rules.map((r, i) => (i === editIdx ? normalized : r))
+      : [...rules, normalized];
     await persist(next);
     setDraft({ ...BLANK_RULE });
+    setEditIdx(null);
+  };
+
+  const startEdit = (idx) => {
+    setEditIdx(idx);
+    setDraft({ ...rules[idx] });
+    setErr(null);
+    document.getElementById("rule-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const cancelEdit = () => {
+    setEditIdx(null);
+    setDraft({ ...BLANK_RULE });
+    setErr(null);
   };
 
   const updateRule = (idx, patch) => {
@@ -80,32 +104,37 @@ export default function LiveAlerts() {
     persist(rules.filter((_, i) => i !== idx));
   };
 
-  const fire = async (r) => {
+  const fire = async (r, action) => {
     try {
-      const res = await testLiveAlert({ strategy_id: r.strategy_id, symbol: r.symbol });
-      if (!res?.ok) setErr(`test fire failed: ${res?.error || "unknown"}`);
+      const res = await testLiveAlert({ rule_name: r.name, action });
+      if (!res?.ok) setErr(`test fire failed (${action}): ${res?.error || "unknown"}`);
     } catch (e) {
       setErr(e?.response?.data?.error || e.message);
     }
   };
+
+  const urlPresets = Array.from(new Set(rules.map((r) => r.webhook_url))).filter(Boolean);
 
   const stratName = (id) => strategies.find((s) => s.id === id)?.name || id;
 
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar view="livealerts" />
-      <main className="flex-1 p-6 max-w-6xl w-full mx-auto space-y-6">
+      <main className="flex-1 p-6 max-w-7xl w-full mx-auto space-y-6">
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Live Alerts</h1>
           <p className="text-sm text-muted mt-1">
-            POST a TradingView-style JSON payload to your Binance acceptor whenever a
-            live strategy fires an entry/exit. One rule per <span className="font-mono">(strategy, symbol)</span>.
-            Backtest mode never dispatches.
+            POST a TradingView-style JSON payload to your acceptor whenever a live strategy
+            fires an entry/exit. Create one named rule per target — e.g. one per VPS — for
+            the same strategy/symbol. Backtest mode never dispatches.
           </p>
         </header>
 
         {err && (
-          <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{err}</div>
+          <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss flex items-center justify-between gap-3">
+            <span>{err}</span>
+            <button onClick={() => setErr(null)} className="text-loss/60 hover:text-loss text-xs shrink-0">dismiss</button>
+          </div>
         )}
 
         {/* Rules table */}
@@ -114,10 +143,11 @@ export default function LiveAlerts() {
             <h2 className="text-sm uppercase tracking-wider text-muted">Rules ({rules.length})</h2>
             {savedAt && <span className="text-xs text-muted">saved {savedAt.toLocaleTimeString()}</span>}
           </div>
-          <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
+          <div className="rounded-xl border border-line bg-bg-panel/60 overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-bg-elev/50 text-xs uppercase tracking-wider text-muted">
                 <tr>
+                  <th className="text-left px-3 py-2 font-medium">Name</th>
                   <th className="text-left px-3 py-2 font-medium">Strategy</th>
                   <th className="text-left px-3 py-2 font-medium">Symbol</th>
                   <th className="text-left px-3 py-2 font-medium">Alias</th>
@@ -129,18 +159,21 @@ export default function LiveAlerts() {
               </thead>
               <tbody className="divide-y divide-line/40">
                 {rules.length === 0 && (
-                  <tr><td colSpan={7} className="px-3 py-4 text-center text-muted text-sm">no rules — add one below</td></tr>
+                  <tr><td colSpan={8} className="px-3 py-4 text-center text-muted text-sm">no rules — add one below</td></tr>
                 )}
                 {rules.map((r, idx) => (
-                  <tr key={`${r.strategy_id}-${r.symbol}`} className="hover:bg-bg-elev/30">
+                  <tr key={r.name} className="hover:bg-bg-elev/30">
+                    <td className="px-3 py-2 font-semibold text-text max-w-[160px]">
+                      <div className="truncate" title={r.name}>{r.name}</div>
+                    </td>
                     <td className="px-3 py-2">
                       <div className="text-text">{stratName(r.strategy_id)}</div>
                       <div className="text-xs text-muted font-mono">{r.strategy_id}</div>
                     </td>
                     <td className="px-3 py-2 font-mono">{r.symbol}</td>
-                    <td className="px-3 py-2 font-mono">{r.strategy_alias}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{r.strategy_alias}</td>
                     <td className="px-3 py-2 text-right font-mono">{r.leverage}x</td>
-                    <td className="px-3 py-2 font-mono text-xs text-muted truncate max-w-[280px]" title={r.webhook_url}>
+                    <td className="px-3 py-2 font-mono text-xs text-muted truncate max-w-[220px]" title={r.webhook_url}>
                       {r.webhook_url}
                     </td>
                     <td className="px-3 py-2 text-center">
@@ -157,20 +190,42 @@ export default function LiveAlerts() {
                       </button>
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <div className="flex justify-end gap-2">
+                      <div className="flex justify-end flex-wrap gap-1">
+                        {[
+                          { action: "BUY",        label: "BUY",    color: "accent-cyan" },
+                          { action: "EXIT_LONG",  label: "EXIT_L", color: "accent-blue" },
+                          { action: "SELL",       label: "SELL",   color: "accent-yellow" },
+                          { action: "EXIT_SHORT", label: "EXIT_S", color: "accent-purple" },
+                        ].map(({ action, label, color }) => (
+                          <button
+                            key={action}
+                            onClick={() => fire(r, action)}
+                            disabled={busy || !r.enabled}
+                            title={`Test fire ${action}`}
+                            className={`px-2 py-1 text-xs rounded-md border border-${color}/40 text-${color} hover:bg-${color}/10 disabled:opacity-40 font-mono`}
+                          >
+                            {label}
+                          </button>
+                        ))}
                         <button
-                          onClick={() => fire(r)}
-                          disabled={busy || !r.enabled}
-                          className="px-2 py-1 text-xs rounded-md border border-line text-muted hover:text-text hover:border-accent-blue disabled:opacity-40"
+                          onClick={() => startEdit(idx)}
+                          disabled={busy}
+                          title="Edit rule"
+                          className="p-1.5 rounded-md border border-line text-muted hover:text-text hover:border-accent-blue/60 hover:bg-accent-blue/10 disabled:opacity-40 transition-colors"
                         >
-                          Test fire
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                            <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z" />
+                          </svg>
                         </button>
                         <button
                           onClick={() => deleteRule(idx)}
                           disabled={busy}
-                          className="px-2 py-1 text-xs rounded-md border border-loss/40 text-loss hover:bg-loss/10 disabled:opacity-40"
+                          title="Delete rule"
+                          className="p-1.5 rounded-md border border-loss/40 text-loss hover:bg-loss/10 disabled:opacity-40 transition-colors"
                         >
-                          Delete
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                            <path d="M5.75 3a.75.75 0 0 1 .75-.75h3a.75.75 0 0 1 0 1.5h-3A.75.75 0 0 1 5.75 3ZM3 5.75A.75.75 0 0 1 3.75 5h8.5a.75.75 0 0 1 0 1.5H12v5A1.5 1.5 0 0 1 10.5 13h-5A1.5 1.5 0 0 1 4 11.5v-5h-.25A.75.75 0 0 1 3 5.75ZM5.5 6.5v5h5v-5h-5Z" />
+                          </svg>
                         </button>
                       </div>
                     </td>
@@ -181,10 +236,26 @@ export default function LiveAlerts() {
           </div>
         </section>
 
-        {/* Add rule form */}
-        <section>
-          <h2 className="text-sm uppercase tracking-wider text-muted mb-2">Add rule</h2>
-          <div className="rounded-xl border border-line bg-bg-panel/60 p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Add / Edit rule form */}
+        <section id="rule-form">
+          <h2 className="text-sm uppercase tracking-wider text-muted mb-2">
+            {editIdx !== null ? `Edit rule · ${rules[editIdx]?.name}` : "Add rule"}
+          </h2>
+          <div className={`rounded-xl border p-5 grid grid-cols-1 md:grid-cols-2 gap-4 ${
+            editIdx !== null ? "border-accent-blue/40 bg-accent-blue/5" : "border-line bg-bg-panel/60"
+          }`}>
+
+            <Field label="Alert name" full>
+              <input
+                type="text" value={draft.name}
+                onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                placeholder="VWMA BTC → VPS1"
+                disabled={editIdx !== null}
+                className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue disabled:opacity-50 disabled:cursor-not-allowed"
+              />
+              <span className="text-[10px] text-muted mt-0.5">Unique label — use the same strategy/symbol with different names for multiple targets.</span>
+            </Field>
+
             <Field label="Strategy">
               <select
                 value={draft.strategy_id}
@@ -238,17 +309,33 @@ export default function LiveAlerts() {
             </Field>
 
             <Field label="Webhook URL" full>
+              <div className="flex gap-2 items-center mb-1.5">
+                <select
+                  value={[...WEBHOOK_PRESETS.map(p => p.url), ...urlPresets].includes(draft.webhook_url) ? draft.webhook_url : ""}
+                  onChange={(e) => { if (e.target.value) setDraft({ ...draft, webhook_url: e.target.value }); }}
+                  className="flex-1 px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue text-text"
+                >
+                  <option value="">— select preset —</option>
+                  {WEBHOOK_PRESETS.map((p) => (
+                    <option key={p.url} value={p.url}>{p.label} · {p.url.replace(/^https?:\/\//, "")}</option>
+                  ))}
+                  {urlPresets.filter((u) => !WEBHOOK_PRESETS.some((p) => p.url === u)).map((u) => (
+                    <option key={u} value={u}>{u.replace(/^https?:\/\//, "")}</option>
+                  ))}
+                </select>
+                <span className="text-xs text-muted shrink-0">or type↓</span>
+              </div>
               <input
                 type="text" value={draft.webhook_url}
                 onChange={(e) => setDraft({ ...draft, webhook_url: e.target.value })}
-                placeholder="http://localhost:5051/binance_webhook"
+                placeholder="https://api1.yourdomain.com/binance_webhook"
                 className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
               />
             </Field>
 
             <Field label="Secret" full>
               <input
-                type="password" value={draft.secret}
+                type="text" value={draft.secret}
                 onChange={(e) => setDraft({ ...draft, secret: e.target.value })}
                 placeholder="shared token your acceptor validates"
                 className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
@@ -264,12 +351,21 @@ export default function LiveAlerts() {
                 enabled on save
               </label>
               <div className="flex-1" />
+              {editIdx !== null && (
+                <button
+                  onClick={cancelEdit}
+                  disabled={busy}
+                  className="px-4 py-2 rounded-md border border-line text-muted text-sm hover:text-text disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              )}
               <button
                 onClick={addRule}
                 disabled={busy}
                 className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50"
               >
-                {busy ? "Saving…" : "Add rule"}
+                {busy ? "Saving…" : editIdx !== null ? "Save changes" : "Add rule"}
               </button>
             </div>
           </div>
@@ -283,14 +379,14 @@ export default function LiveAlerts() {
           <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
             {firings.length === 0 ? (
               <div className="px-4 py-6 text-center text-sm text-muted">
-                Nothing yet. Click <span className="font-mono">Test fire</span> on a rule, or start a live strategy.
+                Nothing yet. Click a test-fire button on a rule, or start a live strategy.
               </div>
             ) : (
               <table className="w-full text-sm">
                 <thead className="bg-bg-elev/50 text-xs uppercase tracking-wider text-muted">
                   <tr>
                     <th className="text-left px-3 py-2 font-medium">Time</th>
-                    <th className="text-left px-3 py-2 font-medium">Strategy</th>
+                    <th className="text-left px-3 py-2 font-medium">Rule</th>
                     <th className="text-left px-3 py-2 font-medium">Symbol</th>
                     <th className="text-left px-3 py-2 font-medium">Action</th>
                     <th className="text-center px-3 py-2 font-medium">Status</th>
@@ -303,7 +399,9 @@ export default function LiveAlerts() {
                       <td className="px-3 py-1.5 font-mono text-xs text-muted">
                         {new Date(f.time * 1000).toLocaleTimeString()}
                       </td>
-                      <td className="px-3 py-1.5 font-mono text-xs">{f.strategy_id}</td>
+                      <td className="px-3 py-1.5 text-xs font-semibold text-text">
+                        {f.rule_name || f.strategy_id}
+                      </td>
                       <td className="px-3 py-1.5 font-mono text-xs">{f.symbol}</td>
                       <td className="px-3 py-1.5 font-mono text-xs">{f.action}</td>
                       <td className="px-3 py-1.5 text-center">

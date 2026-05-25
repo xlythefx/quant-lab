@@ -67,6 +67,15 @@ def walkforward_section_insights():
     return _handle(ai_insights.analyze_walkforward_section, {"result": result, "section": section})
 
 
+@ai_bp.post("/chat/walkforward")
+def wf_chat():
+    body = request.get_json(silent=True) or {}
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return jsonify({"error": "messages (non-empty array) is required"}), 400
+    return _handle(ai_insights.chat_walkforward, body)
+
+
 @ai_bp.post("/suggest/walkforward")
 def wf_suggest():
     body = request.get_json(silent=True) or {}

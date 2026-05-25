@@ -1,0 +1,15 @@
+{
+  "ES": {
+    "yahoo_ticker": "ES=F",
+    "asset_class": "equity_index_future",
+    "execution_model": "futures_cme",
+    "base": "S&P500",
+    "quote": "USD",
+    "contract_size": 50.0,
+    "tick_size": 0.25,
+    "market_hours_tz": "America/Chicago",
+    "swap_long_pct": 0.0,
+    "swap_short_pct": 0.0,
+    "leverage_max": 20.0
+  }
+}

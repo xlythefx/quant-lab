@@ -11,17 +11,22 @@ class ValidationError(ValueError):
     pass
 
 
-_SYMBOL_RE = re.compile(r"^[A-Z0-9]{4,16}$")
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,16}$")
 
 
 def validate_symbol(symbol: str) -> str:
-    """Symbols are user-driven now (downloads page). Accept any pair-shaped
-    upper-case ticker like BTCUSDT, FETUSDT, SOLUSDC, 1000PEPEUSDT."""
+    """Symbols are user-driven (downloads page). Accept any alphanumeric ticker
+    1-16 chars long. Examples:
+      crypto pairs: BTCUSDT, FETUSDT, SOLUSDC, 1000PEPEUSDT
+      CFD / FX:     XAUUSD, EURUSD
+      futures:      ES, NQ, CL, GC, MES, S (soybeans is 1-char)
+    Per-broker symbol→ticker translation happens in the broker module
+    (e.g. yahoo.py reads data/assets/yahoo.json to map ES → ES=F)."""
     if not symbol:
         raise ValidationError("symbol is required")
     s = symbol.upper().strip()
     if not _SYMBOL_RE.match(s):
-        raise ValidationError(f"symbol '{symbol}' is malformed (expected e.g. BTCUSDT)")
+        raise ValidationError(f"symbol '{symbol}' is malformed (alphanumeric only, 1-16 chars)")
     return s
 
 

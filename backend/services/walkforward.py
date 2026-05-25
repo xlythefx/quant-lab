@@ -467,6 +467,7 @@ class WalkForwardJob:
             analytics = backtest_engine._compute_analytics(
                 stitched_trades, stitched_equity_pts, sig_df, strategy, starting_capital,
                 wf_trials=wf_trials,
+                sessions_cfg_override=s.get("sessions_cfg"),
             )
         else:
             stats = backtest_engine._empty_result(s["strategy_id"], s["symbol"], s["timeframe"], rc)["stats"]

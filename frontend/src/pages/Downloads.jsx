@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import Navbar from "../components/Navbar.jsx";
 import ConfirmModal, { TrashIcon } from "../components/ConfirmModal.jsx";
-import { listDatasets, deleteDataset } from "../services/api.js";
+import { listDatasets, deleteDataset, importCsvDataset } from "../services/api.js";
 import { waitForSocketId } from "../services/socket.js";
 import { getState as getDlState, subscribe as subscribeDl,
          startDownload, cancelCurrent as cancelCurrentDl,
@@ -44,6 +44,26 @@ const TABS = [
     suggested: ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD"],
     enabled: true,
     note: "Major + minor pairs via Dukascopy. 24/5 trading hours.",
+  },
+  {
+    id: "futures",
+    label: "Futures",
+    broker: "yahoo",
+    source: "Yahoo Finance (free)",
+    defaultSymbol: "ES",
+    suggested: ["ES"],
+    enabled: true,
+    note: "E-mini index futures via Yahoo Finance. Yahoo caps intraday history at ~730 days for 60min bars (less for shorter TFs). Symbol → Yahoo ticker mapping lives in data/assets/yahoo.json (ES → ES=F). Add more symbols there as needed.",
+  },
+  {
+    id: "tradestation",
+    label: "TradeStation",
+    broker: "tradestation",
+    source: "TradeStation WebAPI v3",
+    defaultSymbol: "@NQ",
+    suggested: ["@NQ", "@ES", "@RTY", "@YM", "@GC", "@CL"],
+    enabled: true,
+    note: "Futures via TradeStation WebAPI. Requires credentials in .env (TRADESTATION_CLIENT_ID, TRADESTATION_CLIENT_SECRET, TRADESTATION_REFRESH_TOKEN). Run auth bootstrap first if not done.",
   },
   {
     id: "stock",
@@ -129,6 +149,14 @@ export default function Downloads() {
   const [datasets, setDatasets] = useState([]);
   const [confirmDel, setConfirmDel] = useState(null); // {symbol, timeframe, broker} | null
 
+  // Manual CSV import state (TradeStation tab)
+  const [csvFile, setCsvFile] = useState(null);
+  const [csvSymbol, setCsvSymbol] = useState("ES");
+  const [csvTimeframes, setCsvTimeframes] = useState(["15m", "1h"]);
+  const [csvBusy, setCsvBusy] = useState(false);
+  const [csvResult, setCsvResult] = useState(null);
+  const [csvError, setCsvError] = useState(null);
+
   const refresh = () => listDatasets().then(setDatasets).catch(() => {});
   useEffect(() => { refresh(); }, []);
 
@@ -151,6 +179,27 @@ export default function Downloads() {
     if (!busy && result) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, result]);
+
+  const onCsvImport = async () => {
+    if (!csvFile || !csvSymbol || csvTimeframes.length === 0) return;
+    setCsvBusy(true);
+    setCsvResult(null);
+    setCsvError(null);
+    try {
+      const res = await importCsvDataset({ file: csvFile, symbol: csvSymbol, timeframes: csvTimeframes });
+      setCsvResult(res);
+      refresh();
+    } catch (err) {
+      setCsvError(err?.response?.data?.error || err.message || "Import failed");
+    } finally {
+      setCsvBusy(false);
+    }
+  };
+
+  const toggleCsvTf = (tf) =>
+    setCsvTimeframes((prev) =>
+      prev.includes(tf) ? prev.filter((t) => t !== tf) : [...prev, tf]
+    );
 
   const onDownload = async (e) => {
     e?.preventDefault?.();
@@ -177,10 +226,14 @@ export default function Downloads() {
     }
   };
 
-  // Datasets filtered to the active tab's asset class.
+  // Datasets filtered to the active tab. TradeStation filters by broker name;
+  // all other tabs filter by asset_class matching the tab id.
   const tabDatasets = useMemo(() => {
+    if (tab.broker === "tradestation") {
+      return datasets.filter((d) => d.broker === "tradestation");
+    }
     return datasets.filter((d) => (d.asset_class || "crypto") === tab.id);
-  }, [datasets, tab.id]);
+  }, [datasets, tab.id, tab.broker]);
 
   // Per-asset-class counts for the tab badges.
   const countsByClass = useMemo(() => {
@@ -405,6 +458,104 @@ export default function Downloads() {
         {cancelled && !busy && (
           <div className="rounded-md border border-amber-400/40 bg-amber-400/5 px-4 py-3 text-sm font-mono text-amber-400">
             ⨯ download cancelled · partial bars (if any) were merged into the cache
+          </div>
+        )}
+
+        {/* Manual CSV import — TradeStation tab only */}
+        {tab.id === "tradestation" && (
+          <div className="rounded-xl border border-dashed border-line bg-bg-panel/40 p-5 space-y-4">
+            <div className="flex items-center gap-3 flex-wrap">
+              <h3 className="text-sm font-semibold text-text">Manual CSV Import</h3>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-amber-400/15 text-amber-400 border border-amber-400/30">
+                Manually Exported
+              </span>
+            </div>
+            <p className="text-[11px] text-muted/80 leading-relaxed">
+              Upload a TradeStation 1-minute history export (CSV with columns: Date, Time, Open,
+              High, Low, Close, Up, Down — or Volume). Timestamps are treated as{" "}
+              <span className="font-mono">America/New_York</span> (CME default) and converted to
+              UTC. Select which output timeframes to generate and the file is resampled + stored
+              alongside regular downloads.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+              {/* File picker */}
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-muted mb-1">
+                  CSV File
+                </label>
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={(e) => { setCsvFile(e.target.files[0] || null); setCsvResult(null); setCsvError(null); }}
+                  className="w-full text-sm text-muted file:mr-3 file:py-1.5 file:px-3 file:rounded file:border file:border-line file:bg-bg-elev file:text-text file:text-xs file:cursor-pointer cursor-pointer"
+                />
+              </div>
+
+              {/* Symbol */}
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-muted mb-1">
+                  Symbol
+                </label>
+                <input
+                  value={csvSymbol}
+                  onChange={(e) => setCsvSymbol(e.target.value.toUpperCase())}
+                  placeholder="ES"
+                  className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+                />
+              </div>
+
+              {/* Output timeframes */}
+              <div>
+                <label className="block text-xs uppercase tracking-wider text-muted mb-1">
+                  Output Timeframes
+                </label>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {["1m", "5m", "15m", "30m", "1h", "4h", "1d"].map((tf) => (
+                    <label key={tf} className="flex items-center gap-1.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={csvTimeframes.includes(tf)}
+                        onChange={() => toggleCsvTf(tf)}
+                        className="accent-accent-blue"
+                      />
+                      <span className="text-xs font-mono text-text">{tf}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 flex-wrap">
+              <button
+                onClick={onCsvImport}
+                disabled={!csvFile || !csvSymbol || csvTimeframes.length === 0 || csvBusy}
+                className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
+              >
+                {csvBusy ? "Importing…" : "Import CSV"}
+              </button>
+              {csvFile && !csvBusy && (
+                <span className="text-xs text-muted font-mono">{csvFile.name}</span>
+              )}
+            </div>
+
+            {csvError && (
+              <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">
+                {csvError}
+              </div>
+            )}
+
+            {csvResult && !csvBusy && (
+              <div className="rounded-md border border-accent-cyan/40 bg-accent-cyan/5 px-4 py-3 space-y-1">
+                {csvResult.results?.map((r) => (
+                  <div key={r.timeframe} className="text-sm font-mono">
+                    ✓ {csvResult.symbol} {r.timeframe} — added{" "}
+                    {r.rows_added?.toLocaleString() ?? "?"} rows (total{" "}
+                    {r.rows_total?.toLocaleString() ?? "?"}) · {fmtTime(r.first_time)} → {fmtTime(r.last_time)}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

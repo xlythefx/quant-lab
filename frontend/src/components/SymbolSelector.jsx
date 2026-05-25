@@ -15,20 +15,21 @@ import { usePersistentState } from "../services/usePersistentState.js";
  *     onChange={...}
  *   />
  *
- * When `datasets` is provided, the component renders a tab strip for each
- * asset class present in the data (Crypto / Commodities / Forex / Stocks /
- * Indices) and shows only the symbols matching the active tab. Switching tabs
- * auto-selects the first symbol of the new class. The active tab is
- * persisted in localStorage and shared across pages that share the same
- * persistence key.
+ * When `datasets` is provided, the component renders a dropdown listing each
+ * asset class present in the data (Crypto / Commodities / Forex / Futures /
+ * Stocks / Indices) and shows only the symbols matching the selected class.
+ * Switching class auto-selects the first symbol of the new class. The active
+ * class is persisted in localStorage and shared across pages that share the
+ * same persistence key.
  */
 
 const CLASS_META = {
-  crypto:    { label: "Crypto",      order: 0 },
-  commodity: { label: "Commodities", order: 1 },
-  forex:     { label: "Forex",       order: 2 },
-  stock:     { label: "Stocks",      order: 3 },
-  index:     { label: "Indices",     order: 4 },
+  crypto:               { label: "Crypto",      order: 0 },
+  commodity:            { label: "Commodities", order: 1 },
+  forex:                { label: "Forex",       order: 2 },
+  equity_index_future:  { label: "Futures",     order: 3 },
+  stock:                { label: "Stocks",      order: 4 },
+  index:                { label: "Indices",     order: 5 },
 };
 
 function labelFor(cls) {
@@ -42,18 +43,19 @@ function compareClass(a, b) {
 }
 
 export default function SymbolSelector({ value, options = [], datasets, onChange }) {
-  // Legacy path: no asset-class metadata, render the flat row of buttons
-  // exactly like before.
-  if (!datasets || datasets.length === 0) {
-    return <FlatSelector value={value} options={options} onChange={onChange} />;
-  }
+  // CRITICAL: call ALL hooks unconditionally before any early return. React
+  // detects hook count changes between renders as "Expected static flag was
+  // missing" — which would fire here on first paint (datasets=[]) → second
+  // paint (datasets=[...]) if we branched before the useMemo calls.
+  const hasDatasets = !!datasets && datasets.length > 0;
 
   // Map every datasets row to its asset class.
   const classesPresent = useMemo(() => {
+    if (!hasDatasets) return [];
     const seen = new Set();
     for (const d of datasets) seen.add(d.asset_class || "crypto");
     return Array.from(seen).sort(compareClass);
-  }, [datasets]);
+  }, [datasets, hasDatasets]);
 
   // Persisted active tab (shared across pages via the same key).
   const [activeClass, setActiveClass] = usePersistentState("ql.symbolSelector.assetClass", "crypto");
@@ -68,6 +70,7 @@ export default function SymbolSelector({ value, options = [], datasets, onChange
   // symbol that appears in `options` but isn't in any catalog is dropped
   // (shouldn't happen in practice).
   const symbolsForClass = useMemo(() => {
+    if (!hasDatasets) return [];
     const set = new Set();
     for (const d of datasets) {
       if ((d.asset_class || "crypto") === effectiveClass) {
@@ -81,42 +84,40 @@ export default function SymbolSelector({ value, options = [], datasets, onChange
       if (!ordered.includes(s)) ordered.push(s);
     }
     return ordered;
-  }, [datasets, effectiveClass, options]);
+  }, [datasets, effectiveClass, options, hasDatasets]);
 
   // When the user switches tabs and the current `value` doesn't belong to
   // the new class, auto-select the first symbol of the new class so the
   // dashboard / backtest never sits on a stale symbol from another asset.
   useEffect(() => {
+    if (!hasDatasets) return;
     if (symbolsForClass.length > 0 && !symbolsForClass.includes(value)) {
       onChange(symbolsForClass[0]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveClass, symbolsForClass.join(",")]);
+  }, [effectiveClass, symbolsForClass.join(","), hasDatasets]);
+
+  // Legacy path: no asset-class metadata, render the flat row of buttons.
+  // Safe to branch here — all hooks above have already been called.
+  if (!hasDatasets) {
+    return <FlatSelector value={value} options={options} onChange={onChange} />;
+  }
 
   return (
     <div className="flex flex-col gap-2">
-      {/* Asset-class tabs (only render if more than one class is available). */}
+      {/* Asset-class dropdown (only render if more than one class is available). */}
       {classesPresent.length > 1 && (
-        <div className="flex items-center gap-1">
-          <span className="text-[10px] uppercase tracking-wider text-muted/70 mr-1">Asset</span>
-          <div className="flex gap-0.5 p-0.5 rounded-md border border-line bg-bg-panel/40">
-            {classesPresent.map((cls) => {
-              const isActive = cls === effectiveClass;
-              return (
-                <button
-                  key={cls}
-                  onClick={() => setActiveClass(cls)}
-                  className={`px-2.5 py-1 text-[11px] uppercase tracking-wider rounded transition ${
-                    isActive
-                      ? "bg-accent-blue/20 text-accent-blue"
-                      : "text-muted hover:text-text"
-                  }`}
-                >
-                  {labelFor(cls)}
-                </button>
-              );
-            })}
-          </div>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-muted/70">Asset</span>
+          <select
+            value={effectiveClass}
+            onChange={(e) => setActiveClass(e.target.value)}
+            className="px-2.5 py-1 text-[11px] uppercase tracking-wider rounded-md border border-line bg-bg-panel/40 text-text hover:bg-bg-panel focus:outline-none focus:ring-1 focus:ring-accent-blue cursor-pointer"
+          >
+            {classesPresent.map((cls) => (
+              <option key={cls} value={cls}>{labelFor(cls)}</option>
+            ))}
+          </select>
         </div>
       )}
 

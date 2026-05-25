@@ -2,7 +2,7 @@
 // Extracted from WalkForward.jsx so the page file can stay a thin tabbed shell.
 // State (useState) lives in the widgets themselves where it was inline.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { fmtUsd, fmtNum, fmtPct, fmtInt } from "../../services/format.js";
 import { aiAnalyzeWalkForward } from "../../services/api.js";
 
@@ -699,6 +699,189 @@ export function WindowHeatmap({ windows, searchSpace }) {
         </div>
       )}
     </section>
+  );
+}
+
+// -- PnlHeatmapGrid — Hour-of-day × Day-of-week PnL heatmap -----------------
+
+const _DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+export function PnlHeatmapGrid({ pnlGrid, cntGrid }) {
+  if (!pnlGrid || pnlGrid.length === 0) return null;
+
+  let min = Infinity, max = -Infinity;
+  for (const row of pnlGrid) for (const v of row) { if (v < min) min = v; if (v > max) max = v; }
+  if (min === Infinity) { min = 0; max = 0; }
+
+  const colorOf = (v) => {
+    if (v === 0) return "rgba(255,255,255,0.03)";
+    if (v > 0) {
+      const a = Math.min(1, v / Math.max(1e-9, max));
+      return `rgba(34,197,94,${0.15 + 0.60 * a})`;
+    }
+    const a = Math.min(1, v / Math.min(-1e-9, min));
+    return `rgba(239,68,68,${0.15 + 0.60 * a})`;
+  };
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 overflow-x-auto">
+      <div className="text-[11px] uppercase tracking-wider text-muted mb-3">
+        PnL Heatmap — Hour (UTC) × Weekday
+      </div>
+      <table className="text-[10px] font-mono border-separate border-spacing-0.5">
+        <thead>
+          <tr>
+            <th className="px-2 text-muted text-right w-10" />
+            {Array.from({ length: 24 }, (_, h) => (
+              <th key={h} className="text-center text-muted w-7">{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {_DOW.map((dow, di) => (
+            <tr key={dow}>
+              <td className="pr-2 text-muted text-right">{dow}</td>
+              {Array.from({ length: 24 }, (_, h) => {
+                const v = pnlGrid[di]?.[h] ?? 0;
+                const c = cntGrid?.[di]?.[h] ?? 0;
+                return (
+                  <td
+                    key={h}
+                    className="w-7 h-7 text-center rounded-sm"
+                    style={{ background: colorOf(v) }}
+                    title={`${dow} ${h}:00 UTC\n${v >= 0 ? "+" : ""}${fmtUsd(v)} · ${c} trade${c !== 1 ? "s" : ""}`}
+                  >
+                    {c > 0 && (
+                      <span className="text-[8px] text-text/70 leading-none">
+                        {Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : Math.round(v)}
+                      </span>
+                    )}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="flex items-center gap-4 mt-2 text-[10px] text-muted/70">
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: "rgba(34,197,94,0.7)" }} />
+          Profit
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: "rgba(239,68,68,0.7)" }} />
+          Loss
+        </span>
+        <span className="ml-auto">Hover a cell for exact value</span>
+      </div>
+    </div>
+  );
+}
+
+// -- SessionsEditor — configurable session time windows ----------------------
+
+const DEFAULT_SESSIONS = [
+  { name: "New York",  start: "13:30", end: "20:00", enabled: true },
+  { name: "London",    start: "07:00", end: "15:30", enabled: true },
+  { name: "Tokyo",     start: "23:00", end: "08:00", enabled: false },
+  { name: "Overnight", start: "20:00", end: "07:00", enabled: false },
+];
+
+export function SessionsEditor({ value, onChange }) {
+  // value: array of {name, start, end, enabled}
+  const rows = value && value.length > 0 ? value : DEFAULT_SESSIONS;
+
+  const update = (idx, field, val) => {
+    const next = rows.map((r, i) => i === idx ? { ...r, [field]: val } : r);
+    onChange(next);
+  };
+
+  const addRow = () => {
+    onChange([...rows, { name: "", start: "00:00", end: "00:00", enabled: true }]);
+  };
+
+  const removeRow = (idx) => {
+    onChange(rows.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] uppercase tracking-wider text-muted">Sessions (UTC)</span>
+        <button
+          type="button"
+          onClick={addRow}
+          className="text-xs px-2 py-1 rounded border border-line text-muted hover:text-text hover:border-accent-blue transition"
+        >
+          + Add
+        </button>
+      </div>
+      <div className="rounded-lg border border-line overflow-hidden">
+        <table className="w-full text-xs">
+          <thead className="bg-bg-elev/40">
+            <tr>
+              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider w-8">On</th>
+              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider">Name</th>
+              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider w-24">Start UTC</th>
+              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider w-24">End UTC</th>
+              <th className="w-8" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-t border-line/40">
+                <td className="px-3 py-1.5 text-center">
+                  <input
+                    type="checkbox"
+                    checked={r.enabled}
+                    onChange={(e) => update(i, "enabled", e.target.checked)}
+                    className="accent-accent-blue"
+                  />
+                </td>
+                <td className="px-3 py-1.5">
+                  <input
+                    value={r.name}
+                    onChange={(e) => update(i, "name", e.target.value)}
+                    placeholder="Session name"
+                    className="w-full bg-transparent focus:outline-none text-text font-mono placeholder:text-muted/40"
+                  />
+                </td>
+                <td className="px-3 py-1.5">
+                  <input
+                    type="time"
+                    value={r.start}
+                    onChange={(e) => update(i, "start", e.target.value)}
+                    className="w-full bg-bg-elev border border-line rounded px-2 py-0.5 font-mono focus:outline-none focus:border-accent-blue"
+                  />
+                </td>
+                <td className="px-3 py-1.5">
+                  <input
+                    type="time"
+                    value={r.end}
+                    onChange={(e) => update(i, "end", e.target.value)}
+                    className="w-full bg-bg-elev border border-line rounded px-2 py-0.5 font-mono focus:outline-none focus:border-accent-blue"
+                  />
+                </td>
+                <td className="px-2 py-1.5 text-center">
+                  <button
+                    type="button"
+                    onClick={() => removeRow(i)}
+                    className="text-muted/40 hover:text-loss transition text-base leading-none"
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="text-[10px] text-muted/60">
+        Times in UTC. Sessions that cross midnight (e.g. 23:00 → 08:00) are handled correctly.
+        Used to group trades in the Overview → Session Breakdown table.
+      </div>
+    </div>
   );
 }
 

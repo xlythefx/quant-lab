@@ -1,21 +1,20 @@
 """
 Fires TradingView-style webhook alerts when a live strategy emits a signal.
 
-Called from strategy_runner._emit_signal() ONLY when mode == "live". Looks
-up a per-(strategy_id, symbol) rule in live_alerts.json; if enabled, POSTs
-the JSON payload the user's Binance acceptor expects:
+Called from strategy_runner._emit_signal() ONLY when mode == "live". Looks up
+ALL rules for a (strategy_id, symbol) pair in live_alerts.json — one thread
+per rule — so you can target multiple VPS endpoints from a single signal.
 
+Each POST carries the JSON payload the Binance acceptor expects:
   {
     "secret":   "<token>",
     "strategy": "<alias>",
     "leverage": "<int as string>",
-    "action":   "ENTER_LONG | EXIT_LONG | ENTER_SHORT | EXIT_SHORT",
+    "action":   "BUY | SELL | EXIT_LONG | EXIT_SHORT",
     "symbol":   "BTCUSDT"
   }
 
-The POST runs on a daemon thread with a 5s timeout — strategy execution is
-never blocked. Every attempt (ok/fail) emits a `live_alert_dispatched`
-Socket.IO event so the UI can surface recent firings.
+Every attempt (ok/fail) emits a `live_alert_dispatched` Socket.IO event.
 """
 from __future__ import annotations
 
@@ -33,9 +32,9 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT_SECONDS = 5.0
 _ACTION_MAP = {
-    ("long",  "entry"): "ENTER_LONG",
+    ("long",  "entry"): "BUY",
     ("long",  "exit"):  "EXIT_LONG",
-    ("short", "entry"): "ENTER_SHORT",
+    ("short", "entry"): "SELL",
     ("short", "exit"):  "EXIT_SHORT",
 }
 
@@ -64,8 +63,10 @@ def build_payload(rule: dict, action: str, symbol: str) -> dict:
 
 def _emit_dispatched(strategy_id: str, symbol: str, action: str, *,
                      ok: bool, status_code: Optional[int] = None,
-                     error: Optional[str] = None, url: str = ""):
+                     error: Optional[str] = None, url: str = "",
+                     rule_name: str = ""):
     event_bus.emit("live_alert_dispatched", {
+        "rule_name":   rule_name,
         "strategy_id": strategy_id,
         "symbol":      symbol,
         "action":      action,
@@ -77,53 +78,67 @@ def _emit_dispatched(strategy_id: str, symbol: str, action: str, *,
     })
 
 
-def _post(url: str, payload: dict, *, strategy_id: str, symbol: str, action: str):
+def _post(url: str, payload: dict, *, strategy_id: str, symbol: str,
+          action: str, rule_name: str):
     try:
         r = httpx.post(url, json=payload, timeout=_TIMEOUT_SECONDS)
         ok = 200 <= r.status_code < 300
-        log.info("live_alert %s %s → %s (status=%d secret=%s)",
-                 strategy_id, action, url, r.status_code, _redact(payload.get("secret", "")))
-        _emit_dispatched(strategy_id, symbol, action, ok=ok, status_code=r.status_code,
-                         error=None if ok else (r.text[:200] or None), url=url)
+        log.info("live_alert [%s] %s %s → %s (status=%d secret=%s)",
+                 rule_name, strategy_id, action, url, r.status_code,
+                 _redact(payload.get("secret", "")))
+        _emit_dispatched(strategy_id, symbol, action, ok=ok,
+                         status_code=r.status_code,
+                         error=None if ok else (r.text[:200] or None),
+                         url=url, rule_name=rule_name)
     except Exception as e:
-        log.warning("live_alert FAIL %s %s → %s: %s", strategy_id, action, url, e)
-        _emit_dispatched(strategy_id, symbol, action, ok=False, error=str(e), url=url)
+        log.warning("live_alert FAIL [%s] %s %s → %s: %s",
+                    rule_name, strategy_id, action, url, e)
+        _emit_dispatched(strategy_id, symbol, action, ok=False,
+                         error=str(e), url=url, rule_name=rule_name)
 
 
 def dispatch(strategy_id: str, symbol: str, sig: Signal) -> None:
-    rule = live_alerts_config.find_rule(strategy_id, symbol)
-    if not rule or not rule.get("enabled"):
-        return
-
     action = action_for(sig)
     if action is None:
         log.warning("live_alert skipped: no action mapping for side=%s kind=%s (strategy=%s symbol=%s)",
                     sig.side, sig.kind, strategy_id, symbol)
         return
 
-    payload = build_payload(rule, action, symbol)
-    threading.Thread(
-        target=_post,
-        args=(rule["webhook_url"], payload),
-        kwargs={"strategy_id": strategy_id, "symbol": symbol, "action": action},
-        daemon=True,
-    ).start()
+    rules = live_alerts_config.find_rules(strategy_id, symbol)
+    enabled = [r for r in rules if r.get("enabled")]
+    if not enabled:
+        return
+
+    for rule in enabled:
+        payload = build_payload(rule, action, symbol)
+        threading.Thread(
+            target=_post,
+            args=(rule["webhook_url"], payload),
+            kwargs={"strategy_id": strategy_id, "symbol": symbol,
+                    "action": action, "rule_name": rule["name"]},
+            daemon=True,
+        ).start()
 
 
-def test_dispatch(strategy_id: str, symbol: str) -> dict:
-    """Synthetic ENTER_LONG fire for connectivity testing. Returns a
-    redacted preview of what was sent (or would have been sent)."""
-    rule = live_alerts_config.find_rule(strategy_id, symbol)
+_VALID_ACTIONS = frozenset(_ACTION_MAP.values())
+
+
+def test_dispatch(rule_name: str, action: str = "BUY") -> dict:
+    """Synthetic fire for connectivity testing a specific named rule."""
+    if action not in _VALID_ACTIONS:
+        return {"ok": False, "error": f"unknown action '{action}'"}
+    rule = live_alerts_config.find_rule_by_name(rule_name)
     if not rule:
-        return {"ok": False, "error": f"no rule for ({strategy_id}, {symbol})"}
+        return {"ok": False, "error": f"no rule named '{rule_name}'"}
     if not rule.get("enabled"):
         return {"ok": False, "error": "rule is disabled"}
 
-    payload = build_payload(rule, "ENTER_LONG", symbol)
+    payload = build_payload(rule, action, rule["symbol"])
     threading.Thread(
         target=_post,
         args=(rule["webhook_url"], payload),
-        kwargs={"strategy_id": strategy_id, "symbol": symbol, "action": "ENTER_LONG"},
+        kwargs={"strategy_id": rule["strategy_id"], "symbol": rule["symbol"],
+                "action": action, "rule_name": rule["name"]},
         daemon=True,
     ).start()
 

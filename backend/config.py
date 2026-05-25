@@ -26,9 +26,10 @@ BACKTEST_SEED_LIMIT = 1500              # painted history ending at the cursor
 # CORS / server
 STARTING_CAPITAL = 100_000.0   # USD; same baseline for every strategy/backtest
 
-CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_cors_env = os.environ.get("CORS_ORIGINS", "")
+CORS_ORIGINS = _cors_env.split(",") if _cors_env else "*"
 HOST = "0.0.0.0"
-PORT = 5050
+PORT = 6173
 
 # Timeframe -> seconds (for backtest sleep math + cache freshness checks).
 TIMEFRAME_SECONDS = {

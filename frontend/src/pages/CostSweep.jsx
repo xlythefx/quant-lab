@@ -79,6 +79,20 @@ export default function CostSweep() {
   const [sweepText, setSweepText]   = usePersistentState("ql.cs.sweep_text", "0, 5, 10, 15, 20, 25, 30, 40, 50");
   const [params, setParams]         = usePersistentState("ql.cs.params", {});
 
+  // Walk-Forward import banner.
+  const [wfBanner, setWfBanner] = useState(null); // null | { folds, symbol, timeframe }
+
+  // Pending WF handoff read immediately from localStorage on mount.
+  const wfImportRef = useRef(null);
+  useEffect(() => {
+    const raw = localStorage.getItem("ql.cs.wf_import");
+    if (!raw) return;
+    try {
+      wfImportRef.current = JSON.parse(raw);
+    } catch {}
+    localStorage.removeItem("ql.cs.wf_import");
+  }, []);
+
   // Reset params when strategy changes.
   const lastStrategyId = useRef(strategyId);
   useEffect(() => {
@@ -140,6 +154,33 @@ export default function CostSweep() {
     }).catch((e) => setError(e?.response?.data?.error || e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Apply WF import once both strategies and symbols are loaded.
+  const wfImportApplied = useRef(false);
+  useEffect(() => {
+    if (wfImportApplied.current) return;
+    if (!strategies.length || !symbols.length) return;
+    const h = wfImportRef.current;
+    if (!h) return;
+    wfImportRef.current = null;
+    wfImportApplied.current = true;
+
+    if (h.strategy_id && strategies.find((s) => s.id === h.strategy_id)) {
+      lastStrategyId.current = h.strategy_id; // suppress params-reset effect
+      setStrategyId(h.strategy_id);
+    }
+    if (h.symbol && symbols.includes(h.symbol)) setSymbol(h.symbol);
+    if (h.timeframe) setTimeframe(h.timeframe);
+    if (h.params && Object.keys(h.params).length) setParams(h.params);
+    if (h.oos_start || h.oos_end) {
+      setRange({
+        start: h.oos_start ? epochToDateStr(h.oos_start) : "",
+        end:   h.oos_end   ? epochToDateStr(h.oos_end)   : "",
+      });
+    }
+    setWfBanner({ strategy_id: h.strategy_id, symbol: h.symbol, timeframe: h.timeframe });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategies, symbols]);
 
   // Hydrate status + last result.
   useEffect(() => {
@@ -274,6 +315,18 @@ export default function CostSweep() {
           <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{error}</div>
         )}
 
+        {wfBanner && (
+          <div className="rounded-md border border-accent-blue/40 bg-accent-blue/8 px-4 py-2.5 flex items-center justify-between gap-3">
+            <div className="text-xs text-accent-blue">
+              <span className="font-semibold">Imported from Walk-Forward</span>
+              <span className="text-muted ml-2 font-mono">
+                {wfBanner.strategy_id} · {wfBanner.symbol} · {wfBanner.timeframe} · last-fold params · OOS date range
+              </span>
+            </div>
+            <button onClick={() => setWfBanner(null)} className="text-muted hover:text-text text-xs shrink-0">dismiss</button>
+          </div>
+        )}
+
         {/* ---------------- Setup ---------------- */}
         <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-4">
           <div className="text-[11px] uppercase tracking-wider text-muted">Setup</div>
@@ -344,6 +397,7 @@ export default function CostSweep() {
               onChange={setSweepText}
               values={sweepValues}
               max={MAX_SWEEP}
+              defaultText={activeDim.defaultValues}
             />
           </div>
 
@@ -397,10 +451,27 @@ function Field({ label, children }) {
   );
 }
 
-function ValueListInput({ text, onChange, values, max }) {
+function ValueListInput({ text, onChange, values, max, defaultText }) {
   const overCap = values.length > max;
+  const [from, setFrom]   = useState("0");
+  const [to, setTo]       = useState("50");
+  const [step, setStep]   = useState("5");
+
+  const onGenerate = () => {
+    const f = parseFloat(from);
+    const t = parseFloat(to);
+    const s = parseFloat(step);
+    if (!Number.isFinite(f) || !Number.isFinite(t) || !Number.isFinite(s) || s <= 0 || t <= f) return;
+    const pts = [];
+    for (let v = f; v <= t + 1e-9; v = Math.round((v + s) * 1e9) / 1e9) {
+      pts.push(v);
+      if (pts.length > max) break;
+    }
+    onChange(pts.join(", "));
+  };
+
   return (
-    <div className="space-y-1">
+    <div className="space-y-2">
       <div className="flex items-center gap-2">
         <span className="text-muted text-[10px] uppercase shrink-0">Sweep values</span>
         <input
@@ -415,8 +486,45 @@ function ValueListInput({ text, onChange, values, max }) {
           {overCap && ` · max ${max}`}
         </span>
       </div>
+
+      {/* Range generator + Use defaults */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="text-[10px] text-muted uppercase shrink-0">Generate</span>
+        <div className="flex items-center gap-1.5 font-mono text-xs">
+          <span className="text-muted">from</span>
+          <input
+            type="number" value={from} onChange={(e) => setFrom(e.target.value)}
+            className="w-16 px-1.5 py-1 rounded bg-bg border border-line text-xs font-mono text-center focus:outline-none focus:border-accent-blue"
+          />
+          <span className="text-muted">to</span>
+          <input
+            type="number" value={to} onChange={(e) => setTo(e.target.value)}
+            className="w-16 px-1.5 py-1 rounded bg-bg border border-line text-xs font-mono text-center focus:outline-none focus:border-accent-blue"
+          />
+          <span className="text-muted">step</span>
+          <input
+            type="number" value={step} onChange={(e) => setStep(e.target.value)} min="0.001"
+            className="w-16 px-1.5 py-1 rounded bg-bg border border-line text-xs font-mono text-center focus:outline-none focus:border-accent-blue"
+          />
+          <button
+            onClick={onGenerate}
+            className="px-2.5 py-1 rounded bg-accent-blue/15 border border-accent-blue/40 text-accent-blue text-[10px] font-semibold hover:bg-accent-blue/25 transition"
+          >
+            Fill
+          </button>
+        </div>
+        {defaultText && (
+          <button
+            onClick={() => onChange(defaultText)}
+            className="px-2.5 py-1 rounded border border-line text-muted text-[10px] hover:text-text hover:border-accent-blue/40 transition font-mono"
+          >
+            Use defaults
+          </button>
+        )}
+      </div>
+
       <div className="text-[10px] text-muted/70 font-mono">
-        Comma- or space-separated. Negatives ignored. Each value runs one backtest.
+        Comma- or space-separated. Negatives ignored. Each value runs one full backtest.
       </div>
     </div>
   );
