@@ -59,11 +59,11 @@ const TABS = [
     id: "tradestation",
     label: "TradeStation",
     broker: "tradestation",
-    source: "TradeStation WebAPI v3",
+    source: "Manual CSV Export only",
     defaultSymbol: "@NQ",
     suggested: ["@NQ", "@ES", "@RTY", "@YM", "@GC", "@CL"],
     enabled: true,
-    note: "Futures via TradeStation WebAPI. Requires credentials in .env (TRADESTATION_CLIENT_ID, TRADESTATION_CLIENT_SECRET, TRADESTATION_REFRESH_TOKEN). Run auth bootstrap first if not done.",
+    note: "WebAPI integration is temporarily disabled. Use the manual CSV export from TradeStation's platform and import below.",
   },
   {
     id: "stock",
@@ -229,8 +229,9 @@ export default function Downloads() {
   // Datasets filtered to the active tab. TradeStation filters by broker name;
   // all other tabs filter by asset_class matching the tab id.
   const tabDatasets = useMemo(() => {
-    if (tab.broker === "tradestation") {
-      return datasets.filter((d) => d.broker === "tradestation");
+    // Broker-specific tabs: tradestation and yahoo each own their files
+    if (tab.broker === "tradestation" || tab.broker === "yahoo") {
+      return datasets.filter((d) => d.broker === tab.broker);
     }
     return datasets.filter((d) => (d.asset_class || "crypto") === tab.id);
   }, [datasets, tab.id, tab.broker]);
@@ -318,8 +319,20 @@ export default function Downloads() {
           <div className="text-[11px] text-muted/80 max-w-md text-right">{tab.note}</div>
         </div>
 
-        {/* Form (only when tab is enabled) */}
-        {tab.enabled ? (
+        {/* Form (only when tab is enabled and not tradestation WebAPI) */}
+        {tab.id === "tradestation" ? (
+          <div className="rounded-xl border border-line/40 bg-bg-elev/20 p-6 flex items-start gap-4">
+            <div className="mt-0.5 text-amber-400 text-lg">⚠</div>
+            <div>
+              <div className="text-sm font-semibold text-text mb-1">TradeStation WebAPI — Temporarily Disabled</div>
+              <div className="text-xs text-muted leading-relaxed">
+                Programmatic API access is paused pending account funding requirements.
+                Use the <span className="text-amber-400 font-medium">Manual CSV Import</span> panel below
+                to load data exported directly from TradeStation's platform.
+              </div>
+            </div>
+          </div>
+        ) : tab.enabled ? (
           <form
             onSubmit={onDownload}
             className="rounded-xl border border-line bg-bg-panel/60 p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end"

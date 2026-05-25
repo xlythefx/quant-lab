@@ -20,3 +20,10 @@ vendor/
 
 # Raw broker/strategy CSV data — kept local
 backend/data/tradestation/
+
+# VPS deployment scripts and configs (may contain credentials/IPs)
+vps-deployment/
+nginx_eu_current.conf
+
+# External data pulled from VPS / other machines
+external-data/
