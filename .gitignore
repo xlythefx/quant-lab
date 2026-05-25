@@ -21,6 +21,9 @@ vendor/
 # Raw broker/strategy CSV data — kept local
 backend/data/tradestation/
 
+# Runtime webhook config — contains live URLs and secrets
+backend/data/live_alerts.json
+
 # VPS deployment scripts and configs (may contain credentials/IPs)
 vps-deployment/
 nginx_eu_current.conf
