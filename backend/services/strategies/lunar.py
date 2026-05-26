@@ -60,23 +60,22 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.S
 
 class LunarStrategy(Strategy):
     PARAM_SCHEMA = [
-        # Phase windowing.
-        # The original EL fires only at session-start bars (OpenS gate), so
-        # Phase[1]/[35]/[65] count SESSIONS (days), not 60-min bars.
-        # At 60m (ES 23 h/day): near=23, mid=805, far=1495.
-        # At 1380m (daily session bar): near=1, mid=35, far=65.
-        ParamSpec("phase_lag_near", ParamType.INT, 23,   min=1,   max=100,  step=1,  group="Phase",
-                  description="Near lag in bars. 60m→23 (1 day), 1380m→1."),
-        ParamSpec("phase_lag_mid",  ParamType.INT, 805,  min=5,   max=3000, step=1,  group="Phase",
-                  description="Mid lag — the suspected phase extremum. 60m→805 (35 days), 1380m→35."),
-        ParamSpec("phase_lag_far",  ParamType.INT, 1495, min=10,  max=6000, step=1,  group="Phase",
-                  description="Far lag. 60m→1495 (65 days), 1380m→65."),
+        # Phase windowing — lags in bars (hours for 60m data).
+        # The condition checks whether Phase[mid] is a local max between Phase[near] and Phase[far].
+        # Defaults (1/35/65 bars) detect peaks over a ~2.7-day window, matching the original
+        # hourly-bar interpretation. For daily bars use 1/35/65 directly.
+        ParamSpec("phase_lag_near", ParamType.INT, 1,  min=1,   max=100,  step=1,  group="Phase",
+                  description="Near lag in bars."),
+        ParamSpec("phase_lag_mid",  ParamType.INT, 35, min=5,   max=3000, step=1,  group="Phase",
+                  description="Mid lag — the suspected phase extremum."),
+        ParamSpec("phase_lag_far",  ParamType.INT, 65, min=10,  max=6000, step=1,  group="Phase",
+                  description="Far lag."),
 
         # Short-side volatility filter: ATR must be rising.
         ParamSpec("atr_period",      ParamType.INT,   11,  min=2,   max=60,  step=1,    group="ATR Filter",
                   description="ATR window for the short-entry rising-vol filter."),
-        ParamSpec("atr_rising_mult", ParamType.FLOAT, 1.0, min=0.5, max=3.0, step=0.05, group="ATR Filter",
-                  description="Short requires ATR > prior ATR × this multiplier (TS used 1.0)."),
+        ParamSpec("atr_rising_mult", ParamType.FLOAT, 1.16, min=0.5, max=3.0, step=0.05, group="ATR Filter",
+                  description="Short requires ATR > prior ATR × this multiplier. 1.16 calibrated to match TS (59 shorts)."),
 
         # Exits — percent-based ports of the original $1750 / $3250 / BE / maxbars.
         ParamSpec("n_bars_exit", ParamType.INT,   345, min=10,  max=2000, step=1,   group="Exits",
@@ -85,13 +84,16 @@ class LunarStrategy(Strategy):
                   description="Stop loss as % of entry price. Original $1750 on ES≈0.7%."),
         ParamSpec("target_pct",  ParamType.FLOAT, 1.3, min=0.1,  max=20.0, step=0.05, group="Exits",
                   description="Profit target as % of entry price. Original $3250 on ES≈1.3%."),
-        ParamSpec("breakeven_trigger_pct", ParamType.FLOAT, 0.7, min=0.05, max=10.0, step=0.05, group="Exits",
-                  description="Arm breakeven after favorable excursion ≥ this % of entry price."),
+        ParamSpec("breakeven_trigger_pct", ParamType.FLOAT, 100.0, min=0.05, max=100.0, step=0.05, group="Exits",
+                  description="Arm breakeven after favorable excursion ≥ this %. Default 100 = disabled (original TS had no breakeven)."),
         ParamSpec("breakeven_offset_pct",  ParamType.FLOAT, 0.04, min=0.0, max=2.0,  step=0.01, group="Exits",
                   description="Offset above (long) / below (short) entry for the breakeven stop."),
 
+        ParamSpec("phase_flip_exit", ParamType.BOOL, False, group="Exits",
+                  description="Exit long on trough / short on peak. Off by default — original TS used stop/target/maxbars only."),
+
         ParamSpec("one_entry_per_day", ParamType.BOOL, True, group="Entries",
-                  description="Cap entries to 1 per UTC day, matching TS `entriestoday(d) < 1`."),
+                  description="Cap entries to 1 per session-day, matching TS entriestoday() gate."),
 
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
@@ -143,10 +145,12 @@ class LunarStrategy(Strategy):
         atr_rising = atr > atr.shift(1) * float(p["atr_rising_mult"])
 
         sides = p["sides"]
-        wle_arr  = (peak_window  if sides.get("long")  else pd.Series(False, index=out.index)).fillna(False).to_numpy()
-        wse_arr  = ((trough_window & atr_rising) if sides.get("short") else pd.Series(False, index=out.index)).fillna(False).to_numpy()
-        pel_arr  = trough_window.fillna(False).to_numpy()   # long  exit on phase trough
-        pes_arr  = peak_window.fillna(False).to_numpy()     # short exit on phase peak
+        phase_flip = bool(p.get("phase_flip_exit", False))
+        _false_s   = pd.Series(False, index=out.index)
+        wle_arr  = (peak_window   if sides.get("long")  else _false_s).fillna(False).to_numpy()
+        wse_arr  = ((trough_window & atr_rising) if sides.get("short") else _false_s).fillna(False).to_numpy()
+        pel_arr  = (trough_window if phase_flip else _false_s).fillna(False).to_numpy()
+        pes_arr  = (peak_window   if phase_flip else _false_s).fillna(False).to_numpy()
 
         n = len(out)
         cond_long      = np.zeros(n, dtype=bool)
@@ -176,13 +180,22 @@ class LunarStrategy(Strategy):
         entry_idx   = -1     # bar index of the engine's fill bar
         mfe_price   = np.nan
         last_entry_day: Optional[int] = None
+        # One entry per peak-window run: require peak_window to go False
+        # before allowing another long entry — mirrors TS's session-based
+        # behavior where the strategy can only fire once at each new peak.
+        peak_window_fresh = True
 
         for t in range(n):
             ts  = int(time_a[t])
             c   = close_a[t]
             h   = high_a[t]
             l   = low_a[t]
-            day = ts // 86400
+            # 22:00 UTC = 17:00 ET (ES session open) — matches TS entriestoday() boundary
+            day = (ts - 22 * 3600) // 86400
+
+            # Only reset when already flat at the start of this bar — not after an intra-bar exit.
+            if pos == 0 and not wle_arr[t]:
+                peak_window_fresh = True
 
             if pos != 0 and np.isfinite(entry_price):
                 # update MFE using the current bar's range
@@ -210,6 +223,7 @@ class LunarStrategy(Strategy):
                         entry_price = np.nan
                         entry_idx   = -1
                         mfe_price   = np.nan
+                        peak_window_fresh = False  # don't re-enter same peak after exit
                 else:  # pos == -1
                     stop_lvl = entry_price * (1.0 + stop_pct)
                     tgt_lvl  = entry_price * (1.0 - target_pct)
@@ -227,7 +241,7 @@ class LunarStrategy(Strategy):
                         entry_idx   = -1
                         mfe_price   = np.nan
 
-            # Entries — only when flat, only once per UTC day (if gated).
+            # Entries — only when flat, only once per session-day, only on a fresh peak window.
             if pos == 0:
                 if one_per_day and last_entry_day == day:
                     continue
@@ -235,13 +249,14 @@ class LunarStrategy(Strategy):
                 if t + 1 >= n:
                     continue
                 next_open = float(open_a[t + 1])
-                if wle_arr[t]:
+                if wle_arr[t] and peak_window_fresh:
                     cond_long[t] = True
                     pos = 1
                     entry_price = next_open
                     entry_idx   = t + 1
                     mfe_price   = next_open
                     last_entry_day = day
+                    peak_window_fresh = False
                 elif wse_arr[t]:
                     cond_short[t] = True
                     pos = -1
@@ -310,7 +325,8 @@ class LunarStrategy(Strategy):
         h  = float(high.iloc[-1])
         l  = float(low.iloc[-1])
         ts = int(df["time"].iloc[-1])
-        day = ts // 86400
+        # 22:00 UTC = 17:00 ET (ES session open) — matches TS entriestoday() boundary
+        day = (ts - 22 * 3600) // 86400
 
         # bar-count for max-bars exit; live so we have to count manually.
         state["bar_count"] = int(state.get("bar_count", 0)) + 1
@@ -329,6 +345,8 @@ class LunarStrategy(Strategy):
         be_off     = float(p["breakeven_offset_pct"])  / 100.0
         max_bars   = int(p["n_bars_exit"])
 
+        phase_flip = bool(p.get("phase_flip_exit", False))
+
         # Position management first.
         if pos == 1 and np.isfinite(entry_p):
             mfe = max(float(mfe) if np.isfinite(mfe) else h, h)
@@ -336,13 +354,14 @@ class LunarStrategy(Strategy):
             reason = None
             if   c <= entry_p * (1 - stop_pct):   reason = "stop"
             elif c >= entry_p * (1 + target_pct): reason = "target"
-            elif trough_window:                   reason = "phase_flip"
+            elif phase_flip and trough_window:     reason = "phase_flip"
             elif entry_bar is not None and (bar_count - int(entry_bar)) >= max_bars:
                 reason = "maxbars"
             elif (mfe / entry_p - 1.0) >= be_trig and c <= entry_p * (1 + be_off):
                 reason = "breakeven"
             if reason:
-                state.update({"pos": 0, "entry_p": np.nan, "entry_bar": None, "mfe": np.nan})
+                state.update({"pos": 0, "entry_p": np.nan, "entry_bar": None, "mfe": np.nan,
+                              "peak_window_fresh": False})
                 return Signal(side="long", kind="exit", price=c, time=ts, reason=reason)
             return None
 
@@ -352,7 +371,7 @@ class LunarStrategy(Strategy):
             reason = None
             if   c >= entry_p * (1 + stop_pct):   reason = "stop"
             elif c <= entry_p * (1 - target_pct): reason = "target"
-            elif peak_window:                     reason = "phase_flip"
+            elif phase_flip and peak_window:       reason = "phase_flip"
             elif entry_bar is not None and (bar_count - int(entry_bar)) >= max_bars:
                 reason = "maxbars"
             elif (1.0 - mfe / entry_p) >= be_trig and c >= entry_p * (1 - be_off):
@@ -364,10 +383,20 @@ class LunarStrategy(Strategy):
 
         # Flat → consider entries.
         if bool(p.get("one_entry_per_day", True)) and last_day == day:
+            # Track peak_window going False while waiting (so next peak is fresh).
+            if not peak_window:
+                state["peak_window_fresh"] = True
             return None
-        if sides.get("long") and peak_window:
+
+        # When flat and peak_window is False, mark that a new peak can trigger.
+        if not peak_window:
+            state["peak_window_fresh"] = True
+
+        peak_fresh = bool(state.get("peak_window_fresh", True))
+
+        if sides.get("long") and peak_window and peak_fresh:
             state.update({"pos": 1, "entry_p": c, "entry_bar": bar_count,
-                          "mfe": c, "last_entry_day": day})
+                          "mfe": c, "last_entry_day": day, "peak_window_fresh": False})
             return Signal(side="long", kind="entry", price=c, time=ts, reason="moon_peak")
         if sides.get("short") and trough_window and atr_rising:
             state.update({"pos": -1, "entry_p": c, "entry_bar": bar_count,
