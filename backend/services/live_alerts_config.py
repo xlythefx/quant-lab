@@ -34,8 +34,27 @@ log = logging.getLogger(__name__)
 _PATH = os.path.join(DATA_DIR, "live_alerts.json")
 _LOCK = Lock()
 
-_REQUIRED = ("name", "strategy_id", "symbol", "webhook_url", "secret", "strategy_alias")
+_REQUIRED = ("name", "strategy_id", "symbol", "timeframe", "webhook_url", "secret", "strategy_alias")
 _cache: list[dict] | None = None
+
+# Tokens available in a custom payload_template JSON string.
+PAYLOAD_TOKENS = ("action", "symbol", "secret", "strategy", "leverage")
+
+
+def _coerce_payload_template(v) -> str | None:
+    """Return the template string if it's non-empty valid JSON, else None."""
+    if not v:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        parsed = json.loads(s)
+        if not isinstance(parsed, dict):
+            return None
+        return s
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 def _coerce_rule(r: dict, *, fallback_index: int = 0) -> dict | None:
@@ -48,14 +67,16 @@ def _coerce_rule(r: dict, *, fallback_index: int = 0) -> dict | None:
         # backwards compat: generate from strategy+symbol
         name = f"{strategy_id}_{symbol}" if (strategy_id and symbol) else f"rule_{fallback_index}"
     out = {
-        "name":           name,
-        "strategy_id":    strategy_id,
-        "symbol":         symbol,
-        "enabled":        bool(r.get("enabled", True)),
-        "webhook_url":    str(r.get("webhook_url") or "").strip(),
-        "secret":         str(r.get("secret") or "").strip(),
-        "strategy_alias": str(r.get("strategy_alias") or "").strip(),
-        "leverage":       _to_int(r.get("leverage"), default=1, lo=1, hi=125),
+        "name":             name,
+        "strategy_id":      strategy_id,
+        "symbol":           symbol,
+        "timeframe":        str(r.get("timeframe") or "").strip(),
+        "enabled":          bool(r.get("enabled", True)),
+        "webhook_url":      str(r.get("webhook_url") or "").strip(),
+        "secret":           str(r.get("secret") or "").strip(),
+        "strategy_alias":   str(r.get("strategy_alias") or "").strip(),
+        "leverage":         _to_int(r.get("leverage"), default=1, lo=1, hi=125),
+        "payload_template": _coerce_payload_template(r.get("payload_template")),
     }
     for k in _REQUIRED:
         if not out[k]:

@@ -31,7 +31,7 @@ from routes.ai_routes import ai_bp
 from routes.live_alerts_routes import live_alerts_bp
 from services.socket_manager import SocketManager
 from services.strategy_manager import StrategyManager
-from services import event_bus
+from services import event_bus, alerts_daemon
 from utils.validators import (
     validate_symbol,
     validate_timeframe,
@@ -71,6 +71,7 @@ def create_app():
     manager = SocketManager(socketio)
     event_bus.set_socketio(socketio)
     strategy_mgr = StrategyManager(manager)
+    alerts_daemon.start(manager)
 
     # ---- Socket.IO events --------------------------------------------
     @socketio.on("connect")

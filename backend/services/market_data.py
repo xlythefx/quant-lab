@@ -107,6 +107,22 @@ def _ohlcv_to_records(rows) -> List[Dict]:
     ]
 
 
+_BINANCE_SYMBOLS: set | None = None
+
+def is_binance_symbol(symbol: str) -> bool:
+    """True if `symbol` is a known Binance trading pair (from assets/binance.json)."""
+    global _BINANCE_SYMBOLS
+    if _BINANCE_SYMBOLS is None:
+        import json
+        path = os.path.join(DATA_DIR, "assets", "binance.json")
+        try:
+            with open(path) as f:
+                _BINANCE_SYMBOLS = set(json.load(f).keys())
+        except Exception:
+            _BINANCE_SYMBOLS = set()
+    return symbol in _BINANCE_SYMBOLS
+
+
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 500) -> List[Dict]:
     """Recent N candles via CCXT REST. Used for initial chart paint."""
     pair = _to_ccxt_symbol(symbol)
@@ -483,17 +499,37 @@ def import_csv_tradestation(
     # Parse datetime
     date_s = df["date"].astype(str).str.strip().str.strip('"')
     time_s = df["time"].astype(str).str.strip().str.strip('"')
-    combined = date_s + " " + time_s
 
     dt = None
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+    # TradeStation numeric date format: pure integer like 1160524
+    # Encoding: (year-1900)*10000 + month*100 + day
+    # Time is also integer HHMM: 1900 = 19:00, 0 = 00:00
+    first_date = date_s.iloc[0]
+    if first_date.lstrip("-").isdigit() and "/" not in first_date and "-" not in first_date:
         try:
-            dt = pd.to_datetime(combined, format=fmt, errors="raise")
-            break
+            date_int = date_s.astype(int)
+            time_int = pd.to_numeric(time_s, errors="coerce").fillna(0).astype(int)
+            dt = pd.to_datetime({
+                "year":   date_int // 10000 + 1900,
+                "month":  (date_int % 10000) // 100,
+                "day":    date_int % 100,
+                "hour":   time_int // 100,
+                "minute": time_int % 100,
+            })
         except Exception:
-            continue
+            pass
+
     if dt is None:
-        dt = pd.to_datetime(combined, infer_datetime_format=True, errors="coerce")
+        combined = date_s + " " + time_s
+        for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = pd.to_datetime(combined, format=fmt, errors="raise")
+                break
+            except Exception:
+                continue
+    if dt is None:
+        combined = date_s + " " + time_s
+        dt = pd.to_datetime(combined, errors="coerce")
 
     # Localize source timezone → UTC
     try:

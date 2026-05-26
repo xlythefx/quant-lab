@@ -219,7 +219,7 @@ def ohlcv():
         return jsonify({"error": str(e)}), 400
 
     try:
-        if mode == "backtest":
+        if mode == "backtest" or not market_data.is_binance_symbol(symbol):
             data = market_data.tail_parquet(symbol, tf, limit)
         else:
             data = market_data.fetch_ohlcv(symbol, tf, limit)

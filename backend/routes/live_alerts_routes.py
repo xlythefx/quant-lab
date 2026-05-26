@@ -3,7 +3,7 @@ Live-alert rule CRUD + test-fire endpoint.
 """
 from flask import Blueprint, jsonify, request
 
-from services import live_alerts_config, live_alerter
+from services import live_alerts_config, live_alerter, alerts_daemon
 
 live_alerts_bp = Blueprint("live_alerts", __name__, url_prefix="/api")
 
@@ -18,6 +18,7 @@ def put_live_alerts():
     body = request.get_json(silent=True) or {}
     rules = body.get("rules") if isinstance(body, dict) else body
     saved = live_alerts_config.save_rules(rules or [])
+    alerts_daemon.refresh()
     return jsonify({"rules": saved})
 
 

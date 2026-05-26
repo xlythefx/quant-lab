@@ -60,15 +60,17 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.S
 
 class LunarStrategy(Strategy):
     PARAM_SCHEMA = [
-        # Phase windowing — defaults mirror the TradeStation [1] / [35] / [65]
-        # triplet. The mid-lag bar is the "extremum" we look for; near and far
-        # lags bracket it to form a local peak / trough test.
-        ParamSpec("phase_lag_near", ParamType.INT, 1,  min=1,  max=30,  step=1, group="Phase",
-                  description="Near lag in bars (TS default 1 — prior bar)."),
-        ParamSpec("phase_lag_mid",  ParamType.INT, 35, min=5,  max=120, step=1, group="Phase",
-                  description="Mid lag in bars — the suspected extremum (TS default 35)."),
-        ParamSpec("phase_lag_far",  ParamType.INT, 65, min=10, max=240, step=1, group="Phase",
-                  description="Far lag in bars (TS default 65)."),
+        # Phase windowing.
+        # The original EL fires only at session-start bars (OpenS gate), so
+        # Phase[1]/[35]/[65] count SESSIONS (days), not 60-min bars.
+        # At 60m (ES 23 h/day): near=23, mid=805, far=1495.
+        # At 1380m (daily session bar): near=1, mid=35, far=65.
+        ParamSpec("phase_lag_near", ParamType.INT, 23,   min=1,   max=100,  step=1,  group="Phase",
+                  description="Near lag in bars. 60m→23 (1 day), 1380m→1."),
+        ParamSpec("phase_lag_mid",  ParamType.INT, 805,  min=5,   max=3000, step=1,  group="Phase",
+                  description="Mid lag — the suspected phase extremum. 60m→805 (35 days), 1380m→35."),
+        ParamSpec("phase_lag_far",  ParamType.INT, 1495, min=10,  max=6000, step=1,  group="Phase",
+                  description="Far lag. 60m→1495 (65 days), 1380m→65."),
 
         # Short-side volatility filter: ATR must be rising.
         ParamSpec("atr_period",      ParamType.INT,   11,  min=2,   max=60,  step=1,    group="ATR Filter",

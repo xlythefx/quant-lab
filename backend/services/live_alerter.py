@@ -18,6 +18,7 @@ Every attempt (ok/fail) emits a `live_alert_dispatched` Socket.IO event.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -51,7 +52,7 @@ def action_for(sig: Signal) -> Optional[str]:
     return _ACTION_MAP.get((sig.side, sig.kind))
 
 
-def build_payload(rule: dict, action: str, symbol: str) -> dict:
+def _default_payload(rule: dict, action: str, symbol: str) -> dict:
     return {
         "secret":   rule["secret"],
         "strategy": rule["strategy_alias"],
@@ -59,6 +60,27 @@ def build_payload(rule: dict, action: str, symbol: str) -> dict:
         "action":   action,
         "symbol":   symbol,
     }
+
+
+def build_payload(rule: dict, action: str, symbol: str) -> dict:
+    template = rule.get("payload_template")
+    if not template:
+        return _default_payload(rule, action, symbol)
+    tokens = {
+        "action":   action,
+        "symbol":   symbol,
+        "secret":   rule["secret"],
+        "strategy": rule["strategy_alias"],
+        "leverage": str(rule["leverage"]),
+    }
+    rendered = template
+    for key, val in tokens.items():
+        rendered = rendered.replace("{{" + key + "}}", val)
+    try:
+        return json.loads(rendered)
+    except (json.JSONDecodeError, ValueError):
+        log.warning("payload_template for rule %r failed to render — falling back to default", rule.get("name"))
+        return _default_payload(rule, action, symbol)
 
 
 def _emit_dispatched(strategy_id: str, symbol: str, action: str, *,

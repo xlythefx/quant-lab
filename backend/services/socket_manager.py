@@ -14,6 +14,7 @@ from typing import Dict, Tuple
 from services.binance_stream import BinanceKlineStream
 from services.backtest_stream import BacktestStream
 from services.stream_base import CandleStream
+from services.market_data import is_binance_symbol
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class SocketManager:
                 except Exception as e:
                     log.exception("listener for %s raised: %s", key, e)
 
-        if mode == "live":
+        if mode == "live" and is_binance_symbol(symbol):
             return BinanceKlineStream(symbol, tf, emit)
         return BacktestStream(symbol, tf, emit, speed=speed,
                               start_time=start_time, end_time=end_time, loop=loop)

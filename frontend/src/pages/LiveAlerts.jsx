@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Navbar from "../components/Navbar.jsx";
 import { socket } from "../services/socket.js";
 import {
@@ -10,15 +10,27 @@ const WEBHOOK_PRESETS = [
   { label: "ngrok · local test", url: "https://shakira-adducible-roentgenographically.ngrok-free.dev" },
 ];
 
+const DEFAULT_PAYLOAD_TEMPLATE = `{
+  "secret": "{{secret}}",
+  "strategy": "{{strategy}}",
+  "leverage": "{{leverage}}",
+  "action": "{{action}}",
+  "symbol": "{{symbol}}"
+}`;
+
+const TIMEFRAME_OPTIONS = ["1m", "5m", "15m", "1h"];
+
 const BLANK_RULE = {
   name: "",
   strategy_id: "",
   symbol: "",
+  timeframe: "1h",
   enabled: true,
   webhook_url: "",
   secret: "",
   strategy_alias: "",
   leverage: 25,
+  payload_template: "",
 };
 
 export default function LiveAlerts() {
@@ -65,8 +77,8 @@ export default function LiveAlerts() {
   };
 
   const addRule = async () => {
-    if (!draft.name || !draft.strategy_id || !draft.symbol || !draft.webhook_url || !draft.secret || !draft.strategy_alias) {
-      setErr("name, strategy, symbol, webhook URL, secret, and alias are required");
+    if (!draft.name || !draft.strategy_id || !draft.symbol || !draft.timeframe || !draft.webhook_url || !draft.secret || !draft.strategy_alias) {
+      setErr("name, strategy, symbol, timeframe, webhook URL, secret, and alias are required");
       return;
     }
     if (editIdx === null && rules.some((r) => r.name === draft.name)) {
@@ -150,6 +162,7 @@ export default function LiveAlerts() {
                   <th className="text-left px-3 py-2 font-medium">Name</th>
                   <th className="text-left px-3 py-2 font-medium">Strategy</th>
                   <th className="text-left px-3 py-2 font-medium">Symbol</th>
+                  <th className="text-left px-3 py-2 font-medium">TF</th>
                   <th className="text-left px-3 py-2 font-medium">Alias</th>
                   <th className="text-right px-3 py-2 font-medium">Lev</th>
                   <th className="text-left px-3 py-2 font-medium">Webhook URL</th>
@@ -171,10 +184,14 @@ export default function LiveAlerts() {
                       <div className="text-xs text-muted font-mono">{r.strategy_id}</div>
                     </td>
                     <td className="px-3 py-2 font-mono">{r.symbol}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{r.timeframe || "—"}</td>
                     <td className="px-3 py-2 font-mono text-xs">{r.strategy_alias}</td>
                     <td className="px-3 py-2 text-right font-mono">{r.leverage}x</td>
-                    <td className="px-3 py-2 font-mono text-xs text-muted truncate max-w-[220px]" title={r.webhook_url}>
-                      {r.webhook_url}
+                    <td className="px-3 py-2 max-w-[240px]">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono text-xs text-muted truncate" title={r.webhook_url}>{r.webhook_url}</span>
+                        <CopyButton text={r.webhook_url} className="shrink-0" />
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-center">
                       <button
@@ -290,6 +307,18 @@ export default function LiveAlerts() {
               </select>
             </Field>
 
+            <Field label="Timeframe">
+              <select
+                value={draft.timeframe}
+                onChange={(e) => setDraft({ ...draft, timeframe: e.target.value })}
+                className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+              >
+                {TIMEFRAME_OPTIONS.map((tf) => (
+                  <option key={tf} value={tf}>{tf}</option>
+                ))}
+              </select>
+            </Field>
+
             <Field label="Strategy alias (sent as `strategy` field)">
               <input
                 type="text" value={draft.strategy_alias}
@@ -325,12 +354,15 @@ export default function LiveAlerts() {
                 </select>
                 <span className="text-xs text-muted shrink-0">or type↓</span>
               </div>
-              <input
-                type="text" value={draft.webhook_url}
-                onChange={(e) => setDraft({ ...draft, webhook_url: e.target.value })}
-                placeholder="https://api1.yourdomain.com/binance_webhook"
-                className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
-              />
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text" value={draft.webhook_url}
+                  onChange={(e) => setDraft({ ...draft, webhook_url: e.target.value })}
+                  placeholder="https://api1.yourdomain.com/binance_webhook"
+                  className="flex-1 px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+                />
+                <CopyButton text={draft.webhook_url} />
+              </div>
             </Field>
 
             <Field label="Secret" full>
@@ -341,6 +373,35 @@ export default function LiveAlerts() {
                 className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
               />
             </Field>
+
+            <div className="md:col-span-2 flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs uppercase tracking-wider text-muted">JSON Payload</span>
+                <span className="text-[10px] text-muted/60">sent to webhook on each signal</span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setDraft({ ...draft, payload_template: draft.payload_template ? "" : DEFAULT_PAYLOAD_TEMPLATE })}
+                  className="text-[10px] text-accent-blue hover:underline"
+                >
+                  {draft.payload_template ? "reset to default" : "customize"}
+                </button>
+              </div>
+              {draft.payload_template ? (
+                <textarea
+                  value={draft.payload_template}
+                  onChange={(e) => setDraft({ ...draft, payload_template: e.target.value })}
+                  rows={8}
+                  spellCheck={false}
+                  className="w-full px-3 py-2 rounded-md bg-bg-elev border border-accent-blue/40 font-mono text-xs focus:outline-none focus:border-accent-blue resize-y"
+                />
+              ) : (
+                <pre className="px-3 py-2 rounded-md bg-bg-elev/50 border border-line font-mono text-xs text-muted leading-relaxed select-none">{DEFAULT_PAYLOAD_TEMPLATE}</pre>
+              )}
+              <span className="text-[10px] text-muted/60">
+                Tokens: <code className="text-accent-cyan">{"{{action}}"}</code> <code className="text-accent-cyan">{"{{symbol}}"}</code> <code className="text-accent-cyan">{"{{secret}}"}</code> <code className="text-accent-cyan">{"{{strategy}}"}</code> <code className="text-accent-cyan">{"{{leverage}}"}</code>
+              </span>
+            </div>
 
             <div className="md:col-span-2 flex items-center gap-3 pt-1">
               <label className="flex items-center gap-2 text-sm text-muted">
@@ -436,5 +497,40 @@ function Field({ label, full, children }) {
       <span className="text-xs uppercase tracking-wider text-muted">{label}</span>
       {children}
     </label>
+  );
+}
+
+function CopyButton({ text, className = "" }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [text]);
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title="Copy to clipboard"
+      disabled={!text}
+      className={`p-1.5 rounded-md border transition-colors disabled:opacity-30 ${
+        copied
+          ? "border-accent-cyan/60 text-accent-cyan bg-accent-cyan/10"
+          : "border-line text-muted hover:text-text hover:border-line/80"
+      } ${className}`}
+    >
+      {copied ? (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+          <path fillRule="evenodd" d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z" />
+        </svg>
+      ) : (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+          <path d="M3.5 2A1.5 1.5 0 0 0 2 3.5v9A1.5 1.5 0 0 0 3.5 14h5.793A1.5 1.5 0 0 0 10.5 13V9.621a1.5 1.5 0 0 0-.44-1.06L6.439 4.94A1.5 1.5 0 0 0 5.379 4.5H3.5ZM11 7.5V13a3 3 0 0 1-3 3H3.5A3 3 0 0 1 .5 13v-9A3 3 0 0 1 3.5 1h2a.5.5 0 0 1 0 1H3.5A2 2 0 0 0 1.5 4v9A2 2 0 0 0 3.5 15h4.5a2 2 0 0 0 2-2V7.5h1Z" />
+          <path d="M11.5 1a.5.5 0 0 1 .5.5v2h2a.5.5 0 0 1 0 1h-2v2a.5.5 0 0 1-1 0v-2h-2a.5.5 0 0 1 0-1h2v-2a.5.5 0 0 1 .5-.5Z" />
+        </svg>
+      )}
+    </button>
   );
 }
