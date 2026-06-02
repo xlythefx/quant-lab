@@ -11,9 +11,8 @@ Self-contained: VWMA, RSI, session math all inline.
 """
 from __future__ import annotations
 
-from datetime import time as dt_time, datetime, timezone
+from datetime import datetime, timezone
 from typing import Optional
-import re
 
 import numpy as np
 import pandas as pd
@@ -21,40 +20,7 @@ import pandas as pd
 from services.strategies.base import (
     Strategy, StrategyMeta, ParamSpec, ParamType, Signal, OverlaySpec,
 )
-
-_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
-
-
-def _parse_hhmm(s: str) -> dt_time:
-    m = _HHMM_RE.match((s or "").strip())
-    if not m:
-        return dt_time(0, 0)
-    return dt_time(min(23, int(m.group(1))), min(59, int(m.group(2))))
-
-
-def _in_window(t: dt_time, win: tuple[dt_time, dt_time]) -> bool:
-    s, e = win
-    if s <= e:
-        return s <= t < e
-    return t >= s or t < e   # wraps midnight
-
-
-def _session_mask(times_utc: pd.Series, sessions: dict) -> pd.Series:
-    if not sessions:
-        return pd.Series(False, index=times_utc.index)
-    enabled = []
-    for cfg in sessions.values():
-        if not cfg or not cfg.get("enabled"):
-            continue
-        enabled.append((_parse_hhmm(cfg.get("start", "00:00")),
-                        _parse_hhmm(cfg.get("end",   "00:00"))))
-    if not enabled:
-        return pd.Series(False, index=times_utc.index)
-    tod = times_utc.dt.time
-    mask = pd.Series(False, index=times_utc.index)
-    for win in enabled:
-        mask = mask | tod.apply(lambda t: _in_window(t, win))
-    return mask
+from services.strategies.session_utils import parse_hhmm, in_window_live, session_mask
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +109,7 @@ class VwmaMomentumStrategy(Strategy):
         if bool(p.get("trade_24_7")):
             in_session = pd.Series(True, index=out.index)
         else:
-            in_session = _session_mask(ts_for_mask, p["sessions"])
+            in_session = session_mask(ts_for_mask, p["sessions"])
 
         if bool(p["use_rsi_filter"]):
             rsi_long_ok  = rsi > float(p["rsi_long_min"])
@@ -267,7 +233,7 @@ class VwmaMomentumStrategy(Strategy):
             for cfg in (p["sessions"] or {}).values():
                 if not cfg or not cfg.get("enabled"):
                     continue
-                if _in_window(utc, (_parse_hhmm(cfg.get("start", "00:00")), _parse_hhmm(cfg.get("end", "00:00")))):
+                if in_window_live(utc, (parse_hhmm(cfg.get("start", "00:00")), parse_hhmm(cfg.get("end", "00:00")))):
                     in_sess = True
                     break
 

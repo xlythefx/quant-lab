@@ -22,7 +22,7 @@ import {
 } from "../services/socket.js";
 import {
   useActiveStrategies, removeStrategy, updateParams, moveStrategy,
-  saveUserDefaults, getUserDefaults,
+  saveUserDefaults, getUserDefaults, clearAll as clearAllStrategies,
 } from "../services/strategiesStore.js";
 import { setLast as setLastResult, getLast as getLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
@@ -192,6 +192,22 @@ export default function Dashboard() {
     }
   }, [symbol, datasets, mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Live mode: futures/commodity symbols stream from TradeStation CSV (1H only).
+  // Auto-correct timeframe whenever the symbol or mode changes.
+  const _FUTURES_LIVE_TF = "1h";
+  const _FUTURES_CLASSES = new Set(["equity_index_future", "commodity"]);
+  const _liveAssetClass = (
+    datasets.find((d) => d.symbol === symbol)?.asset_class          // has backtest data
+    || localStorage.getItem("ql.symbolSelector.assetClass")         // read active tab
+    || "crypto"
+  );
+  const _isFuturesLive = mode === "live" && _FUTURES_CLASSES.has(_liveAssetClass);
+
+  useEffect(() => {
+    if (!_isFuturesLive) return;
+    if (timeframe !== _FUTURES_LIVE_TF) setTimeframe(_FUTURES_LIVE_TF);
+  }, [mode, symbol, _isFuturesLive]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (mode !== "backtest" || backtestKind !== "replay") return;
     const ds = datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe);
@@ -205,8 +221,29 @@ export default function Dashboard() {
   // Disarm replay on input change.
   useEffect(() => { setArmed(false); }, [mode, symbol, timeframe, backtestKind]);
 
+  // Auto-apply timeframe defaults when timeframe changes.
+  useEffect(() => {
+    for (const s of active) {
+      const meta = catalogById[s.id];
+      if (!meta?.timeframe_defaults?.[timeframe]) continue;
+      const defaults = {};
+      for (const spec of meta.schema) defaults[spec.name] = spec.default;
+      for (const preset of [meta.timeframe_defaults?.[timeframe], meta.symbol_defaults?.[symbol]]) {
+        if (!preset) continue;
+        for (const [k, v] of Object.entries(preset)) {
+          const base = defaults[k];
+          defaults[k] = (v && typeof v === "object" && !Array.isArray(v) && base && typeof base === "object" && !Array.isArray(base))
+            ? { ...base, ...v } : v;
+        }
+      }
+      const userSaved = getUserDefaults(s.id);
+      updateParams(s.id, userSaved ? { ...defaults, ...userSaved } : defaults);
+    }
+  }, [timeframe]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const tfsForSymbol = mode === "backtest"
     ? datasets.filter((d) => d.symbol === symbol).map((d) => d.timeframe)
+    : _isFuturesLive ? [_FUTURES_LIVE_TF]   // only 1h available from TradeStation CSV
     : null;
 
   const datasetExists = mode !== "backtest" || datasets.some(
@@ -647,6 +684,15 @@ export default function Dashboard() {
               + Add
             </a>
           )}
+          {active.length > 1 && (
+            <button
+              onClick={() => clearAllStrategies()}
+              className="text-xs text-muted hover:text-loss px-3 py-2 border border-dashed border-line hover:border-loss/40 rounded-lg whitespace-nowrap transition"
+              title="Remove all strategies from dashboard"
+            >
+              Clear all
+            </button>
+          )}
         </div>
       </div>
 
@@ -820,9 +866,9 @@ export default function Dashboard() {
               // Start from code-level defaults.
               const defaults = {};
               for (const spec of meta.schema) defaults[spec.name] = spec.default;
-              // Layer 1: per-symbol preset overrides from the strategy schema.
-              const preset = meta.symbol_defaults?.[symbol];
-              if (preset) {
+              // Layer 1: per-timeframe, Layer 2: per-symbol (symbol wins over timeframe).
+              for (const preset of [meta.timeframe_defaults?.[timeframe], meta.symbol_defaults?.[symbol]]) {
+                if (!preset) continue;
                 for (const [k, v] of Object.entries(preset)) {
                   const base = defaults[k];
                   if (v && typeof v === "object" && !Array.isArray(v)
@@ -830,12 +876,9 @@ export default function Dashboard() {
                     const merged = { ...base };
                     for (const [k2, v2] of Object.entries(v)) {
                       const baseSub = base[k2];
-                      if (v2 && typeof v2 === "object" && !Array.isArray(v2)
-                          && baseSub && typeof baseSub === "object" && !Array.isArray(baseSub)) {
-                        merged[k2] = { ...baseSub, ...v2 };
-                      } else {
-                        merged[k2] = v2;
-                      }
+                      merged[k2] = (v2 && typeof v2 === "object" && !Array.isArray(v2)
+                          && baseSub && typeof baseSub === "object" && !Array.isArray(baseSub))
+                        ? { ...baseSub, ...v2 } : v2;
                     }
                     defaults[k] = merged;
                   } else {
@@ -843,7 +886,7 @@ export default function Dashboard() {
                   }
                 }
               }
-              // Layer 2: user-saved defaults override everything.
+              // Layer 3: user-saved defaults override everything.
               const userDefaults = getUserDefaults(s.id);
               const resolved = userDefaults ? { ...defaults, ...userDefaults } : defaults;
               onApplyParams(s.id, resolved);

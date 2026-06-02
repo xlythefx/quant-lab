@@ -3,6 +3,7 @@ import Navbar from "../components/Navbar.jsx";
 import { useLastResult } from "../services/lastResultStore.js";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtTime } from "../services/format.js";
 import { downloadTradesCsv } from "../services/exportTrades.js";
+import { exportAnalyticsPdf } from "../services/exportAnalyticsPdf.js";
 import { aiAnalyzeBacktestSection } from "../services/api.js";
 import { KpiCard, KV, Section, InsightCard, TabBar } from "../components/analytics/primitives.jsx";
 
@@ -192,7 +193,15 @@ export default function Analytics() {
               </div>
             )}
           </div>
-          <a href="#dashboard" className="text-xs text-accent-blue hover:underline">← Dashboard</a>
+          {result && (
+            <button
+              onClick={() => exportAnalyticsPdf(result)}
+              className="shrink-0 px-3 py-1.5 text-xs rounded-md bg-bg-panel border border-line text-muted hover:text-text hover:border-accent-blue/50 transition whitespace-nowrap"
+              title="Export full performance summary as PDF"
+            >
+              ⬇ Export PDF
+            </button>
+          )}
         </header>
 
         {!result && (
@@ -468,6 +477,175 @@ function SkippedSignalsTab({ result }) {
 }
 
 // ---------------------------------------------------------------------------
+// OVERVIEW — mini chart helpers
+// ---------------------------------------------------------------------------
+
+function _sampleArr(arr, max) {
+  if (!arr || arr.length <= max) return arr || [];
+  const step = Math.ceil(arr.length / max);
+  const out = [];
+  for (let i = 0; i < arr.length; i += step) out.push(arr[i]);
+  if (out[out.length - 1] !== arr[arr.length - 1]) out.push(arr[arr.length - 1]);
+  return out;
+}
+
+function EquityVsBenchmarkChart({ equity, candles }) {
+  const W = 900, H = 170;
+  const pad = { l: 46, r: 14, t: 14, b: 24 };
+  const iW = W - pad.l - pad.r;
+  const iH = H - pad.t - pad.b;
+
+  const eqPts = useMemo(() => _sampleArr(equity, 400).map(p => ({ t: p.time, v: p.value - 100 })), [equity]);
+  const bhPts = useMemo(() => {
+    const s = _sampleArr(candles, 400);
+    const base = s[0]?.close ?? 1;
+    return s.map(p => ({ t: p.time, v: (p.close / base - 1) * 100 }));
+  }, [candles]);
+
+  if (eqPts.length < 2 && bhPts.length < 2) return null;
+
+  const allV = [...eqPts.map(p => p.v), ...bhPts.map(p => p.v)];
+  const rawMin = Math.min(...allV), rawMax = Math.max(...allV);
+  const vPad = (rawMax - rawMin) * 0.08 || 1;
+  const yMin = rawMin - vPad, yMax = rawMax + vPad;
+  const yRange = yMax - yMin;
+
+  const allT = [...eqPts.map(p => p.t), ...bhPts.map(p => p.t)];
+  const tMin = Math.min(...allT), tMax = Math.max(...allT);
+  const tRange = tMax - tMin || 1;
+
+  const xOf = t => (pad.l + ((t - tMin) / tRange) * iW).toFixed(1);
+  const yOf = v => (pad.t + (1 - (v - yMin) / yRange) * iH).toFixed(1);
+  const mkPath = pts => pts.map((p, i) => `${i ? "L" : "M"}${xOf(p.t)},${yOf(p.v)}`).join(" ");
+  const fmtDate = ts => new Date(ts * 1000).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+  const fmtR = v => (v >= 0 ? "+" : "") + v.toFixed(1) + "%";
+
+  const stratFinal = eqPts.at(-1)?.v ?? null;
+  const bhFinal    = bhPts.at(-1)?.v ?? null;
+  const zeroY      = yOf(0);
+  const yTicks     = [...new Set([rawMin, 0, rawMax].map(v => Math.round(v / 5) * 5))];
+
+  return (
+    <div className="lg:col-span-3 rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] uppercase tracking-wider text-muted">Equity Return vs Buy &amp; Hold</div>
+        <div className="flex gap-5 items-center text-[10px] font-mono">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-5 h-[2px] rounded" style={{ background: "rgba(96,165,250,0.9)" }} />
+            <span className="text-muted">Strategy</span>
+            {stratFinal != null && <span className={stratFinal >= 0 ? "text-profit" : "text-loss"}>{fmtR(stratFinal)}</span>}
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-5 h-[2px] rounded" style={{ background: "rgba(148,163,184,0.6)" }} />
+            <span className="text-muted">Buy &amp; Hold</span>
+            {bhFinal != null && <span className={bhFinal >= 0 ? "text-profit" : "text-loss"}>{fmtR(bhFinal)}</span>}
+          </span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full block" style={{ height: H }}>
+        {yMin < 0 && yMax > 0 && (
+          <line x1={pad.l} x2={W - pad.r} y1={zeroY} y2={zeroY}
+                stroke="rgba(255,255,255,0.12)" strokeWidth="1" strokeDasharray="4,3" />
+        )}
+        {yTicks.map((v, i) => (
+          <text key={i} x={pad.l - 4} y={+yOf(v) + 3.5} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">
+            {fmtR(v)}
+          </text>
+        ))}
+        {eqPts.length > 0 && <>
+          <text x={pad.l} y={H - 4} textAnchor="start" fontSize="8" fill="rgba(150,150,170,0.7)">{fmtDate(eqPts[0].t)}</text>
+          <text x={W - pad.r} y={H - 4} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">{fmtDate(eqPts.at(-1).t)}</text>
+        </>}
+        {bhPts.length > 1 && <path d={mkPath(bhPts)} fill="none" stroke="rgba(148,163,184,0.55)" strokeWidth="1.5" />}
+        {eqPts.length > 1 && <path d={mkPath(eqPts)} fill="none" stroke="rgba(96,165,250,0.9)" strokeWidth="1.5" />}
+      </svg>
+    </div>
+  );
+}
+
+function DrawdownMiniChart({ equity }) {
+  const W = 900, H = 100;
+  const pad = { l: 46, r: 14, t: 10, b: 24 };
+  const iW = W - pad.l - pad.r;
+  const iH = H - pad.t - pad.b;
+
+  const pts = useMemo(() => _sampleArr(equity, 400).map(p => ({ t: p.time, v: p.drawdown })), [equity]);
+  if (pts.length < 2) return null;
+
+  const yMin = Math.min(...pts.map(p => p.v)) * 1.12;
+  const yMax = 0;
+  const yRange = yMax - yMin || 1;
+  const tMin = pts[0].t, tMax = pts.at(-1).t, tRange = tMax - tMin || 1;
+
+  const xOf = t => (pad.l + ((t - tMin) / tRange) * iW).toFixed(1);
+  const yOf = v => (pad.t + (1 - (v - yMin) / yRange) * iH).toFixed(1);
+  const zeroY = yOf(0);
+  const linePath = pts.map((p, i) => `${i ? "L" : "M"}${xOf(p.t)},${yOf(p.v)}`).join(" ");
+  const areaPath = `M${xOf(pts[0].t)},${zeroY} ` + pts.map(p => `L${xOf(p.t)},${yOf(p.v)}`).join(" ") +
+                   ` L${xOf(pts.at(-1).t)},${zeroY} Z`;
+  const fmtDate = ts => new Date(ts * 1000).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+
+  return (
+    <div className="lg:col-span-3 rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="text-[10px] uppercase tracking-wider text-muted mb-2">Drawdown Curve</div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full block" style={{ height: H }}>
+        <line x1={pad.l} x2={W - pad.r} y1={zeroY} y2={zeroY} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+        {[yMin / 1.12, yMin / 2.24].map((v, i) => (
+          <text key={i} x={pad.l - 4} y={+yOf(v) + 3.5} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">
+            {v.toFixed(1)}%
+          </text>
+        ))}
+        <path d={areaPath} fill="rgba(239,68,68,0.1)" />
+        <path d={linePath} fill="none" stroke="rgba(239,68,68,0.7)" strokeWidth="1.5" />
+        <text x={pad.l} y={H - 4} textAnchor="start" fontSize="8" fill="rgba(150,150,170,0.7)">{fmtDate(pts[0].t)}</text>
+        <text x={W - pad.r} y={H - 4} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">{fmtDate(pts.at(-1).t)}</text>
+      </svg>
+    </div>
+  );
+}
+
+function MonthlyMiniChart({ monthly }) {
+  const W = 900, H = 110;
+  const pad = { l: 56, r: 14, t: 10, b: 24 };
+  const iW = W - pad.l - pad.r;
+  const iH = H - pad.t - pad.b;
+
+  if (!monthly || monthly.length < 2) return null;
+
+  const vals = monthly.map(m => m.pnl_dollars);
+  const absMax = Math.max(...vals.map(Math.abs)) * 1.1 || 1;
+  const yMin = -absMax, yMax = absMax, yRange = yMax - yMin;
+  const barW = Math.max(1, (iW / monthly.length) - 1);
+  const xOf = i => (pad.l + (i / monthly.length) * iW).toFixed(1);
+  const yZero = pad.t + (1 - (0 - yMin) / yRange) * iH;
+
+  return (
+    <div className="lg:col-span-3 rounded-xl border border-line bg-bg-panel/60 p-4">
+      <div className="text-[10px] uppercase tracking-wider text-muted mb-2">Monthly P&amp;L</div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full block" style={{ height: H }}>
+        <line x1={pad.l} x2={W - pad.r} y1={yZero.toFixed(1)} y2={yZero.toFixed(1)}
+              stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+        <text x={pad.l - 4} y={yZero + 3.5} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">$0</text>
+        <text x={pad.l - 4} y={pad.t + 7} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">{fmtUsd(absMax)}</text>
+        <text x={pad.l - 4} y={H - pad.b + 7} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">{fmtUsd(-absMax)}</text>
+        {monthly.map((m, i) => {
+          const v = m.pnl_dollars;
+          const yTop = pad.t + (1 - (Math.max(v, 0) - yMin) / yRange) * iH;
+          const yBot = pad.t + (1 - (Math.min(v, 0) - yMin) / yRange) * iH;
+          return (
+            <rect key={i} x={xOf(i)} y={yTop.toFixed(1)} width={barW.toFixed(1)}
+                  height={Math.max(1, yBot - yTop).toFixed(1)}
+                  fill={v >= 0 ? "rgba(74,222,128,0.65)" : "rgba(239,68,68,0.65)"} />
+          );
+        })}
+        <text x={pad.l} y={H - 4} textAnchor="start" fontSize="8" fill="rgba(150,150,170,0.7)">{monthly[0]?.month}</text>
+        <text x={W - pad.r} y={H - 4} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">{monthly.at(-1)?.month}</text>
+      </svg>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // OVERVIEW
 // ---------------------------------------------------------------------------
 
@@ -476,8 +654,34 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
   const a = result.analytics;
   const rc = result.risk_config;
 
+  const dataYears = s.first_time && s.last_time
+    ? (s.last_time - s.first_time) / (365.25 * 86400)
+    : null;
+  const fmtMonYear = ts => new Date(ts * 1000).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+
+  const candles = result.candles ?? [];
+  const buyAndHoldPct = candles.length >= 2
+    ? (candles[candles.length - 1].close / candles[0].close - 1) * 100
+    : null;
+  const recoveryFactor = s.max_drawdown_dollars && s.total_return_dollars != null
+    ? s.total_return_dollars / Math.abs(s.max_drawdown_dollars)
+    : null;
+  const returnDdRatio = s.max_drawdown_pct && s.total_return_pct != null
+    ? s.total_return_pct / Math.abs(s.max_drawdown_pct)
+    : null;
+  const avgTradesPerMonth = a.monthly_returns?.length > 0
+    ? s.trades / a.monthly_returns.length
+    : null;
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+      {/* ── Equity vs Buy & Hold comparison chart ─────────────────────── */}
+      {(result.equity?.length > 1 || candles.length > 1) && (
+        <EquityVsBenchmarkChart equity={result.equity ?? []} candles={candles} />
+      )}
+
+      {/* ── Return & efficiency cards ─────────────────────────────────── */}
       <KpiCard title="Final Equity"      value={fmtUsd(s.final_equity)} sub={`from ${fmtUsd(s.starting_capital)}`} />
       <KpiCard title="Total Return"      value={fmtPct(s.total_return_pct)} sub={fmtUsd(s.total_return_dollars)}
                positive={s.total_return_dollars >= 0} />
@@ -485,10 +689,17 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
       <KpiCard title="Sharpe (annualized)" value={fmtNum(s.sharpe)} sub="per-bar MTM equity returns" />
       <KpiCard title="Win Rate"          value={`${fmtNum(s.win_rate * 100)}%`} sub={`${fmtInt(s.wins)} W / ${fmtInt(s.losses)} L`} />
       <KpiCard title="Trades"            value={fmtInt(s.trades)} sub={`avg ${fmtUsd(s.avg_pnl_dollars)}`} />
+
+      {/* ── Risk cards ────────────────────────────────────────────────── */}
       <KpiCard title="Max Drawdown"      value={fmtPct(s.max_drawdown_pct, false)} sub={fmtUsd(s.max_drawdown_dollars)}
                positive={false} />
       <KpiCard title="Max DD Duration"   value={fmtBarsDuration(a.max_drawdown_duration_bars, result.timeframe)} sub="time underwater" />
       <KpiCard title="Exposure"          value={`${fmtNum(a.exposure_pct)}%`} sub="bars in position" />
+
+      {/* ── Drawdown curve ────────────────────────────────────────────── */}
+      {result.equity?.length > 1 && <DrawdownMiniChart equity={result.equity} />}
+
+      {/* ── Trade quality cards ───────────────────────────────────────── */}
       <KpiCard title="Best Trade"        value={a.best_trade ? fmtUsd(a.best_trade.pnl_dollars) : "—"}
                sub={a.best_trade ? `${a.best_trade.side} · ${fmtPct(a.best_trade.pnl_pct_equity ?? a.best_trade.pnl_pct)} of capital` : ""} positive />
       <KpiCard title="Worst Trade"       value={a.worst_trade ? fmtUsd(a.worst_trade.pnl_dollars) : "—"}
@@ -497,7 +708,31 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
       <KpiCard title="Gross Profit"      value={fmtUsd(s.gross_profit)} sub="sum of winning trades" positive />
       <KpiCard title="Gross Loss"        value={fmtUsd(-s.gross_loss)} sub="sum of losing trades" positive={false} />
       <KpiCard title="Commission"        value={fmtUsd(a.commission_dollars)} sub="total fees paid" />
+
+      {/* ── Activity & context cards ──────────────────────────────────── */}
       <KpiCard title="Trading Days"      value={fmtInt(a.trading_days)} sub="days with at least 1 trade" />
+      {dataYears != null && (
+        <KpiCard title="Data Period" value={`${fmtNum(dataYears)} yrs`}
+                 sub={`${fmtMonYear(s.first_time)} – ${fmtMonYear(s.last_time)}`} />
+      )}
+      {avgTradesPerMonth != null && (
+        <KpiCard title="Avg Trades / Month" value={fmtNum(avgTradesPerMonth)} sub="trading frequency" />
+      )}
+      {recoveryFactor != null && (
+        <KpiCard title="Recovery Factor" value={fmtNum(recoveryFactor)}
+                 sub="net profit ÷ max drawdown" positive={recoveryFactor >= 1} />
+      )}
+      {returnDdRatio != null && (
+        <KpiCard title="Return / DD Ratio" value={fmtNum(returnDdRatio)}
+                 sub="return % ÷ max drawdown %" positive={returnDdRatio >= 1} />
+      )}
+      {buyAndHoldPct != null && (
+        <KpiCard title="Buy &amp; Hold" value={fmtPct(buyAndHoldPct)}
+                 sub="passive hold same period" positive={buyAndHoldPct >= 0} />
+      )}
+
+      {/* ── Monthly P&L bars ──────────────────────────────────────────── */}
+      {a.monthly_returns?.length > 1 && <MonthlyMiniChart monthly={a.monthly_returns} />}
 
       <div className="lg:col-span-3 grid grid-cols-2 gap-4">
         <SidePanel title="Long" b={s.long} />
@@ -837,6 +1072,23 @@ function HeatmapTab({ result }) {
 function MonthlyTab({ result }) {
   const rows = result.analytics.monthly_returns || [];
   const max = Math.max(1, ...rows.map((r) => Math.abs(r.pnl_dollars)));
+  const startingCapital = result.stats?.starting_capital ?? result.risk_config?.starting_capital ?? 0;
+
+  // Annual P&L — group monthly_returns by year.
+  const annualRows = useMemo(() => {
+    if (!rows.length) return [];
+    const byYear = {};
+    rows.forEach((m) => {
+      const yr = (m.month ?? "").slice(0, 4);
+      if (!yr) return;
+      if (!byYear[yr]) byYear[yr] = { year: yr, pnl: 0, trades: 0, greenMonths: 0, total: 0 };
+      byYear[yr].pnl += m.pnl_dollars;
+      byYear[yr].trades += m.trades;
+      byYear[yr].greenMonths += m.pnl_dollars >= 0 ? 1 : 0;
+      byYear[yr].total += 1;
+    });
+    return Object.values(byYear).sort((a, b) => a.year.localeCompare(b.year));
+  }, [rows]);
 
   const insights = useMemo(() => {
     if (!rows.length) return null;
@@ -909,6 +1161,38 @@ function MonthlyTab({ result }) {
           })}
         </div>
       </div>
+
+      {annualRows.length > 0 && (
+        <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
+          <div className="px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-line">Annual P&amp;L</div>
+          <table className="w-full text-xs font-mono">
+            <thead>
+              <tr className="text-muted text-[10px] border-b border-line">
+                <th className="px-4 py-2 text-left font-normal">Year</th>
+                <th className="px-4 py-2 text-right font-normal">Net P&amp;L</th>
+                <th className="px-4 py-2 text-right font-normal">Return %</th>
+                <th className="px-4 py-2 text-right font-normal">Trades</th>
+                <th className="px-4 py-2 text-right font-normal">Green Months</th>
+              </tr>
+            </thead>
+            <tbody>
+              {annualRows.map((yr) => {
+                const pos = yr.pnl >= 0;
+                const retPct = startingCapital > 0 ? yr.pnl / startingCapital * 100 : null;
+                return (
+                  <tr key={yr.year} className="border-b border-line/50 hover:bg-bg-elev/30">
+                    <td className="px-4 py-1.5 text-muted">{yr.year}</td>
+                    <td className={`px-4 py-1.5 text-right ${pos ? "text-profit" : "text-loss"}`}>{fmtUsd(yr.pnl)}</td>
+                    <td className={`px-4 py-1.5 text-right ${pos ? "text-profit" : "text-loss"}`}>{retPct != null ? fmtPct(retPct) : "—"}</td>
+                    <td className="px-4 py-1.5 text-right">{fmtInt(yr.trades)}</td>
+                    <td className="px-4 py-1.5 text-right">{yr.greenMonths} / {yr.total}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -1465,6 +1749,12 @@ function TradeQualityTab({ result }) {
                    sub="optimal risk per trade"
                    positive={(kelly ?? 0) > 0} />
           <KpiCard title="Total trades" value={fmtInt(s.trades)} sub="sample size" />
+          <KpiCard title="SQN" value={ts.sqn != null ? fmtNum(ts.sqn) : "—"}
+                   sub="System Quality Number (Van Tharp)"
+                   positive={ts.sqn != null && ts.sqn >= 1.6} />
+          <KpiCard title="Geometric Mean Return" value={ts.geometric_mean_return_pct != null ? fmtPct(ts.geometric_mean_return_pct) : "—"}
+                   sub="per-trade compounded avg"
+                   positive={ts.geometric_mean_return_pct != null && ts.geometric_mean_return_pct >= 0} />
         </div>
       </Section>
 
@@ -1481,6 +1771,10 @@ function TradeQualityTab({ result }) {
           <KpiCard title="Worst trade"
                    value={a?.worst_trade ? fmtUsd(a.worst_trade.pnl_dollars) : "—"}
                    sub={a?.worst_trade ? `${fmtPct(a.worst_trade.pnl_pct_equity ?? a.worst_trade.pnl_pct)} of capital` : ""}
+                   positive={false} />
+          <KpiCard title="Max Consec. Loss ($)"
+                   value={ts.max_consec_loss_dollars != null ? fmtUsd(ts.max_consec_loss_dollars) : "—"}
+                   sub="dollar damage of worst loss streak"
                    positive={false} />
         </div>
       </Section>
@@ -1545,6 +1839,26 @@ function fmtDurationMin(mins) {
 
 function AdvancedTab({ result }) {
   const adv = result?.analytics?.advanced;
+
+  // Rolling 20-trade Sharpe and Win Rate — computed from the trades list.
+  const rolledMetrics = useMemo(() => {
+    const trades = [...(result?.trades ?? [])].sort((a, b) => a.exit_time - b.exit_time);
+    if (trades.length < 25) return null;
+    const W = 20;
+    const sharpePoints = [];
+    const winRatePoints = [];
+    for (let i = W; i <= trades.length; i++) {
+      const window = trades.slice(i - W, i);
+      const rets = window.map((t) => t.pnl_pct_equity ?? 0);
+      const mean = rets.reduce((a, b) => a + b, 0) / W;
+      const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (W - 1);
+      const std = Math.sqrt(variance);
+      sharpePoints.push({ i, value: std > 0 ? mean / std : 0 });
+      winRatePoints.push({ i, value: (window.filter((t) => t.win).length / W) * 100 });
+    }
+    return { sharpePoints, winRatePoints };
+  }, [result?.trades]);
+
   if (!adv) {
     return (
       <div className="rounded-xl border border-line bg-bg-panel/60 p-6 text-sm text-muted text-center">
@@ -1555,8 +1869,10 @@ function AdvancedTab({ result }) {
 
   const ra = adv.risk_adjusted || {};
   const dd = adv.drawdown || {};
+  const di = adv.distribution || {};
   const edge = adv.edge;
   const rob = adv.robustness;
+  const overallWinRate = (result?.stats?.win_rate ?? 0) * 100;
 
   return (
     <div className="space-y-4">
@@ -1582,6 +1898,19 @@ function AdvancedTab({ result }) {
                    sub="CAGR / Ulcer" positive={(dd.pain_ratio ?? 0) >= 0} />
         </div>
       </Section>
+
+      {/* Tail risk: VaR + CVaR */}
+      {(di.var_95_pct != null || di.cvar_95_pct != null) && (
+        <Section title="Tail Risk"
+                 hint="How bad does the worst 5% of trades look? VaR is the threshold; CVaR (Expected Shortfall) is the average of returns below it.">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <KpiCard title="VaR 95%" value={di.var_95_pct != null ? fmtPct(di.var_95_pct) : "—"}
+                     sub="5th-pct per-trade equity return" positive={false} />
+            <KpiCard title="CVaR 95%" value={di.cvar_95_pct != null ? fmtPct(di.cvar_95_pct) : "—"}
+                     sub="mean return below VaR (Exp. Shortfall)" positive={false} />
+          </div>
+        </Section>
+      )}
 
       {/* MAE / MFE edge analysis */}
       {edge && (
@@ -1625,6 +1954,80 @@ function AdvancedTab({ result }) {
           </div>
         </Section>
       )}
+
+      {/* Rolling Stability — 20-trade rolling Sharpe + Win Rate */}
+      {rolledMetrics && (
+        <Section title="Rolling Stability (20-trade window)"
+                 hint="Is the edge consistent over time, or concentrated in a few periods? Flat/rising lines suggest stable performance; large swings indicate regime sensitivity.">
+          <RollingMiniChart
+            label="Rolling Sharpe (per-trade)"
+            points={rolledMetrics.sharpePoints}
+            refLine={0}
+            colorPos="rgba(52,211,153,0.8)"
+            colorNeg="rgba(248,113,113,0.8)"
+            formatY={(v) => fmtNum(v)}
+          />
+          <RollingMiniChart
+            label={`Rolling Win Rate % (overall ${fmtNum(overallWinRate)}%)`}
+            points={rolledMetrics.winRatePoints}
+            refLine={overallWinRate}
+            colorPos="rgba(99,179,237,0.8)"
+            colorNeg="rgba(99,179,237,0.8)"
+            formatY={(v) => `${fmtNum(v)}%`}
+          />
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function RollingMiniChart({ label, points, refLine, colorPos, colorNeg, formatY }) {
+  const W = 480, H = 110;
+  const pad = { l: 42, r: 10, t: 8, b: 20 };
+  const iW = W - pad.l - pad.r;
+  const iH = H - pad.t - pad.b;
+
+  if (!points || points.length < 2) return null;
+
+  const vals = points.map((p) => p.value);
+  const yMin = Math.min(...vals, refLine) * (Math.min(...vals) < 0 ? 1.1 : 0.9);
+  const yMax = Math.max(...vals, refLine) * (Math.max(...vals) > 0 ? 1.1 : 0.9);
+  const yRange = yMax - yMin || 1;
+
+  const xOf = (i) => pad.l + ((i - points[0].i) / (points[points.length - 1].i - points[0].i || 1)) * iW;
+  const yOf = (v) => pad.t + (1 - (v - yMin) / yRange) * iH;
+
+  let path = "";
+  for (let k = 0; k < points.length; k++) {
+    path += (k === 0 ? "M" : "L") + xOf(points[k].i).toFixed(1) + "," + yOf(points[k].value).toFixed(1);
+  }
+
+  const refY = yOf(refLine).toFixed(1);
+
+  const yTicks = [yMin, (yMin + yMax) / 2, yMax];
+
+  return (
+    <div className="mt-3 rounded-lg border border-line/50 bg-bg-elev/30 p-3">
+      <div className="text-[10px] uppercase tracking-wider text-muted mb-1">{label}</div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full block" style={{ height: H }}>
+        {/* ref line */}
+        <line x1={pad.l} x2={W - pad.r} y1={refY} y2={refY}
+              stroke="rgba(255,255,255,0.15)" strokeWidth="1" strokeDasharray="4,3" />
+        {/* y ticks */}
+        {yTicks.map((v, i) => (
+          <text key={i} x={pad.l - 4} y={yOf(v) + 3.5}
+                textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">{formatY(v)}</text>
+        ))}
+        {/* x labels: first and last trade */}
+        <text x={pad.l} y={H - 4} textAnchor="start" fontSize="8" fill="rgba(150,150,170,0.7)">
+          trade {points[0].i}
+        </text>
+        <text x={W - pad.r} y={H - 4} textAnchor="end" fontSize="8" fill="rgba(150,150,170,0.7)">
+          trade {points[points.length - 1].i}
+        </text>
+        {/* line */}
+        <path d={path} fill="none" stroke={colorPos} strokeWidth="1.5" />
+      </svg>
     </div>
   );
 }

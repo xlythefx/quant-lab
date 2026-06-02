@@ -13,8 +13,10 @@ Both emit identical event shapes:
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -22,6 +24,8 @@ import pandas as pd
 
 from services import event_bus, market_data, risk_config, backtest_engine
 from services.strategies.base import Signal
+
+_LIVE_STATE_DIR = Path(__file__).parent.parent / "data" / "live_state"
 
 log = logging.getLogger(__name__)
 
@@ -274,6 +278,40 @@ class LiveRunner:
         self._trades = 0
         self._wins = 0
         self._open: Optional[dict] = None  # {side, entry_price, entry_time}
+        self._state_path = (
+            _LIVE_STATE_DIR / f"{strategy_id}_{symbol}_{timeframe}.json"
+        )
+        self._load_state()
+
+    def _load_state(self):
+        try:
+            if self._state_path.exists():
+                with open(self._state_path) as f:
+                    saved = json.load(f)
+                self._state  = saved.get("strategy_state", {})
+                self._equity = float(saved.get("equity", 100.0))
+                self._peak   = float(saved.get("peak",   100.0))
+                self._trades = int(saved.get("trades", 0))
+                self._wins   = int(saved.get("wins",   0))
+                self._open   = saved.get("open")
+                log.info("[%s] live state loaded from %s", self.strategy_id, self._state_path)
+        except Exception as e:
+            log.warning("[%s] failed to load live state: %s", self.strategy_id, e)
+
+    def _save_state(self):
+        try:
+            _LIVE_STATE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(self._state_path, "w") as f:
+                json.dump({
+                    "strategy_state": self._state,
+                    "equity": self._equity,
+                    "peak":   self._peak,
+                    "trades": self._trades,
+                    "wins":   self._wins,
+                    "open":   self._open,
+                }, f)
+        except Exception as e:
+            log.warning("[%s] failed to save live state: %s", self.strategy_id, e)
 
     def start(self):
         def listener(candle):
@@ -318,6 +356,7 @@ class LiveRunner:
             self.strategy_id, self.sid, ts, self._equity, dd,
             self._trades, self._wins, trade=trade_meta,
         )
+        self._save_state()
 
     def stop(self):
         if self._listener:

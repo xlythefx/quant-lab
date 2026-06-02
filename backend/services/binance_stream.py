@@ -23,18 +23,25 @@ from services.stream_base import CandleStream
 
 log = logging.getLogger(__name__)
 
+_MAX_RECONNECTS = 50
+_STABLE_MSG_THRESHOLD = 5   # consecutive good messages before backoff resets
+
 
 class BinanceKlineStream(CandleStream):
     def __init__(self, symbol: str, timeframe: str, on_update: Callable[[Dict], None]):
         super().__init__(symbol, timeframe, on_update)
         self._ws: WebSocketApp | None = None
         self._attempts = 0
+        self._stable_count = 0
 
     def _url(self) -> str:
         return f"{BINANCE_WS_BASE}/{self.symbol.lower()}@kline_{self.timeframe}"
 
     def _on_message(self, _ws, raw):
-        self._attempts = 0  # success -> reset backoff
+        self._stable_count += 1
+        if self._stable_count >= _STABLE_MSG_THRESHOLD:
+            self._attempts = 0   # proven stable — reset backoff counter
+            self._stable_count = 0
         try:
             payload = json.loads(raw)
             k = payload.get("k")
@@ -57,6 +64,7 @@ class BinanceKlineStream(CandleStream):
             log.exception("Failed to parse kline frame: %s", e)
 
     def _on_error(self, _ws, err):
+        self._stable_count = 0
         log.warning("[%s] ws error: %s", self._name(), err)
 
     def _on_close(self, _ws, code, reason):
@@ -75,6 +83,12 @@ class BinanceKlineStream(CandleStream):
 
     def _run(self):
         while not self._stop.is_set():
+            if self._attempts >= _MAX_RECONNECTS:
+                log.error("[%s] giving up after %d reconnect attempts", self._name(), _MAX_RECONNECTS)
+                self.on_update({"__stream_error": True,
+                                "message": f"Binance stream lost after {_MAX_RECONNECTS} reconnects"})
+                return
+
             try:
                 self._ws = WebSocketApp(
                     self._url(),
@@ -95,5 +109,6 @@ class BinanceKlineStream(CandleStream):
 
             self._attempts += 1
             delay = min(30, 2 ** min(self._attempts, 5))
-            log.info("[%s] reconnecting in %ds (attempt %d)", self._name(), delay, self._attempts)
+            log.info("[%s] reconnecting in %ds (attempt %d/%d)",
+                     self._name(), delay, self._attempts, _MAX_RECONNECTS)
             self._stop.wait(delay)

@@ -29,17 +29,18 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _serialize_candles(df: pd.DataFrame) -> list[dict]:
-    out = []
-    for row in df.itertuples(index=False):
-        out.append({
-            "time": int(row.time),
-            "open": float(row.open),
-            "high": float(row.high),
-            "low": float(row.low),
-            "close": float(row.close),
-            "volume": float(row.volume),
-        })
-    return out
+    sub = df[["time", "open", "high", "low", "close", "volume"]]
+    return [
+        {
+            "time": int(r["time"]),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+            "volume": float(r["volume"]),
+        }
+        for r in sub.to_dict(orient="records")
+    ]
 
 
 def _build_overlays(strategy, sig_df: pd.DataFrame, time_a) -> list[dict]:
@@ -167,6 +168,13 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     atr_a    = sig_df["atr"].to_numpy(dtype=float) if has_atr_stop else None
     atr_mult = float(strategy.p["atr_mult"]) if has_atr_stop else 0.0
 
+    # Exact-fill exits (Option B) — strategy exports pre-computed fill price for
+    # stop / target / breakeven exits. NaN = fall back to next-bar open as usual.
+    # Finite = fill at this level (gap-protection already baked in by the strategy).
+    has_exact_fills   = "exit_fill_long" in sig_df.columns and "exit_fill_short" in sig_df.columns
+    efl_a = sig_df["exit_fill_long"].to_numpy(dtype=float)  if has_exact_fills else None
+    efs_a = sig_df["exit_fill_short"].to_numpy(dtype=float) if has_exact_fills else None
+
     n = len(sig_df)
 
     tranches_long: list[dict]  = []
@@ -201,7 +209,11 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 if has_atr_stop and np.isfinite(tr["atr_at_entry"]):
                     stop_hit = prev_close <= tr["entry_price"] - atr_mult * tr["atr_at_entry"]
                 if mean_revert or stop_hit:
-                    fill = op * (1.0 - slippage)
+                    # Option-B: use exact fill level when strategy provides it.
+                    if has_exact_fills and mean_revert and np.isfinite(efl_a[t - 1]):
+                        fill = efl_a[t - 1] * (1.0 - slippage)
+                    else:
+                        fill = op * (1.0 - slippage)
                     notional_close = abs(fill * tr["units"])
                     fee_close = fee_flat + notional_close * fee_pct
                     pnl = (fill - tr["entry_price"]) * tr["units"] - fee_close
@@ -223,7 +235,11 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 if has_atr_stop and np.isfinite(tr["atr_at_entry"]):
                     stop_hit = prev_close >= tr["entry_price"] + atr_mult * tr["atr_at_entry"]
                 if mean_revert or stop_hit:
-                    fill = op * (1.0 + slippage)
+                    # Option-B: use exact fill level when strategy provides it.
+                    if has_exact_fills and mean_revert and np.isfinite(efs_a[t - 1]):
+                        fill = efs_a[t - 1] * (1.0 + slippage)
+                    else:
+                        fill = op * (1.0 + slippage)
                     notional_close = abs(fill * tr["units"])
                     fee_close = fee_flat + notional_close * fee_pct
                     pnl = (tr["entry_price"] - fill) * tr["units"] - fee_close
@@ -601,15 +617,10 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
         hi = float(arr.max())
         if hi <= lo:
             hi = lo + 1e-6
-        bins = 20
-        step = (hi - lo) / bins
-        counts = [0] * bins
-        for v in arr:
-            idx = min(bins - 1, max(0, int((v - lo) / step)))
-            counts[idx] += 1
+        counts, edges = np.histogram(arr, bins=20, range=(lo, hi))
         distribution = [
-            {"bin_lo": lo + i * step, "bin_hi": lo + (i + 1) * step, "count": counts[i]}
-            for i in range(bins)
+            {"bin_lo": float(edges[i]), "bin_hi": float(edges[i + 1]), "count": int(counts[i])}
+            for i in range(len(counts))
         ]
 
     # ---- duration distribution (in minutes, 12 bins)
@@ -620,15 +631,10 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
         hi = float(arr.max())
         if hi <= lo:
             hi = lo + 1
-        bins = 12
-        step = (hi - lo) / bins
-        counts = [0] * bins
-        for v in arr:
-            idx = min(bins - 1, max(0, int((v - lo) / step)))
-            counts[idx] += 1
+        counts, edges = np.histogram(arr, bins=12, range=(lo, hi))
         duration_dist = [
-            {"bin_lo": lo + i * step, "bin_hi": lo + (i + 1) * step, "count": counts[i]}
-            for i in range(bins)
+            {"bin_lo": float(edges[i]), "bin_hi": float(edges[i + 1]), "count": int(counts[i])}
+            for i in range(len(counts))
         ]
 
     # ---- best / worst single trade

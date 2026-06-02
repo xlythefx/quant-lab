@@ -31,7 +31,7 @@ socket.io.on("reconnect", () => {
  * onUpdate receives the full candle payload:
  *   {time, open, high, low, close, volume, isClosed, mode, symbol, timeframe}
  */
-export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_time, end_time, loop }, onUpdate) {
+export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_time, end_time, loop }, onUpdate, onError) {
   // Tear down any prior subscription first so we never run two streams.
   if (activeSub) {
     socket.emit("unsubscribe", activeSub);
@@ -51,7 +51,13 @@ export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_ti
     }
   };
 
+  const errorHandler = (err) => {
+    console.error("[socket] stream_error", err);
+    if (onError) onError(err?.message || "Stream failed to load");
+  };
+
   socket.on("candle_update", handler);
+  socket.on("stream_error", errorHandler);
 
   if (socket.connected) {
     socket.emit("subscribe", activeSub);
@@ -63,6 +69,7 @@ export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_ti
 
   return () => {
     socket.off("candle_update", handler);
+    socket.off("stream_error", errorHandler);
     if (
       activeSub &&
       activeSub.mode === mode &&

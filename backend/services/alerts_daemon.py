@@ -22,8 +22,8 @@ log = logging.getLogger(__name__)
 _lock = Lock()
 _socket_manager = None
 
-# Active headless runners keyed by (strategy_id, symbol, timeframe).
-_runners: dict[tuple, "_HeadlessRunner"] = {}
+# Active headless runners keyed by rule name (unique per rule).
+_runners: dict[str, "_HeadlessRunner"] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -31,24 +31,25 @@ _runners: dict[tuple, "_HeadlessRunner"] = {}
 class _HeadlessRunner:
     """Minimal live runner — no sid, no Socket.IO emissions, just dispatch."""
 
-    def __init__(self, strategy_id: str, symbol: str, timeframe: str, socket_manager):
-        self.strategy_id = strategy_id
-        self.symbol = symbol
-        self.timeframe = timeframe
+    def __init__(self, rule: dict, socket_manager):
+        self.rule = rule
+        self.strategy_id = rule["strategy_id"]
+        self.symbol = rule["symbol"]
+        self.timeframe = rule["timeframe"]
         self._sm = socket_manager
         self._state: dict = {}
         self._listener = None
 
-        cls = get_strategy_class(strategy_id)
-        self.strategy = cls({})
+        cls = get_strategy_class(self.strategy_id)
+        self.strategy = cls(rule.get("params") or {})
 
     def start(self):
         def listener(candle):
             self._on_candle(candle)
         self._listener = listener
         self._sm.add_listener("live", self.symbol, self.timeframe, self._listener)
-        log.info("[alerts_daemon] started headless runner %s/%s/%s",
-                 self.strategy_id, self.symbol, self.timeframe)
+        log.info("[alerts_daemon] started headless runner %s/%s/%s (rule=%s)",
+                 self.strategy_id, self.symbol, self.timeframe, self.rule["name"])
 
     def _on_candle(self, candle):
         if not bool(candle.get("isClosed", False)):
@@ -56,63 +57,61 @@ class _HeadlessRunner:
         try:
             sig = self.strategy.on_candle(candle, self._state)
         except Exception:
-            log.exception("[alerts_daemon] on_candle error %s/%s",
-                          self.strategy_id, self.symbol)
+            log.exception("[alerts_daemon] on_candle error %s/%s (rule=%s)",
+                          self.strategy_id, self.symbol, self.rule["name"])
             return
         if sig is None:
             return
-        live_alerter.dispatch(self.strategy_id, self.symbol, sig)
+        live_alerter.dispatch_for_rule(self.rule, self.symbol, sig)
 
     def stop(self):
         if self._listener:
             self._sm.remove_listener("live", self.symbol, self.timeframe, self._listener)
             self._listener = None
-        log.info("[alerts_daemon] stopped headless runner %s/%s/%s",
-                 self.strategy_id, self.symbol, self.timeframe)
+        log.info("[alerts_daemon] stopped headless runner %s/%s/%s (rule=%s)",
+                 self.strategy_id, self.symbol, self.timeframe, self.rule["name"])
 
 
 # ---------------------------------------------------------------------------
 
-def _wanted_keys() -> set[tuple]:
-    """Return the set of (strategy_id, symbol, timeframe) for all enabled rules."""
+def _wanted_rules() -> dict[str, dict]:
+    """Return {rule_name: rule} for all enabled rules that have a timeframe."""
     rules = live_alerts_config.load_rules()
-    keys = set()
-    for r in rules:
-        if not r.get("enabled"):
-            continue
-        tf = r.get("timeframe", "").strip()
-        if not tf:
-            continue
-        keys.add((r["strategy_id"], r["symbol"], tf))
-    return keys
+    return {
+        r["name"]: r
+        for r in rules
+        if r.get("enabled") and r.get("timeframe", "").strip()
+    }
 
 
 def refresh():
     """Reconcile running headless runners against the current enabled rules.
     Safe to call from any thread (e.g. after saving rules via the UI).
+    Restarts a runner when its params change so the new config takes effect.
     """
     if _socket_manager is None:
         return
-    wanted = _wanted_keys()
+    wanted = _wanted_rules()
 
     with _lock:
         # Stop runners no longer needed.
-        for key in list(_runners):
-            if key not in wanted:
-                _runners.pop(key).stop()
+        for name in list(_runners):
+            if name not in wanted:
+                _runners.pop(name).stop()
 
-        # Start runners for new keys.
-        for key in wanted:
-            if key in _runners:
-                continue
-            strategy_id, symbol, timeframe = key
+        # Start runners for new/changed rules.
+        for name, rule in wanted.items():
+            if name in _runners:
+                # Restart if params changed so the strategy picks up the new config.
+                if _runners[name].rule.get("params") == rule.get("params"):
+                    continue
+                _runners.pop(name).stop()
             try:
-                runner = _HeadlessRunner(strategy_id, symbol, timeframe, _socket_manager)
+                runner = _HeadlessRunner(rule, _socket_manager)
                 runner.start()
-                _runners[key] = runner
+                _runners[name] = runner
             except Exception:
-                log.exception("[alerts_daemon] failed to start runner %s/%s/%s",
-                              strategy_id, symbol, timeframe)
+                log.exception("[alerts_daemon] failed to start runner for rule %s", name)
 
 
 def start(socket_manager):

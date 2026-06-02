@@ -102,21 +102,28 @@ def _emit_dispatched(strategy_id: str, symbol: str, action: str, *,
 
 def _post(url: str, payload: dict, *, strategy_id: str, symbol: str,
           action: str, rule_name: str):
-    try:
-        r = httpx.post(url, json=payload, timeout=_TIMEOUT_SECONDS)
-        ok = 200 <= r.status_code < 300
-        log.info("live_alert [%s] %s %s → %s (status=%d secret=%s)",
-                 rule_name, strategy_id, action, url, r.status_code,
-                 _redact(payload.get("secret", "")))
-        _emit_dispatched(strategy_id, symbol, action, ok=ok,
-                         status_code=r.status_code,
-                         error=None if ok else (r.text[:200] or None),
-                         url=url, rule_name=rule_name)
-    except Exception as e:
-        log.warning("live_alert FAIL [%s] %s %s → %s: %s",
-                    rule_name, strategy_id, action, url, e)
-        _emit_dispatched(strategy_id, symbol, action, ok=False,
-                         error=str(e), url=url, rule_name=rule_name)
+    last_err: str | None = None
+    for attempt in range(3):
+        try:
+            r = httpx.post(url, json=payload, timeout=_TIMEOUT_SECONDS)
+            if 200 <= r.status_code < 300:
+                log.info("live_alert [%s] %s %s → %s (status=%d secret=%s)",
+                         rule_name, strategy_id, action, url, r.status_code,
+                         _redact(payload.get("secret", "")))
+                _emit_dispatched(strategy_id, symbol, action, ok=True,
+                                 status_code=r.status_code, url=url, rule_name=rule_name)
+                return
+            last_err = f"HTTP {r.status_code}: {r.text[:2000]}" if r.text else f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+            log.warning("live_alert [%s] attempt %d failed: %s", rule_name, attempt + 1, e)
+        if attempt < 2:
+            time.sleep(2 ** attempt)   # 1s, 2s backoff before retry
+
+    log.warning("live_alert FAIL [%s] %s %s → %s: %s (all retries exhausted)",
+                rule_name, strategy_id, action, url, last_err)
+    _emit_dispatched(strategy_id, symbol, action, ok=False,
+                     error=last_err, url=url, rule_name=rule_name)
 
 
 def dispatch(strategy_id: str, symbol: str, sig: Signal) -> None:
@@ -132,6 +139,14 @@ def dispatch(strategy_id: str, symbol: str, sig: Signal) -> None:
         return
 
     for rule in enabled:
+        if rule.get("broker") == "tradestation" and not rule.get("payload_template"):
+            log.warning(
+                "live_alert [%s]: rule targets a TradeStation/futures symbol (%s) "
+                "but has no payload_template — the default Binance payload shape "
+                "will likely be rejected by your ES broker endpoint. "
+                "Add a payload_template in the Live Alerts config.",
+                rule["name"], symbol,
+            )
         payload = build_payload(rule, action, symbol)
         threading.Thread(
             target=_post,
@@ -140,6 +155,32 @@ def dispatch(strategy_id: str, symbol: str, sig: Signal) -> None:
                     "action": action, "rule_name": rule["name"]},
             daemon=True,
         ).start()
+
+
+def dispatch_for_rule(rule: dict, symbol: str, sig: Signal) -> None:
+    """Fire for one specific rule only. Used by _HeadlessRunner (per-rule runners)."""
+    action = action_for(sig)
+    if action is None:
+        log.warning("live_alert skipped: no action mapping for side=%s kind=%s (rule=%s)",
+                    sig.side, sig.kind, rule.get("name"))
+        return
+    if not rule.get("enabled"):
+        return
+    if rule.get("broker") == "tradestation" and not rule.get("payload_template"):
+        log.warning(
+            "live_alert [%s]: rule targets a TradeStation/futures symbol (%s) "
+            "but has no payload_template — the default Binance payload shape "
+            "will likely be rejected by your ES broker endpoint.",
+            rule["name"], symbol,
+        )
+    payload = build_payload(rule, action, symbol)
+    threading.Thread(
+        target=_post,
+        args=(rule["webhook_url"], payload),
+        kwargs={"strategy_id": rule["strategy_id"], "symbol": symbol,
+                "action": action, "rule_name": rule["name"]},
+        daemon=True,
+    ).start()
 
 
 _VALID_ACTIONS = frozenset(_ACTION_MAP.values())

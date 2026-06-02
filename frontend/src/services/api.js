@@ -29,7 +29,9 @@ export async function getBacktestSeed({ symbol, timeframe, limit = 1500 }) {
 }
 
 export async function prepareBacktest({ symbol, timeframe }) {
-  const { data } = await api.post("/api/backtest/prepare", { symbol, timeframe });
+  const { data } = await api.post("/api/backtest/prepare", { symbol, timeframe }, {
+    timeout: 900_000, // 1m downloads can take several minutes on cold cache
+  });
   return data;
 }
 
@@ -89,7 +91,7 @@ export async function getStrategies() {
 export async function runBacktest({ strategy_id, symbol, timeframe, params, start_time, end_time }) {
   const { data } = await api.post("/api/strategies/run", {
     strategy_id, symbol, timeframe, params, start_time, end_time,
-  });
+  }, { timeout: 900_000 });
   return data;
 }
 
@@ -103,7 +105,7 @@ export async function runBacktest({ strategy_id, symbol, timeframe, params, star
 export async function runPortfolioBacktest({ strategies, start_time, end_time }) {
   const { data } = await api.post("/api/backtest/portfolio", {
     strategies, start_time, end_time,
-  });
+  }, { timeout: 900_000 });
   return data;
 }
 

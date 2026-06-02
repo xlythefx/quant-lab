@@ -690,15 +690,37 @@ function OverviewTab({ result }) {
     ? { [result.strategy_id]: equityPts, __bh__: bhPts }
     : { [result.strategy_id]: equityPts };
 
+  function exportJson() {
+    const name = `wf_${result.strategy_id}_${result.symbol}_${result.timeframe}.json`;
+    const a = Object.assign(document.createElement("a"), {
+      href: URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], { type: "application/json" })),
+      download: name,
+    });
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
   return (
     <section className="space-y-4">
-      <div className="text-[11px] uppercase tracking-wider text-muted">
-        Walk-Forward Result · {windows.length} window{windows.length === 1 ? "" : "s"}
-        {result.wf_spec && (
-          <> · IS={result.wf_spec.is_bars}b OOS={result.wf_spec.oos_bars}b · metric={result.wf_spec.metric}</>
-        )}
-        {result.wf_spec?.embargo_bars > 0 && <> · embargo={result.wf_spec.embargo_bars}</>}
-        {result.wf_spec?.purge_radius > 0 && <> · purge={result.wf_spec.purge_radius}</>}
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-muted">
+          Walk-Forward Result · {windows.length} window{windows.length === 1 ? "" : "s"}
+          {result.wf_spec && (
+            <> · IS={result.wf_spec.is_bars}b OOS={result.wf_spec.oos_bars}b · metric={result.wf_spec.metric}</>
+          )}
+          {result.wf_spec?.embargo_bars > 0 && <> · embargo={result.wf_spec.embargo_bars}</>}
+          {result.wf_spec?.purge_radius > 0 && <> · purge={result.wf_spec.purge_radius}</>}
+        </div>
+        <button
+          onClick={exportJson}
+          className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md border border-line text-muted hover:text-text hover:border-accent-blue transition"
+          title="Export full result as JSON"
+        >
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          JSON
+        </button>
       </div>
 
       <WFVerdict result={result} />
@@ -2035,7 +2057,6 @@ function AITab({ result }) {
 // ---------------------------------------------------------------------------
 
 function WFChatSidebar({ open, onClose, result }) {
-  if (!open) return null;
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -2074,7 +2095,7 @@ function WFChatSidebar({ open, onClose, result }) {
   };
 
   return (
-    <aside className="fixed right-0 top-0 bottom-0 w-80 z-40 border-l border-line flex flex-col bg-bg-panel shadow-2xl">
+    <aside className={`fixed right-0 top-0 bottom-0 w-80 z-40 border-l border-line flex flex-col bg-bg-panel shadow-2xl transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] ${open ? "translate-x-0" : "translate-x-full pointer-events-none"}`}>
       <div className="px-4 py-3 border-b border-line flex items-center justify-between">
         <div>
           <div className="text-xs font-semibold text-text">Assistant</div>

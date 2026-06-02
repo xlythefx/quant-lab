@@ -121,7 +121,7 @@ export default function SymbolSelector({ value, options = [], datasets, onChange
         </div>
       )}
 
-      {/* Symbol buttons — filtered to the active asset class. */}
+      {/* Symbol dropdown — filtered to the active asset class. */}
       <div className="flex items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-muted">Symbol</span>
         {symbolsForClass.length === 0 ? (
@@ -130,21 +130,16 @@ export default function SymbolSelector({ value, options = [], datasets, onChange
             <a href="#downloads" className="text-accent-blue hover:underline">download one</a>
           </span>
         ) : (
-          <div className="flex gap-1 p-1 rounded-lg border border-line bg-bg-panel max-w-[60vw] overflow-x-auto">
+          <select
+            value={value || ""}
+            onChange={(e) => onChange(e.target.value)}
+            className="px-2.5 py-1.5 text-sm font-mono rounded-md border border-line bg-bg-panel text-text hover:bg-bg-elev focus:outline-none focus:border-accent-blue cursor-pointer"
+          >
+            {!value && <option value="">— pick —</option>}
             {symbolsForClass.map((s) => (
-              <button
-                key={s}
-                onClick={() => onChange(s)}
-                className={`px-3 py-1.5 text-sm font-mono rounded-md transition whitespace-nowrap ${
-                  value === s
-                    ? "bg-accent-grad text-white"
-                    : "text-muted hover:text-text"
-                }`}
-              >
-                {s}
-              </button>
+              <option key={s} value={s}>{s}</option>
             ))}
-          </div>
+          </select>
         )}
       </div>
     </div>
@@ -160,21 +155,16 @@ function FlatSelector({ value, options, onChange }) {
           no datasets — <a href="#downloads" className="text-accent-blue hover:underline">download one</a>
         </span>
       ) : (
-        <div className="flex gap-1 p-1 rounded-lg border border-line bg-bg-panel max-w-[60vw] overflow-x-auto">
+        <select
+          value={value || ""}
+          onChange={(e) => onChange(e.target.value)}
+          className="px-2.5 py-1.5 text-sm font-mono rounded-md border border-line bg-bg-panel text-text hover:bg-bg-elev focus:outline-none focus:border-accent-blue cursor-pointer"
+        >
+          {!value && <option value="">— pick —</option>}
           {options.map((s) => (
-            <button
-              key={s}
-              onClick={() => onChange(s)}
-              className={`px-3 py-1.5 text-sm font-mono rounded-md transition whitespace-nowrap ${
-                value === s
-                  ? "bg-accent-grad text-white"
-                  : "text-muted hover:text-text"
-              }`}
-            >
-              {s}
-            </button>
+            <option key={s} value={s}>{s}</option>
           ))}
-        </div>
+        </select>
       )}
     </div>
   );

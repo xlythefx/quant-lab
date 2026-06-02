@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { socket } from "../services/socket.js";
 import LiveClock from "./LiveClock.jsx";
+import { logout } from "../services/auth.js";
 
 export default function Navbar({ view = "dashboard", mode, onModeChange }) {
   const [connected, setConnected] = useState(socket.connected);
@@ -28,8 +29,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
 
         <div className="flex items-center gap-1 ml-4">
           <NavLink href="#dashboard"  active={view === "dashboard"}>Dashboard</NavLink>
-          <NavLink href="#analytics"   active={view === "analytics"}>Analytics</NavLink>
-          <NavLink href="#walkforward" active={view === "walkforward"}>Walk-Forward</NavLink>
+<NavLink href="#walkforward" active={view === "walkforward"}>Walk-Forward</NavLink>
           <NavLink href="#gridsearch"  active={view === "gridsearch"}>Grid Search</NavLink>
           <NavLink href="#montecarlo"  active={view === "montecarlo"}>Monte Carlo</NavLink>
           <NavLink href="#costsweep"   active={view === "costsweep"}>Cost Sweep</NavLink>
@@ -52,6 +52,12 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
           />
           {connected ? "live socket" : "disconnected"}
         </div>
+        <button
+          onClick={() => { logout(); window.location.hash = "#landing"; }}
+          className="px-3 py-1 rounded-md border border-line text-muted hover:text-loss hover:border-loss/50 text-xs transition"
+        >
+          Sign Out
+        </button>
       </div>
     </nav>
   );

@@ -195,6 +195,7 @@ def ensure_parquet(symbol: str, timeframe: str, force: bool = False) -> Dict:
     df = df[["time", "open", "high", "low", "close", "volume"]]
 
     df.to_parquet(path, index=False)
+    _invalidate_datasets_cache()
     log.info("Wrote %d rows to %s", len(df), path)
     return {"cached": False, "rows": len(df), "path": path}
 
@@ -291,6 +292,7 @@ def download_range(
 
     merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
     merged.to_parquet(path, index=False)
+    _invalidate_datasets_cache()
 
     return {
         "rows_added": int(len(merged) - rows_before),
@@ -301,6 +303,16 @@ def download_range(
     }
 
 
+_datasets_cache: dict | None = None
+_datasets_cache_ts: float = 0.0
+_DATASETS_CACHE_TTL = 30.0   # seconds
+
+
+def _invalidate_datasets_cache() -> None:
+    global _datasets_cache
+    _datasets_cache = None
+
+
 def list_datasets() -> List[Dict]:
     """Scan data/{broker}/ subdirs for *.parquet files and return metadata
     for each, enriched with asset_class / execution_model / etc. from
@@ -309,8 +321,15 @@ def list_datasets() -> List[Dict]:
     Skips empty/corrupt files so the dashboard never lists something the
     seed endpoint can't actually serve. Returned rows always include
     `broker` and `asset_class` keys (Stage 1 of the multi-asset roadmap)."""
+    global _datasets_cache, _datasets_cache_ts
+    now = time.time()
+    if _datasets_cache is not None and (now - _datasets_cache_ts) < _DATASETS_CACHE_TTL:
+        return list(_datasets_cache)
+
     out = []
     if not os.path.isdir(DATA_DIR):
+        _datasets_cache = out
+        _datasets_cache_ts = now
         return out
     # Each subdirectory of data/ that's not "assets" is treated as a broker.
     broker_dirs = []
@@ -353,13 +372,17 @@ def list_datasets() -> List[Dict]:
                 })
             except Exception as e:
                 log.warning("could not read %s: %s", path, e)
-    return out
+
+    _datasets_cache = out
+    _datasets_cache_ts = time.time()
+    return list(out)
 
 
 def delete_dataset(symbol: str, timeframe: str, broker: str = BROKER_DEFAULT) -> bool:
     path = parquet_path(symbol, timeframe, broker)
     if os.path.exists(path):
         os.remove(path)
+        _invalidate_datasets_cache()
         return True
     return False
 
@@ -589,6 +612,7 @@ def import_csv_tradestation(
 
         merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
         merged.to_parquet(path, index=False)
+        _invalidate_datasets_cache()
         log.info("import_csv: wrote %s %s → %d rows (added %d)", symbol, tf, len(merged), len(merged) - rows_before)
 
         results.append({

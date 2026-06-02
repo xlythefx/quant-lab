@@ -35,10 +35,20 @@ _PATH = os.path.join(DATA_DIR, "live_alerts.json")
 _LOCK = Lock()
 
 _REQUIRED = ("name", "strategy_id", "symbol", "timeframe", "webhook_url", "secret", "strategy_alias")
+_VALID_BROKERS = ("binance", "tradestation")
 _cache: list[dict] | None = None
 
 # Tokens available in a custom payload_template JSON string.
 PAYLOAD_TOKENS = ("action", "symbol", "secret", "strategy", "leverage")
+
+
+def _auto_broker(symbol: str) -> str:
+    """Detect whether a symbol is Binance or TradeStation based on the asset list."""
+    try:
+        from services.market_data import is_binance_symbol
+        return "binance" if is_binance_symbol(symbol) else "tradestation"
+    except Exception:
+        return "binance"
 
 
 def _coerce_payload_template(v) -> str | None:
@@ -77,7 +87,13 @@ def _coerce_rule(r: dict, *, fallback_index: int = 0) -> dict | None:
         "strategy_alias":   str(r.get("strategy_alias") or "").strip(),
         "leverage":         _to_int(r.get("leverage"), default=1, lo=1, hi=125),
         "payload_template": _coerce_payload_template(r.get("payload_template")),
+        # broker is auto-detected from symbol if not explicitly set
+        "broker":           str(r.get("broker") or _auto_broker(symbol)).lower(),
+        # optional per-rule strategy param overrides; Strategy._merge_with_defaults handles coercion
+        "params":           dict(r.get("params") or {}),
     }
+    if out["broker"] not in _VALID_BROKERS:
+        out["broker"] = _auto_broker(symbol)
     for k in _REQUIRED:
         if not out[k]:
             return None

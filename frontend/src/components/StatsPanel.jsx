@@ -1,5 +1,12 @@
 import { fmtUsd, fmtPct, fmtNum, fmtInt } from "../services/format.js";
 
+function fmtDate(epochSec) {
+  if (epochSec == null) return "—";
+  return new Date(epochSec * 1000).toLocaleDateString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric",
+  });
+}
+
 /**
  * Insights table — one row per active strategy.
  */
@@ -27,11 +34,13 @@ export default function StatsPanel({ strategies, statsById }) {
               <th className="text-right px-3 py-2 border-l border-line/40">Short PnL</th>
               <th className="text-right px-3 py-2">Short #</th>
               <th className="text-right px-3 py-2">Short W%</th>
+              <th className="text-right px-3 py-2 border-l border-line/40">Data From</th>
+              <th className="text-right px-3 py-2">Data To</th>
             </tr>
           </thead>
           <tbody>
             {strategies.length === 0 && (
-              <tr><td colSpan={14} className="px-3 py-4 text-center text-muted">no active strategies</td></tr>
+              <tr><td colSpan={16} className="px-3 py-4 text-center text-muted">no active strategies</td></tr>
             )}
             {strategies.map((s) => {
               const st = statsById[s.id] || {};
@@ -52,9 +61,9 @@ export default function StatsPanel({ strategies, statsById }) {
                   <td className="px-3 py-2 text-right">{st.profit_factor != null ? fmtNum(st.profit_factor) : "∞"}</td>
                   <td className="px-3 py-2 text-right">{fmtNum(st.sharpe)}</td>
                   <td className="px-3 py-2 text-right text-loss" title="Top line: % of starting capital. Bottom line: % of running peak equity (TradingView convention).">
-                    {st.max_drawdown_pct != null ? `${fmtNum(st.max_drawdown_pct)}%` : "—"}
+                    {st.max_drawdown_pct != null ? `${fmtNum(Math.abs(st.max_drawdown_pct))}%` : "—"}
                     {st.max_drawdown_pct_peak != null && (
-                      <div className="text-[10px] text-muted/80 font-mono">peak {fmtNum(st.max_drawdown_pct_peak)}%</div>
+                      <div className="text-[10px] text-muted/80 font-mono">peak {fmtNum(Math.abs(st.max_drawdown_pct_peak))}%</div>
                     )}
                   </td>
                   <td className={`px-3 py-2 text-right border-l border-line/40 ${longPnl == null ? "text-muted" : longPnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(longPnl)}</td>
@@ -63,6 +72,8 @@ export default function StatsPanel({ strategies, statsById }) {
                   <td className={`px-3 py-2 text-right border-l border-line/40 ${shortPnl == null ? "text-muted" : shortPnl >= 0 ? "text-profit" : "text-loss"}`}>{fmtUsd(shortPnl)}</td>
                   <td className="px-3 py-2 text-right">{fmtInt(st.short?.trades)}</td>
                   <td className="px-3 py-2 text-right">{st.short?.win_rate != null ? `${fmtNum(st.short.win_rate * 100)}%` : "—"}</td>
+                  <td className="px-3 py-2 text-right text-muted border-l border-line/40 whitespace-nowrap">{fmtDate(st.first_time)}</td>
+                  <td className="px-3 py-2 text-right text-muted whitespace-nowrap">{fmtDate(st.last_time)}</td>
                 </tr>
               );
             })}

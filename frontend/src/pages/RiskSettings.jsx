@@ -13,6 +13,13 @@ import {
 } from "../services/lastResultStore.js";
 import { TZ_PRESETS, getTz, setTz, convertUtcHHmm } from "../services/timezone.js";
 
+const RISK_DEFAULTS = {
+  starting_capital: 100000,
+  fee_flat:         0.0,
+  fee_pct:          0.04,
+  slippage_bps:     1.0,
+};
+
 const FIELDS = [
   { key: "starting_capital", label: "Starting Capital",     unit: "$",   step: 1000, min: 1,
     hint: "Same baseline applied to every backtest." },
@@ -99,6 +106,14 @@ export default function RiskSettings() {
             className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50"
           >
             {busy ? "Saving…" : "Save"}
+          </button>
+          <button
+            onClick={() => setCfg((c) => ({ ...c, ...RISK_DEFAULTS }))}
+            disabled={busy}
+            className="px-4 py-2 rounded-md border border-line text-muted text-sm hover:text-text hover:border-accent-blue disabled:opacity-50 transition"
+            title="Reset to factory defaults (does not save until you click Save)"
+          >
+            Reset to defaults
           </button>
           {savedAt && (
             <span className="text-xs text-muted">

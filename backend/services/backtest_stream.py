@@ -60,10 +60,12 @@ class BacktestStream(CandleStream):
             df = load_parquet(self.symbol, self.timeframe)
         except Exception as e:
             log.exception("[%s] failed to load parquet: %s", self._name(), e)
+            self.on_update({"__stream_error": True, "message": str(e)})
             return
 
         if df.empty:
             log.warning("[%s] empty parquet, nothing to replay", self._name())
+            self.on_update({"__stream_error": True, "message": f"No data for {self.symbol}/{self.timeframe}"})
             return
 
         rows = df.to_dict(orient="records")

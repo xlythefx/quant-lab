@@ -9,10 +9,15 @@ import GridSearch from "./pages/GridSearch.jsx";
 import MonteCarlo from "./pages/MonteCarlo.jsx";
 import CostSweep from "./pages/CostSweep.jsx";
 import LiveAlerts from "./pages/LiveAlerts.jsx";
+import Landing from "./pages/Landing.jsx";
+import Login from "./pages/Login.jsx";
+import { isAuthenticated } from "./services/auth.js";
+
+const PUBLIC = new Set(["", "landing", "login"]);
 
 function getView() {
   // Hash like "#analytics?key=..." → strip query and route by base name.
-  const raw = window.location.hash.replace("#", "") || "dashboard";
+  const raw = window.location.hash.replace("#", "") || "";
   return raw.split("?")[0];
 }
 
@@ -25,14 +30,37 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  if (view === "downloads")  return <Downloads />;
-  if (view === "strategies") return <Strategies />;
-  if (view === "settings")   return <RiskSettings />;
-  if (view === "analytics")  return <Analytics />;
-  if (view === "walkforward") return <WalkForward />;
-  if (view === "gridsearch")  return <GridSearch />;
-  if (view === "montecarlo")  return <MonteCarlo />;
-  if (view === "costsweep")   return <CostSweep />;
-  if (view === "livealerts")  return <LiveAlerts />;
-  return <Dashboard />;
+  const authed = isAuthenticated();
+
+  // Unauthenticated user trying to reach a protected route → login.
+  if (!authed && !PUBLIC.has(view)) {
+    window.location.hash = "#login";
+    return <Login />;
+  }
+
+  // Authenticated user landing on public pages → go to dashboard.
+  if (authed && PUBLIC.has(view)) {
+    window.location.hash = "#dashboard";
+    return null;
+  }
+
+  if (view === "landing") return <Landing />;
+  if (view === "login")   return <Login />;
+  if (view === "downloads")   return <Downloads />;
+  if (view === "strategies")  return <Strategies />;
+  if (view === "settings")    return <RiskSettings />;
+  if (view === "analytics")   return <Analytics />;
+  if (view === "walkforward")  return <WalkForward />;
+  if (view === "gridsearch")   return <GridSearch />;
+  if (view === "montecarlo")   return <MonteCarlo />;
+  if (view === "costsweep")    return <CostSweep />;
+  if (view === "livealerts")   return <LiveAlerts />;
+
+  // Dashboard — page-enter fades it in; ripple overlay bursts on mount
+  return (
+    <div key="dashboard" className="page-enter" style={{ height: "100%", minHeight: "100vh" }}>
+      <div className="page-ripple-overlay" aria-hidden="true" />
+      <Dashboard />
+    </div>
+  );
 }

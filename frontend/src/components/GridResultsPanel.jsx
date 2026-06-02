@@ -23,6 +23,32 @@ const METRIC_COLUMNS = [
 
 const CHART_METRICS = METRIC_COLUMNS;
 
+function exportCsv(rows, gridParams) {
+  const colHeaders = METRIC_COLUMNS.map((c) => c.label);
+  const headers = ["#", ...gridParams.map((gp) => gp.name), ...colHeaders];
+  const lines = rows.map((r) => {
+    const s = r.stats || {};
+    const cells = [
+      r.combo_idx,
+      ...gridParams.map((gp) => r.params[gp.name] ?? ""),
+      s.sharpe?.toFixed(3) ?? "",
+      s.total_return_pct?.toFixed(2) ?? "",
+      s.max_drawdown_pct?.toFixed(2) ?? "",
+      ((s.win_rate ?? 0) * 100).toFixed(1),
+      s.trades ?? "",
+      s.profit_factor == null ? "inf" : (s.profit_factor?.toFixed(3) ?? ""),
+    ];
+    return cells.join(",");
+  });
+  const csv = [headers.join(","), ...lines].join("\n");
+  const a = Object.assign(document.createElement("a"), {
+    href: URL.createObjectURL(new Blob([csv], { type: "text/csv" })),
+    download: "grid_results.csv",
+  });
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 export default function GridResultsPanel({ result }) {
   const rows = result?.results || [];
   const gridParams = result?.grid_params || [];
@@ -38,10 +64,22 @@ export default function GridResultsPanel({ result }) {
 
   return (
     <section className="space-y-4">
-      <div className="text-[11px] uppercase tracking-wider text-muted">
-        Grid Result · {rows.length} of {result.total_combos} backtests
-        {result.partial && <span className="text-amber-400"> · partial (cancelled)</span>}
-        {" · "}default metric = <span className="font-mono">{result.metric}</span>
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-muted">
+          Grid Result · {rows.length} of {result.total_combos} backtests
+          {result.partial && <span className="text-amber-400"> · partial (cancelled)</span>}
+          {" · "}default metric = <span className="font-mono">{result.metric}</span>
+        </div>
+        <button
+          onClick={() => exportCsv(rows, gridParams)}
+          className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md border border-line text-muted hover:text-text hover:border-accent-blue transition"
+          title="Export results as CSV"
+        >
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          CSV
+        </button>
       </div>
 
       {dims === 1 && <Grid1DChart rows={rows} gridParams={gridParams} defaultMetric={result.metric} />}

@@ -7,8 +7,7 @@ implemented with numpy/pandas in this file. No shared feature library.
 """
 from __future__ import annotations
 
-from datetime import time as dt_time, datetime, timezone
-import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -17,15 +16,8 @@ import pandas as pd
 from services.strategies.base import (
     Strategy, StrategyMeta, ParamSpec, ParamType, Signal, OverlaySpec,
 )
-
-_HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
-
-
-def _parse_hhmm(s: str) -> dt_time:
-    m = _HHMM_RE.match((s or "").strip())
-    if not m:
-        return dt_time(0, 0)
-    return dt_time(min(23, int(m.group(1))), min(59, int(m.group(2))))
+from services.strategies.regime import RegimeDetector
+from services.strategies.session_utils import parse_hhmm, in_window_live, session_mask
 
 
 # ---------------------------------------------------------------------------
@@ -59,34 +51,6 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.S
     return tr.ewm(alpha=1 / length, adjust=False).mean()
 
 
-def _in_window(t: dt_time, win: tuple[dt_time, dt_time]) -> bool:
-    s, e = win
-    if s <= e:
-        return s <= t < e
-    # wraps midnight
-    return t >= s or t < e
-
-
-def _session_mask(times_utc: pd.Series, sessions: dict) -> pd.Series:
-    """times_utc is a Series of pandas Timestamps (UTC). Returns bool mask.
-    sessions value: {name: {enabled, start, end}} where start/end are 'HH:MM'."""
-    if not sessions:
-        return pd.Series(False, index=times_utc.index)
-    enabled = []
-    for name, cfg in sessions.items():
-        if not cfg or not cfg.get("enabled"):
-            continue
-        enabled.append((_parse_hhmm(cfg.get("start", "00:00")),
-                        _parse_hhmm(cfg.get("end",   "00:00"))))
-    if not enabled:
-        return pd.Series(False, index=times_utc.index)
-    tod = times_utc.dt.time
-    mask = pd.Series(False, index=times_utc.index)
-    for win in enabled:
-        mask = mask | tod.apply(lambda t: _in_window(t, win))
-    return mask
-
-
 # ---------------------------------------------------------------------------
 # Strategy
 # ---------------------------------------------------------------------------
@@ -117,6 +81,10 @@ class VwmaReversionStrategy(Strategy):
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
                   group="Direction"),
+        ParamSpec("use_regime", ParamType.BOOL, False, group="Regime",
+                  description="Block entries when ADX signals a trending market. Exits still fire."),
+        ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime"),
+        ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime"),
         ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
                   description="Max concurrent positions per side. Each tranche is sized at the strategy's Risk%. Set to 1 to disable stacking."),
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
@@ -130,6 +98,15 @@ class VwmaReversionStrategy(Strategy):
                      "UTC session gating. Long when oversold near band, short when overbought."),
         schema=PARAM_SCHEMA,
     )
+
+    TIMEFRAME_DEFAULTS = {
+        "1m": {
+            "z_threshold":   1.0,
+            "rsi_long_max":  45,
+            "rsi_short_min": 55,
+            "trade_24_7":    True,
+        },
+    }
 
     SYMBOL_DEFAULTS = {
         "LTCUSDT": {
@@ -169,7 +146,7 @@ class VwmaReversionStrategy(Strategy):
         if bool(p.get("trade_24_7")):
             in_session = pd.Series(True, index=out.index)
         else:
-            in_session = _session_mask(ts_for_mask, p["sessions"])
+            in_session = session_mask(ts_for_mask, p["sessions"])
 
         sides = p["sides"]
         if sides.get("long"):
@@ -180,6 +157,11 @@ class VwmaReversionStrategy(Strategy):
             short_cond = in_session & (zscore > p["z_threshold"]) & (rsi > p["rsi_short_min"])
         else:
             short_cond = pd.Series(False, index=out.index)
+
+        if p.get("use_regime"):
+            ranging = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"]).detect(out)
+            long_cond  = long_cond  & ranging
+            short_cond = short_cond & ranging
 
         # Walk forward to compute entries / exits respecting position state.
         n = len(out)
@@ -330,8 +312,8 @@ class VwmaReversionStrategy(Strategy):
             for cfg in (p["sessions"] or {}).values():
                 if not cfg or not cfg.get("enabled"):
                     continue
-                win = (_parse_hhmm(cfg.get("start", "00:00")), _parse_hhmm(cfg.get("end", "00:00")))
-                if _in_window(utc, win):
+                win = (parse_hhmm(cfg.get("start", "00:00")), parse_hhmm(cfg.get("end", "00:00")))
+                if in_window_live(utc, win):
                     in_sess = True
                     break
 
@@ -339,6 +321,11 @@ class VwmaReversionStrategy(Strategy):
         entry_p = state.get("entry_p", np.nan)
         atr_at_entry = state.get("atr_at_entry", np.nan)
         sides = p["sides"]
+
+        if p.get("use_regime") and pos == 0:
+            rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
+            if rd.last_adx(df) >= p["regime_adx_threshold"]:
+                return None  # trending — block new entries; exits still fire below
 
         if pos == 0:
             if not in_sess:

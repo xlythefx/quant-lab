@@ -54,6 +54,7 @@ def list_strategies() -> list[dict]:
     for cls in _REGISTRY.values():
         d = cls.META.to_dict()
         d["symbol_defaults"] = dict(getattr(cls, "SYMBOL_DEFAULTS", {}) or {})
+        d["timeframe_defaults"] = dict(getattr(cls, "TIMEFRAME_DEFAULTS", {}) or {})
         out.append(d)
     return out
 

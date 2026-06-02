@@ -104,6 +104,9 @@ class Strategy(ABC):
     # from PARAM_SCHEMA defaults need to be listed. For SESSIONS/SIDES,
     # nested values are merged per sub-key.
     SYMBOL_DEFAULTS: dict[str, dict] = {}
+    # Per-timeframe preset overrides. Applied before symbol defaults so symbol
+    # wins over timeframe, both win over schema defaults. Same sparse merge rules.
+    TIMEFRAME_DEFAULTS: dict[str, dict] = {}
 
     def __init__(self, params: Optional[dict] = None):
         self.p = self._merge_with_defaults(params or {})

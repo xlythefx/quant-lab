@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { fmtInt } from "../services/format.js";
 
 /**
@@ -16,7 +16,9 @@ import { fmtInt } from "../services/format.js";
  *   disabled:   bool — true while a job is running
  */
 export default function WalkForwardPresetPicker({ dataset, timeframe, onApply, disabled }) {
-  const [openId, setOpenId] = useState(null);  // which preset's modal is open
+  const [openId, setOpenId] = useState(null);
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
 
   const computedPresets = useMemo(() => {
     if (!dataset || !timeframe) return [];
@@ -26,9 +28,12 @@ export default function WalkForwardPresetPicker({ dataset, timeframe, onApply, d
 
   const activePreset = computedPresets.find((p) => p.id === openId) || null;
 
-  const handleApply = (values) => {
+  const handleApply = (preset, values) => {
     onApply(values);
     setOpenId(null);
+    clearTimeout(toastTimer.current);
+    setToast({ id: Date.now(), name: preset.name });
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
   };
 
   if (!dataset) {
@@ -55,7 +60,7 @@ export default function WalkForwardPresetPicker({ dataset, timeframe, onApply, d
             preset={p}
             disabled={disabled}
             onOpenModal={() => setOpenId(p.id)}
-            onQuickApply={() => handleApply(p.values)}
+            onQuickApply={(e) => handleApply(p, p.values, e)}
           />
         ))}
       </div>
@@ -64,9 +69,21 @@ export default function WalkForwardPresetPicker({ dataset, timeframe, onApply, d
         <PresetModal
           preset={activePreset}
           onClose={() => setOpenId(null)}
-          onApply={() => handleApply(activePreset.values)}
+          onApply={() => handleApply(activePreset, activePreset.values)}
           disabled={disabled}
         />
+      )}
+
+      {toast && (
+        <div
+          key={toast.id}
+          className="preset-toast pointer-events-none fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl border border-accent-blue/40 bg-bg-panel shadow-2xl text-sm font-medium text-text"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 text-accent-blue shrink-0" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0Zm3.78 4.923a.75.75 0 0 0-1.06 0L6.75 8.89 5.28 7.423a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5a.75.75 0 0 0 0-1.06Z" />
+          </svg>
+          Preset applied: <span className="text-accent-blue">{toast.name}</span>
+        </div>
       )}
     </div>
   );
@@ -76,6 +93,18 @@ export default function WalkForwardPresetPicker({ dataset, timeframe, onApply, d
 
 function PresetCard({ preset, disabled, onOpenModal, onQuickApply }) {
   const v = preset.values;
+  const [ripples, setRipples] = useState([]);
+
+  const handleClick = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const id = Date.now();
+    setRipples((prev) => [...prev, { id, x, y }]);
+    setTimeout(() => setRipples((prev) => prev.filter((r) => r.id !== id)), 600);
+    onQuickApply(e);
+  };
+
   return (
     <div className="rounded-md border border-line/60 bg-bg-elev/30 p-3 space-y-1.5">
       <div className="flex items-start justify-between gap-2">
@@ -94,11 +123,18 @@ function PresetCard({ preset, disabled, onOpenModal, onQuickApply }) {
         <div>~{fmtInt(v.expectedWindows)} windows · {v.nTrials} trials</div>
       </div>
       <button
-        onClick={onQuickApply}
+        onClick={handleClick}
         disabled={disabled}
-        className="w-full mt-1 px-2 py-1 rounded text-[11px] font-semibold bg-accent-grad text-white disabled:opacity-40"
+        className="relative overflow-hidden w-full mt-1 px-2 py-1 rounded text-[11px] font-semibold bg-accent-grad text-white disabled:opacity-40"
       >
         Use this
+        {ripples.map((r) => (
+          <span
+            key={r.id}
+            className="ripple-circle"
+            style={{ left: r.x, top: r.y }}
+          />
+        ))}
       </button>
     </div>
   );

@@ -415,7 +415,7 @@ export default function TradingChart({
         unsub = subscribeCandles({
           mode, symbol, timeframe, speed,
           ...(replayOpts || {}),
-        }, apply);
+        }, apply, (msg) => { if (!cancelled) setErr(msg); });
       } catch (e) {
         if (!cancelled) {
           console.error(e);

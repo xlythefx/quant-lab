@@ -91,6 +91,34 @@ def _trade_stats(trades: list[dict]) -> dict:
     # Payoff ratio (avg_win / |avg_loss|).
     payoff = (avg_win / abs(avg_loss)) if avg_loss < 0 else None
 
+    # SQN (Van Tharp): sqrt(n) * expectancy / std(pnl).
+    sqn = None
+    if n >= 3:
+        std_pnl = float(pnl.std(ddof=1))
+        if std_pnl > 0:
+            sqn = _safe(math.sqrt(n) * expectancy / std_pnl)
+
+    # Geometric mean per-trade return from pnl_pct_equity (compounding-aware average).
+    geo_mean_pct = None
+    pnl_pct_eq = np.array([float(t.get("pnl_pct_equity", 0.0)) / 100.0 for t in trades])
+    if n >= 1 and np.all(pnl_pct_eq > -1.0):
+        try:
+            geo_mean_pct = _safe((float(np.exp(np.mean(np.log(1.0 + pnl_pct_eq)))) - 1.0) * 100.0)
+        except Exception:
+            pass
+
+    # Max consecutive loss: worst cumulative dollar damage from a losing streak.
+    max_consec_loss = 0.0
+    cur_run = 0.0
+    for p in pnl:
+        if p < 0:
+            cur_run += p
+            if cur_run < max_consec_loss:
+                max_consec_loss = cur_run
+        else:
+            cur_run = 0.0
+    max_consec_loss_dollars = _safe(max_consec_loss) if max_consec_loss < 0 else None
+
     return {
         "expectancy_dollars": expectancy,
         "expectancy_R": expectancy_R,
@@ -104,6 +132,9 @@ def _trade_stats(trades: list[dict]) -> dict:
         "luck_dependent_losses": bool(luck_losers),
         "n_winners": int(wins.size),
         "n_losers": int(losses.size),
+        "sqn": sqn,
+        "geometric_mean_return_pct": geo_mean_pct,
+        "max_consec_loss_dollars": max_consec_loss_dollars,
     }
 
 
@@ -115,6 +146,7 @@ def _empty_trade_stats() -> dict:
         "top10_winners_share": None, "top10_losers_share": None,
         "luck_dependent_wins": False, "luck_dependent_losses": False,
         "n_winners": 0, "n_losers": 0,
+        "sqn": None, "geometric_mean_return_pct": None, "max_consec_loss_dollars": None,
     }
 
 
@@ -348,8 +380,17 @@ def _distribution(trades: list[dict], starting_capital: float) -> dict:
                 base = (1.0 - edge) / (1.0 + edge)
                 prob_ruin = float(base ** n_bets) if base > 0 else 0.0
 
-    # Best / worst trade summary already exists upstream, but include scalar
-    # win/loss ratio symmetry for the Advanced tab.
+    # VaR 95% and CVaR (Expected Shortfall) using pnl_pct_equity in %.
+    r_pct = r * 100.0
+    var_95 = None
+    cvar_95 = None
+    if r.size >= 10:
+        var_95_raw = float(np.percentile(r_pct, 5))
+        var_95 = _safe(var_95_raw)
+        below = r_pct[r_pct <= var_95_raw]
+        if below.size > 0:
+            cvar_95 = _safe(float(below.mean()))
+
     return {
         "skewness": sk,
         "kurtosis_excess": ku,
@@ -359,6 +400,8 @@ def _distribution(trades: list[dict], starting_capital: float) -> dict:
         "significance": significance,
         "prob_ruin": _safe(prob_ruin),
         "n_trades": int(len(trades)),
+        "var_95_pct": var_95,
+        "cvar_95_pct": cvar_95,
     }
 
 
@@ -367,6 +410,7 @@ def _empty_distribution() -> dict:
         "skewness": None, "kurtosis_excess": None, "tail_ratio": None,
         "t_stat": None, "t_pvalue": None, "significance": "not_significant",
         "prob_ruin": None, "n_trades": 0,
+        "var_95_pct": None, "cvar_95_pct": None,
     }
 
 

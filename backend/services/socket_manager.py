@@ -15,6 +15,7 @@ from services.binance_stream import BinanceKlineStream
 from services.backtest_stream import BacktestStream
 from services.stream_base import CandleStream
 from services.market_data import is_binance_symbol
+from services.ts_csv_stream import TsCsvStream, _csv_path
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,10 @@ class SocketManager:
         key = (mode, symbol, tf)
 
         def emit(candle):
+            if candle.get("__stream_error"):
+                # Propagate load failures to the browser room so it doesn't hang.
+                self._sio.emit("stream_error", candle, room=room_name(*key))
+                return
             # Fan-out to everyone in this room.
             self._sio.emit("candle_update", candle, room=room_name(*key))
             # Fan-out to internal listeners (strategy runners, etc.)
@@ -55,6 +60,18 @@ class SocketManager:
 
         if mode == "live" and is_binance_symbol(symbol):
             return BinanceKlineStream(symbol, tf, emit)
+        if mode == "live" and not is_binance_symbol(symbol):
+            # Any non-Binance symbol (ES, NQ, CL, …) → try TradeStation CSV tail
+            p = _csv_path(symbol, tf)
+            if p.exists():
+                log.info("TsCsvStream [%s/%s]: watching %s", symbol, tf, p)
+                return TsCsvStream(symbol, tf, emit, p)
+            log.warning(
+                "TsCsvStream [%s/%s]: CSV not found at %s — "
+                "falling back to backtest stream. "
+                "Ensure TradeStation is writing to that path.",
+                symbol, tf, p,
+            )
         return BacktestStream(symbol, tf, emit, speed=speed,
                               start_time=start_time, end_time=end_time, loop=loop)
 
@@ -142,7 +159,7 @@ class SocketManager:
         key = ("backtest", symbol, tf)
         with self._lock:
             stream = self._streams.get(key)
-        if isinstance(stream, BacktestStream):
-            stream.set_speed(speed)
-            return True
+            if isinstance(stream, BacktestStream):
+                stream.set_speed(speed)
+                return True
         return False

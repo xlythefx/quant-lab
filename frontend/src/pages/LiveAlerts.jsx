@@ -1,5 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import Navbar from "../components/Navbar.jsx";
+import StrategyEditor from "../components/StrategyEditor.jsx";
 import { socket } from "../services/socket.js";
 import {
   getLiveAlerts, saveLiveAlerts, testLiveAlert,
@@ -7,8 +9,12 @@ import {
 } from "../services/api.js";
 
 const WEBHOOK_PRESETS = [
+  { label: "andrea-orcelinvest · binance_bot", url: "https://api.andrea-orcelinvest.com/binance_webhook?secret=binance_bot" },
+  { label: "andrea-orcelinvest · staging", url: "https://api.andrea-orcelinvest.com/webhook" },
   { label: "ngrok · local test", url: "https://shakira-adducible-roentgenographically.ngrok-free.dev" },
 ];
+
+const SECRET_PRESETS = ["binance_bot", "sinegual_test1"];
 
 const DEFAULT_PAYLOAD_TEMPLATE = `{
   "secret": "{{secret}}",
@@ -31,6 +37,7 @@ const BLANK_RULE = {
   strategy_alias: "",
   leverage: 25,
   payload_template: "",
+  params: {},
 };
 
 export default function LiveAlerts() {
@@ -42,7 +49,28 @@ export default function LiveAlerts() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
   const [savedAt, setSavedAt] = useState(null);
-  const [firings, setFirings] = useState([]);
+  const [firings, setFirings] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ql.live_firings") || "[]"); } catch { return []; }
+  });
+  const [paramsEditorOpen, setParamsEditorOpen] = useState(false);
+  const [viewRule, setViewRule] = useState(null);
+  const [openDropdown, setOpenDropdown] = useState(null); // { name, rule, x, y }
+  const [firingDetail, setFiringDetail] = useState(null);
+  const [showRead, setShowRead] = useState(false);
+
+  const saveFirings = (next) => {
+    try { localStorage.setItem("ql.live_firings", JSON.stringify(next)); } catch {}
+    return next;
+  };
+  const markRead = (id) => setFirings((prev) => saveFirings(prev.map((f) => f._id === id ? { ...f, read: true } : f)));
+  const markAllRead = () => setFirings((prev) => saveFirings(prev.map((f) => ({ ...f, read: true }))));
+  const clearAll = () => setFirings(saveFirings([]));
+
+  const catalogById = useMemo(() => {
+    const m = {};
+    for (const s of strategies) m[s.id] = s;
+    return m;
+  }, [strategies]);
 
   useEffect(() => {
     Promise.all([getLiveAlerts(), getStrategies(), getSymbols()])
@@ -57,11 +85,24 @@ export default function LiveAlerts() {
 
   useEffect(() => {
     const onFire = (payload) => {
-      setFirings((prev) => [{ ...payload, _id: Math.random() }, ...prev].slice(0, 30));
+      setFirings((prev) => {
+        const next = [{ ...payload, _id: Math.random(), read: false }, ...prev].slice(0, 100);
+        try { localStorage.setItem("ql.live_firings", JSON.stringify(next)); } catch {}
+        return next;
+      });
     };
     socket.on("live_alert_dispatched", onFire);
     return () => socket.off("live_alert_dispatched", onFire);
   }, []);
+
+  useEffect(() => {
+    if (!openDropdown) return;
+    const close = (e) => {
+      if (!e.target.closest("[data-test-dropdown]")) setOpenDropdown(null);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [openDropdown]);
 
   const persist = async (next) => {
     setBusy(true); setErr(null);
@@ -164,6 +205,7 @@ export default function LiveAlerts() {
                   <th className="text-left px-3 py-2 font-medium">Symbol</th>
                   <th className="text-left px-3 py-2 font-medium">TF</th>
                   <th className="text-left px-3 py-2 font-medium">Alias</th>
+                  <th className="text-left px-3 py-2 font-medium">Params</th>
                   <th className="text-right px-3 py-2 font-medium">Lev</th>
                   <th className="text-left px-3 py-2 font-medium">Webhook URL</th>
                   <th className="text-center px-3 py-2 font-medium">Enabled</th>
@@ -172,7 +214,7 @@ export default function LiveAlerts() {
               </thead>
               <tbody className="divide-y divide-line/40">
                 {rules.length === 0 && (
-                  <tr><td colSpan={8} className="px-3 py-4 text-center text-muted text-sm">no rules — add one below</td></tr>
+                  <tr><td colSpan={9} className="px-3 py-4 text-center text-muted text-sm">no rules — add one below</td></tr>
                 )}
                 {rules.map((r, idx) => (
                   <tr key={r.name} className="hover:bg-bg-elev/30">
@@ -186,6 +228,18 @@ export default function LiveAlerts() {
                     <td className="px-3 py-2 font-mono">{r.symbol}</td>
                     <td className="px-3 py-2 font-mono text-xs">{r.timeframe || "—"}</td>
                     <td className="px-3 py-2 font-mono text-xs">{r.strategy_alias}</td>
+                    <td className="px-3 py-2">
+                      {(() => {
+                        const schema = catalogById[r.strategy_id]?.schema || [];
+                        const n = schema.filter((spec) => {
+                          const v = (r.params || {})[spec.name];
+                          return v !== undefined && v !== null && JSON.stringify(v) !== JSON.stringify(spec.default);
+                        }).length;
+                        return n > 0
+                          ? <span className="text-[10px] text-accent-cyan font-medium">{n} custom</span>
+                          : <span className="text-[10px] text-muted">default</span>;
+                      })()}
+                    </td>
                     <td className="px-3 py-2 text-right font-mono">{r.leverage}x</td>
                     <td className="px-3 py-2 max-w-[240px]">
                       <div className="flex items-center gap-1.5 min-w-0">
@@ -207,23 +261,32 @@ export default function LiveAlerts() {
                       </button>
                     </td>
                     <td className="px-3 py-2 text-right">
-                      <div className="flex justify-end flex-wrap gap-1">
-                        {[
-                          { action: "BUY",        label: "BUY",    color: "accent-cyan" },
-                          { action: "EXIT_LONG",  label: "EXIT_L", color: "accent-blue" },
-                          { action: "SELL",       label: "SELL",   color: "accent-yellow" },
-                          { action: "EXIT_SHORT", label: "EXIT_S", color: "accent-purple" },
-                        ].map(({ action, label, color }) => (
-                          <button
-                            key={action}
-                            onClick={() => fire(r, action)}
-                            disabled={busy || !r.enabled}
-                            title={`Test fire ${action}`}
-                            className={`px-2 py-1 text-xs rounded-md border border-${color}/40 text-${color} hover:bg-${color}/10 disabled:opacity-40 font-mono`}
-                          >
-                            {label}
-                          </button>
-                        ))}
+                      <div className="flex justify-end items-center gap-1">
+                        {/* Test fire dropdown */}
+                        <button
+                          disabled={busy || !r.enabled}
+                          onClick={(e) => {
+                            if (openDropdown?.name === r.name) { setOpenDropdown(null); return; }
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setOpenDropdown({ name: r.name, rule: r, x: rect.right, y: rect.bottom + 4 });
+                          }}
+                          className="px-2.5 py-1.5 text-xs rounded-md border border-accent-cyan/40 text-accent-cyan hover:bg-accent-cyan/10 disabled:opacity-40 font-medium flex items-center gap-1"
+                        >
+                          Test
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+                            <path fillRule="evenodd" d="M4.22 6.22a.75.75 0 0 1 1.06 0L8 8.94l2.72-2.72a.75.75 0 1 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0L4.22 7.28a.75.75 0 0 1 0-1.06Z" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => setViewRule(r)}
+                          title="View rule details"
+                          className="p-1.5 rounded-md border border-line text-muted hover:text-text hover:border-accent-cyan/60 hover:bg-accent-cyan/10 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                            <path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" />
+                            <path d="M1.38 8a6.97 6.97 0 0 1 1.966-3.336C4.42 3.585 6.138 2.75 8 2.75c1.862 0 3.58.835 4.654 1.914A6.97 6.97 0 0 1 14.62 8a6.97 6.97 0 0 1-1.966 3.336C11.58 12.415 9.862 13.25 8 13.25c-1.862 0-3.58-.835-4.654-1.914A6.97 6.97 0 0 1 1.38 8Zm6.62 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+                          </svg>
+                        </button>
                         <button
                           onClick={() => startEdit(idx)}
                           disabled={busy}
@@ -283,6 +346,7 @@ export default function LiveAlerts() {
                     ...draft,
                     strategy_id: id,
                     strategy_alias: draft.strategy_alias || (s?.name || ""),
+                    params: {},
                   });
                 }}
                 className="w-full px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
@@ -293,6 +357,45 @@ export default function LiveAlerts() {
                 ))}
               </select>
             </Field>
+
+            {/* Strategy params row — always visible once strategy is selected */}
+            <div className="flex flex-col gap-1">
+              <span className="text-xs uppercase tracking-wider text-muted">Strategy Params</span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  disabled={!draft.strategy_id}
+                  onClick={() => setParamsEditorOpen(true)}
+                  className="px-3 py-1.5 rounded-md border border-accent-blue/50 text-accent-blue text-xs font-medium hover:bg-accent-blue/10 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                    <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z" />
+                  </svg>
+                  Configure params
+                </button>
+                {draft.strategy_id && (() => {
+                  const schema = catalogById[draft.strategy_id]?.schema || [];
+                  const n = schema.filter((spec) => {
+                    const v = (draft.params || {})[spec.name];
+                    return v !== undefined && v !== null && JSON.stringify(v) !== JSON.stringify(spec.default);
+                  }).length;
+                  return n > 0 ? (
+                    <>
+                      <span className="text-xs text-accent-cyan font-medium">{n} customized</span>
+                      <button
+                        type="button"
+                        onClick={() => setDraft((d) => ({ ...d, params: {} }))}
+                        className="text-xs text-muted hover:text-loss underline"
+                      >
+                        reset
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-xs text-muted">using defaults</span>
+                  );
+                })()}
+              </div>
+            </div>
 
             <Field label="Symbol">
               <select
@@ -366,6 +469,19 @@ export default function LiveAlerts() {
             </Field>
 
             <Field label="Secret" full>
+              <div className="flex gap-2 items-center mb-1.5">
+                <select
+                  value={SECRET_PRESETS.includes(draft.secret) ? draft.secret : ""}
+                  onChange={(e) => { if (e.target.value) setDraft({ ...draft, secret: e.target.value }); }}
+                  className="flex-1 px-3 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue text-text"
+                >
+                  <option value="">— select preset —</option>
+                  {SECRET_PRESETS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                <span className="text-xs text-muted shrink-0">or type↓</span>
+              </div>
               <input
                 type="text" value={draft.secret}
                 onChange={(e) => setDraft({ ...draft, secret: e.target.value })}
@@ -434,59 +550,373 @@ export default function LiveAlerts() {
 
         {/* Recent firings */}
         <section>
-          <h2 className="text-sm uppercase tracking-wider text-muted mb-2">
-            Recent firings ({firings.length})
-          </h2>
-          <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
-            {firings.length === 0 ? (
-              <div className="px-4 py-6 text-center text-sm text-muted">
-                Nothing yet. Click a test-fire button on a rule, or start a live strategy.
-              </div>
-            ) : (
-              <table className="w-full text-sm">
-                <thead className="bg-bg-elev/50 text-xs uppercase tracking-wider text-muted">
-                  <tr>
-                    <th className="text-left px-3 py-2 font-medium">Time</th>
-                    <th className="text-left px-3 py-2 font-medium">Rule</th>
-                    <th className="text-left px-3 py-2 font-medium">Symbol</th>
-                    <th className="text-left px-3 py-2 font-medium">Action</th>
-                    <th className="text-center px-3 py-2 font-medium">Status</th>
-                    <th className="text-left px-3 py-2 font-medium">Detail</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-line/40">
-                  {firings.map((f) => (
-                    <tr key={f._id}>
-                      <td className="px-3 py-1.5 font-mono text-xs text-muted">
-                        {new Date(f.time * 1000).toLocaleTimeString()}
-                      </td>
-                      <td className="px-3 py-1.5 text-xs font-semibold text-text">
-                        {f.rule_name || f.strategy_id}
-                      </td>
-                      <td className="px-3 py-1.5 font-mono text-xs">{f.symbol}</td>
-                      <td className="px-3 py-1.5 font-mono text-xs">{f.action}</td>
-                      <td className="px-3 py-1.5 text-center">
-                        <span className={`px-1.5 py-0.5 text-xs rounded-md uppercase tracking-wider font-medium ${
-                          f.ok
-                            ? "bg-accent-cyan/15 text-accent-cyan"
-                            : "bg-loss/15 text-loss"
-                        }`}>
-                          {f.ok ? "ok" : "fail"}
-                        </span>
-                      </td>
-                      <td className="px-3 py-1.5 text-xs text-muted font-mono truncate max-w-[320px]">
-                        {f.ok
-                          ? `${f.status_code} → ${f.url}`
-                          : (f.error || "unknown error")}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
+          {(() => {
+            const unread = firings.filter((f) => !f.read);
+            const visible = showRead ? firings : unread;
+            return (
+              <>
+                <div className="flex items-center gap-3 mb-2">
+                  <h2 className="text-sm uppercase tracking-wider text-muted">
+                    Recent firings
+                  </h2>
+                  {unread.length > 0 && (
+                    <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-accent-blue/20 text-accent-blue font-semibold">
+                      {unread.length} unread
+                    </span>
+                  )}
+                  <div className="flex-1" />
+                  <button
+                    onClick={() => setShowRead((v) => !v)}
+                    className="text-xs text-muted hover:text-text"
+                  >
+                    {showRead ? "hide read" : `show all (${firings.length})`}
+                  </button>
+                  {unread.length > 0 && (
+                    <button onClick={markAllRead} className="text-xs text-muted hover:text-text">
+                      mark all read
+                    </button>
+                  )}
+                  {firings.length > 0 && (
+                    <button onClick={clearAll} className="text-xs text-loss/70 hover:text-loss">
+                      clear all
+                    </button>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
+                  {visible.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-sm text-muted">
+                      {firings.length > 0
+                        ? <span>All caught up — <button onClick={() => setShowRead(true)} className="text-accent-blue hover:underline">show {firings.length} read</button></span>
+                        : "Nothing yet. Click a test-fire button on a rule, or start a live strategy."}
+                    </div>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead className="bg-bg-elev/50 text-xs uppercase tracking-wider text-muted">
+                        <tr>
+                          <th className="text-left px-3 py-2 font-medium">Time</th>
+                          <th className="text-left px-3 py-2 font-medium">Rule</th>
+                          <th className="text-left px-3 py-2 font-medium">Symbol</th>
+                          <th className="text-left px-3 py-2 font-medium">Action</th>
+                          <th className="text-center px-3 py-2 font-medium">Status</th>
+                          <th className="text-left px-3 py-2 font-medium">Detail</th>
+                          <th className="px-3 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-line/40">
+                        {visible.map((f) => (
+                          <tr key={f._id} className={`${!f.ok ? "bg-loss/5" : ""} ${f.read ? "opacity-50" : ""}`}>
+                            <td className="px-3 py-1.5 font-mono text-xs text-muted whitespace-nowrap">
+                              {new Date(f.time * 1000).toLocaleTimeString()}
+                            </td>
+                            <td className="px-3 py-1.5 text-xs font-semibold text-text">
+                              {f.rule_name || f.strategy_id}
+                            </td>
+                            <td className="px-3 py-1.5 font-mono text-xs">{f.symbol}</td>
+                            <td className="px-3 py-1.5 font-mono text-xs">{f.action}</td>
+                            <td className="px-3 py-1.5 text-center">
+                              <span className={`px-1.5 py-0.5 text-xs rounded-md uppercase tracking-wider font-medium ${
+                                f.ok ? "bg-accent-cyan/15 text-accent-cyan" : "bg-loss/15 text-loss"
+                              }`}>
+                                {f.ok ? "ok" : "fail"}
+                              </span>
+                            </td>
+                            <td className="px-3 py-1.5 text-xs text-muted font-mono truncate max-w-[280px]">
+                              {f.ok ? `${f.status_code} → ${f.url}` : (f.error || "unknown error")}
+                            </td>
+                            <td className="px-3 py-1.5">
+                              <div className="flex items-center gap-2">
+                                <button onClick={() => setFiringDetail(f)} className="text-[10px] text-accent-blue hover:underline whitespace-nowrap">
+                                  detail
+                                </button>
+                                {!f.read && (
+                                  <button onClick={() => markRead(f._id)} className="text-[10px] text-muted hover:text-text whitespace-nowrap">
+                                    ✓ read
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </>
+            );
+          })()}
         </section>
       </main>
+
+      {openDropdown && createPortal(
+        <div
+          data-test-dropdown
+          className="fixed z-50 bg-bg-panel border border-line rounded-lg shadow-xl overflow-hidden min-w-[140px]"
+          style={{ top: openDropdown.y, left: openDropdown.x, transform: "translateX(-100%)" }}
+        >
+          {[
+            { action: "BUY",        label: "BUY",        color: "text-accent-cyan" },
+            { action: "EXIT_LONG",  label: "EXIT LONG",  color: "text-accent-blue" },
+            { action: "SELL",       label: "SELL",       color: "text-accent-yellow" },
+            { action: "EXIT_SHORT", label: "EXIT SHORT", color: "text-accent-purple" },
+          ].map(({ action, label, color }) => (
+            <button
+              key={action}
+              onMouseDown={(e) => { e.stopPropagation(); fire(openDropdown.rule, action); setOpenDropdown(null); }}
+              className={`w-full text-left px-4 py-2.5 text-xs font-mono font-medium hover:bg-bg-elev border-b border-line/30 last:border-0 ${color}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+
+      {viewRule && (
+        <RuleDetailModal
+          rule={viewRule}
+          stratName={stratName(viewRule.strategy_id)}
+          schema={catalogById[viewRule.strategy_id]?.schema || []}
+          firings={firings.filter((f) => (f.rule_name || f.strategy_id) === viewRule.name)}
+          onClose={() => setViewRule(null)}
+          onViewFiring={setFiringDetail}
+        />
+      )}
+
+      {firingDetail && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" onClick={() => setFiringDetail(null)}>
+          <div className="bg-bg-panel border border-line rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-line shrink-0">
+              <div className="flex items-center gap-3">
+                <span className={`px-2 py-0.5 text-xs rounded-md font-medium uppercase ${firingDetail.ok ? "bg-accent-cyan/15 text-accent-cyan" : "bg-loss/15 text-loss"}`}>
+                  {firingDetail.ok ? "ok" : "fail"}
+                </span>
+                <span className="font-semibold">{firingDetail.rule_name || firingDetail.strategy_id}</span>
+                <span className="font-mono text-sm text-muted">{firingDetail.action}</span>
+                <span className="text-xs text-muted">{new Date(firingDetail.time * 1000).toLocaleTimeString()}</span>
+              </div>
+              <button onClick={() => setFiringDetail(null)} className="p-1.5 rounded-md text-muted hover:text-text hover:bg-bg-elev">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+                  <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+                </svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-5 py-4 space-y-3 text-sm">
+              <div>
+                <div className="text-xs uppercase tracking-wider text-muted mb-1">Webhook URL</div>
+                <div className="font-mono text-xs text-muted break-all">{firingDetail.url}</div>
+              </div>
+              <div>
+                <div className="text-xs uppercase tracking-wider text-muted mb-1">
+                  {firingDetail.ok ? "Response" : "Error"}
+                </div>
+                <pre className="px-3 py-3 rounded-lg bg-bg-elev border border-line font-mono text-xs leading-relaxed overflow-auto whitespace-pre-wrap break-all max-h-[400px]">
+                  {firingDetail.error || (firingDetail.ok ? `HTTP ${firingDetail.status_code} — OK` : "no detail")}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <StrategyEditor
+        open={paramsEditorOpen}
+        schema={catalogById[draft.strategy_id]?.schema || []}
+        params={draft.params || {}}
+        onClose={() => setParamsEditorOpen(false)}
+        onApply={(p) => { setDraft((d) => ({ ...d, params: p })); setParamsEditorOpen(false); }}
+        onResetDefaults={() => setDraft((d) => ({ ...d, params: {} }))}
+        onChange={() => {}}
+      />
+    </div>
+  );
+}
+
+function RuleDetailModal({ rule, stratName, schema, firings = [], onClose, onViewFiring }) {
+  const [tab, setTab] = useState("overview");
+  const [secretVisible, setSecretVisible] = useState(false);
+
+  const customCount = schema.filter((spec) => {
+    const v = (rule.params || {})[spec.name];
+    return v !== undefined && v !== null && JSON.stringify(v) !== JSON.stringify(spec.default);
+  }).length;
+
+  const TABS = [
+    { id: "overview",  label: "Overview" },
+    { id: "params",    label: `Params${customCount > 0 ? ` (${customCount})` : ""}` },
+    { id: "firings",   label: `Firings${firings.length > 0 ? ` (${firings.length})` : ""}` },
+  ];
+
+  const Row = ({ label, children }) => (
+    <div className="flex gap-3 py-2.5 border-b border-line/40 last:border-0">
+      <span className="text-xs text-muted w-28 shrink-0 pt-0.5 uppercase tracking-wider">{label}</span>
+      <div className="flex-1 min-w-0 text-sm">{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="bg-bg-panel border border-line rounded-2xl shadow-2xl w-full max-w-lg flex flex-col max-h-[85vh]" onClick={(e) => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-line shrink-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-semibold">{rule.name}</h2>
+            <span className={`text-xs font-medium px-1.5 py-0.5 rounded-md ${
+              rule.enabled ? "text-accent-cyan bg-accent-cyan/10" : "text-muted bg-bg-elev"
+            }`}>{rule.enabled ? "enabled" : "disabled"}</span>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-md text-muted hover:text-text hover:bg-bg-elev transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+              <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-line shrink-0">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-5 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px ${
+                tab === t.id
+                  ? "border-accent-blue text-accent-blue"
+                  : "border-transparent text-muted hover:text-text"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Tab content */}
+        <div className="overflow-y-auto flex-1 px-5 py-4">
+
+          {/* Overview tab */}
+          {tab === "overview" && (
+            <div>
+              <Row label="Strategy">
+                <div className="font-medium">{stratName}</div>
+                <div className="text-xs text-muted font-mono">{rule.strategy_id}</div>
+              </Row>
+              <Row label="Symbol"><span className="font-mono">{rule.symbol}</span></Row>
+              <Row label="Timeframe"><span className="font-mono">{rule.timeframe || "—"}</span></Row>
+              <Row label="Alias"><span className="font-mono text-xs">{rule.strategy_alias}</span></Row>
+              <Row label="Leverage"><span className="font-mono">{rule.leverage}x</span></Row>
+              <Row label="Broker"><span className="font-mono text-xs capitalize">{rule.broker || "auto"}</span></Row>
+              <Row label="Webhook URL">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="font-mono text-xs break-all text-muted">{rule.webhook_url}</span>
+                  <CopyButton text={rule.webhook_url} className="shrink-0" />
+                </div>
+              </Row>
+              <Row label="Secret">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs text-muted">
+                    {secretVisible ? rule.secret : "•".repeat(Math.min(rule.secret?.length || 8, 20))}
+                  </span>
+                  <button onClick={() => setSecretVisible((v) => !v)} className="text-[10px] text-accent-blue hover:underline shrink-0">
+                    {secretVisible ? "hide" : "reveal"}
+                  </button>
+                  <CopyButton text={rule.secret} className="shrink-0" />
+                </div>
+              </Row>
+              {rule.payload_template && (
+                <div className="mt-3">
+                  <div className="text-xs uppercase tracking-wider text-muted mb-2">Custom Payload Template</div>
+                  <pre className="px-3 py-2 rounded-lg bg-bg-elev border border-line font-mono text-xs text-muted leading-relaxed overflow-x-auto">{rule.payload_template}</pre>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Params tab */}
+          {tab === "params" && (
+            <div>
+              {schema.length === 0 ? (
+                <p className="text-sm text-muted">No schema available.</p>
+              ) : (
+                <div className="rounded-lg border border-line overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-bg-elev/60 text-muted">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-medium">Param</th>
+                        <th className="text-left px-3 py-2 font-medium">Value</th>
+                        <th className="text-left px-3 py-2 font-medium">Default</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-line/30">
+                      {schema.map((spec) => {
+                        const overrideVal = (rule.params || {})[spec.name];
+                        const isCustom = overrideVal !== undefined && overrideVal !== null && JSON.stringify(overrideVal) !== JSON.stringify(spec.default);
+                        const displayVal = isCustom ? overrideVal : spec.default;
+                        const fmt = (v) => typeof v === "object" ? JSON.stringify(v) : String(v);
+                        return (
+                          <tr key={spec.name} className={isCustom ? "bg-accent-cyan/5" : ""}>
+                            <td className={`px-3 py-2 font-mono ${isCustom ? "text-accent-cyan font-medium" : "text-muted"}`}>{spec.name}</td>
+                            <td className={`px-3 py-2 font-mono ${isCustom ? "text-text" : "text-muted"}`}>{fmt(displayVal)}</td>
+                            <td className="px-3 py-2 font-mono text-muted/50">{isCustom ? fmt(spec.default) : "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {customCount === 0 && schema.length > 0 && (
+                <p className="text-xs text-muted mt-2">All params are at their defaults.</p>
+              )}
+            </div>
+          )}
+
+          {/* Firings tab */}
+          {tab === "firings" && (
+            <div>
+              {firings.length === 0 ? (
+                <p className="text-sm text-muted py-2">No firings yet for this rule.</p>
+              ) : (
+                <div className="rounded-lg border border-line overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-bg-elev/60 text-muted">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-medium">Time</th>
+                        <th className="text-left px-3 py-2 font-medium">Action</th>
+                        <th className="text-center px-3 py-2 font-medium">Status</th>
+                        <th className="text-left px-3 py-2 font-medium">Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-line/30">
+                      {firings.map((f) => (
+                        <tr key={f._id}>
+                          <td className="px-3 py-2 font-mono text-muted whitespace-nowrap">
+                            {new Date(f.time * 1000).toLocaleTimeString()}
+                          </td>
+                          <td className="px-3 py-2 font-mono font-medium text-text">{f.action}</td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`px-1.5 py-0.5 rounded font-medium uppercase tracking-wider ${
+                              f.ok ? "bg-accent-cyan/15 text-accent-cyan" : "bg-loss/15 text-loss"
+                            }`}>{f.ok ? "ok" : "fail"}</span>
+                          </td>
+                          <td className="px-3 py-2 text-muted font-mono truncate max-w-[160px]">
+                            {f.ok ? `${f.status_code} → ${f.url}` : (f.error || "unknown error")}
+                          </td>
+                          <td className="px-3 py-2">
+                            <button onClick={() => onViewFiring?.(f)} className="text-[10px] text-accent-blue hover:underline whitespace-nowrap">
+                              detail
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
     </div>
   );
 }
