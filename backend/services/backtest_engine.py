@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from services import market_data, quant_metrics, risk_config
+from services import market_data, quant_metrics, risk_config, assets
 from services.strategy_registry import get_strategy_class
 
 log = logging.getLogger(__name__)
@@ -195,11 +195,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     efl_a = sig_df["exit_fill_long"].to_numpy(dtype=float)  if has_exact_fills else None
     efs_a = sig_df["exit_fill_short"].to_numpy(dtype=float) if has_exact_fills else None
 
-    # Fixed-contract futures sizing (opt-in via strategy.USE_CONTRACT_SIZING).
-    # units = contracts × point_value, so the existing `move × units` P&L math
-    # yields TS-style dollars ($50/pt for ES) instead of %-of-equity sizing.
-    contract_sizing = bool(getattr(strategy, "USE_CONTRACT_SIZING", False))
-    contract_units  = (float(strategy.p.get("contracts", 1)) * float(strategy.p.get("point_value", 1))
+    # Instrument-driven futures sizing: index futures (asset_class
+    # 'equity_index_future', e.g. ES with contract_size=50) size as N contracts ×
+    # multiplier so the existing `move × units` P&L math yields TS-style dollars
+    # ($50/pt). Everything else (crypto, commodities) stays %-of-equity sizing.
+    _broker = market_data.broker_for(symbol, timeframe)
+    _meta   = assets.get(symbol, _broker or market_data.BROKER_DEFAULT)
+    contract_sizing = (_meta.asset_class == "equity_index_future" and _meta.contract_size > 1.0)
+    contract_units  = (float(strategy.p.get("contracts", 1)) * float(_meta.contract_size)
                        if contract_sizing else 0.0)
 
     n = len(sig_df)

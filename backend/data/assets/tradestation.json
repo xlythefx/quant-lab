@@ -2,28 +2,32 @@
   "NQ": {
     "ts_symbol": "@NQ",
     "canonical": "NQ_CONT",
-    "asset_class": "future",
+    "asset_class": "equity_index_future",
+    "contract_size": 20,
     "exchange": "CME",
     "description": "Nasdaq-100 E-mini Futures (continuous)"
   },
   "ES": {
     "ts_symbol": "@ES",
     "canonical": "ES_CONT",
-    "asset_class": "future",
+    "asset_class": "equity_index_future",
+    "contract_size": 50,
     "exchange": "CME",
     "description": "S&P 500 E-mini Futures (continuous)"
   },
   "RTY": {
     "ts_symbol": "@RTY",
     "canonical": "RTY_CONT",
-    "asset_class": "future",
+    "asset_class": "equity_index_future",
+    "contract_size": 50,
     "exchange": "CME",
     "description": "Russell 2000 E-mini Futures (continuous)"
   },
   "YM": {
     "ts_symbol": "@YM",
     "canonical": "YM_CONT",
-    "asset_class": "future",
+    "asset_class": "equity_index_future",
+    "contract_size": 5,
     "exchange": "CBOT",
     "description": "Dow Jones E-mini Futures (continuous)"
   },

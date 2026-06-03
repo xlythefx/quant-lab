@@ -412,6 +412,16 @@ def find_parquet(symbol: str, timeframe: str) -> Optional[str]:
     return None
 
 
+def broker_for(symbol: str, timeframe: str) -> Optional[str]:
+    """Return the broker namespace the (symbol, timeframe) parquet lives in
+    (e.g. ES → 'tradestation', BTCUSDT → 'binance'), or None if not found.
+    Used to look up asset metadata when only a symbol string is known."""
+    path = find_parquet(symbol, timeframe)
+    if path is None:
+        return None
+    return os.path.basename(os.path.dirname(path))
+
+
 def load_parquet(symbol: str, timeframe: str, broker: Optional[str] = None) -> pd.DataFrame:
     """Load the cached parquet for (symbol, timeframe).
 

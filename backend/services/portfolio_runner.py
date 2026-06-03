@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from services import backtest_engine, market_data, quant_metrics, risk_config
+from services import backtest_engine, market_data, quant_metrics, risk_config, assets
 from services.strategy_registry import get_strategy_class
 
 log = logging.getLogger(__name__)
@@ -118,12 +118,15 @@ class _Stream:
         # risk_pct (per-strategy). 3.0 fallback matches historical default.
         self.risk_frac = float(strategy.p.get("risk_pct", 3.0)) / 100.0
 
-        # Fixed-contract futures sizing (opt-in). units = contracts × point_value,
-        # so P&L scales to TS dollars ($50/pt for ES). Futures use margin not cash,
-        # so the cash gate is bypassed for these (the collateral/locked_notional
-        # accounting still nets out correctly in total_eq).
-        self.contract_sizing = bool(getattr(strategy, "USE_CONTRACT_SIZING", False))
-        self.contract_units  = (float(strategy.p.get("contracts", 1)) * float(strategy.p.get("point_value", 1))
+        # Instrument-driven futures sizing: index futures (asset_class
+        # 'equity_index_future', e.g. ES contract_size=50) size as N contracts ×
+        # multiplier so P&L scales to TS dollars ($50/pt). Crypto/commodities stay
+        # %-of-equity. Futures use margin not cash, so the cash gate is bypassed
+        # below (the collateral/locked_notional accounting still nets out in total_eq).
+        _broker = market_data.broker_for(spec.symbol, spec.timeframe)
+        _meta   = assets.get(spec.symbol, _broker or market_data.BROKER_DEFAULT)
+        self.contract_sizing = (_meta.asset_class == "equity_index_future" and _meta.contract_size > 1.0)
+        self.contract_units  = (float(strategy.p.get("contracts", 1)) * float(_meta.contract_size)
                                 if self.contract_sizing else 0.0)
 
         # Most-recent close, used for MTM at unified timestamps where this

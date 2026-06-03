@@ -218,10 +218,11 @@ class LunarStrategy(Strategy):
                               "matching TradeStation's 1-contract dollar scale."),
     ]
 
-    # Futures contract sizing: P&L scales by point_value ($50/pt for ES), 1 fixed
-    # contract — NOT % of equity. Makes dashboard dollars match TS's scale. The
-    # engines bake point_value into `units` so all P&L/equity math is unchanged.
-    USE_CONTRACT_SIZING = True
+    # Contract sizing is now instrument-driven (the engines auto-size ES and other
+    # index futures as N contracts × $/pt from the asset catalog — see
+    # backtest_engine / portfolio_runner). The `contracts` param above = TS nCon;
+    # the `point_value` param is used only for Lunar's own $1,750 stop math (vectorized
+    # has no symbol context), and equals the ES catalog multiplier (50) for consistency.
 
     META = StrategyMeta(
         id="lunar",
