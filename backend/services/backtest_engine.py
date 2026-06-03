@@ -195,6 +195,13 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     efl_a = sig_df["exit_fill_long"].to_numpy(dtype=float)  if has_exact_fills else None
     efs_a = sig_df["exit_fill_short"].to_numpy(dtype=float) if has_exact_fills else None
 
+    # Fixed-contract futures sizing (opt-in via strategy.USE_CONTRACT_SIZING).
+    # units = contracts × point_value, so the existing `move × units` P&L math
+    # yields TS-style dollars ($50/pt for ES) instead of %-of-equity sizing.
+    contract_sizing = bool(getattr(strategy, "USE_CONTRACT_SIZING", False))
+    contract_units  = (float(strategy.p.get("contracts", 1)) * float(strategy.p.get("point_value", 1))
+                       if contract_sizing else 0.0)
+
     n = len(sig_df)
 
     tranches_long: list[dict]  = []
@@ -282,7 +289,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             if cur_eq > 0 and cond_long_a[t - 1] and len(tranches_long) < max_tranches:
                 fill = op * (1.0 + slippage)
                 if fill > 0:
-                    units = (cur_eq * risk_frac) / fill
+                    units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill
                     fee_open = fee_flat + abs(fill * units) * fee_pct
                     realized_cum -= fee_open
                     tranches_long.append({
@@ -298,7 +305,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             if cur_eq > 0 and cond_short_a[t - 1] and len(tranches_short) < max_tranches:
                 fill = op * (1.0 - slippage)
                 if fill > 0:
-                    units = (cur_eq * risk_frac) / fill
+                    units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill
                     fee_open = fee_flat + abs(fill * units) * fee_pct
                     realized_cum -= fee_open
                     tranches_short.append({

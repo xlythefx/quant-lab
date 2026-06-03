@@ -118,6 +118,14 @@ class _Stream:
         # risk_pct (per-strategy). 3.0 fallback matches historical default.
         self.risk_frac = float(strategy.p.get("risk_pct", 3.0)) / 100.0
 
+        # Fixed-contract futures sizing (opt-in). units = contracts × point_value,
+        # so P&L scales to TS dollars ($50/pt for ES). Futures use margin not cash,
+        # so the cash gate is bypassed for these (the collateral/locked_notional
+        # accounting still nets out correctly in total_eq).
+        self.contract_sizing = bool(getattr(strategy, "USE_CONTRACT_SIZING", False))
+        self.contract_units  = (float(strategy.p.get("contracts", 1)) * float(strategy.p.get("point_value", 1))
+                                if self.contract_sizing else 0.0)
+
         # Most-recent close, used for MTM at unified timestamps where this
         # strategy doesn't have a bar.
         self.last_close: float = float(self.close_a[0]) if len(self.close_a) else 0.0
@@ -181,7 +189,7 @@ def _counterfactual_pnl(stream: _Stream, signal_idx: int, side: str,
         entry_fill = float(stream.open_a[fill_bar]) * (1.0 - slippage)
     if entry_fill <= 0:
         return None
-    units = (equity_at_signal * stream.risk_frac) / entry_fill
+    units = stream.contract_units if stream.contract_sizing else (equity_at_signal * stream.risk_frac) / entry_fill
     fee_open = fee_flat + abs(entry_fill * units) * fee_pct
 
     # Walk forward looking for the same-side exit. We mirror the engine: act
@@ -595,11 +603,13 @@ def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
         fill = op * (1.0 + slip_sign * slippage)
         if fill <= 0:
             return
-        units = (cur_eq * s.risk_frac) / fill
+        units = s.contract_units if s.contract_sizing else (cur_eq * s.risk_frac) / fill
         notional = abs(fill * units)
         fee_open = fee_flat + notional * fee_pct
         required = notional + fee_open
-        if state.cash < required:
+        # Futures (contract sizing) are margin-based — don't cash-gate on full
+        # notional; only the fee needs to be funded.
+        if not s.contract_sizing and state.cash < required:
             # Skip + log with counterfactual.
             would_be = _counterfactual_pnl(
                 s, t - 1, side, cur_eq, fee_pct, fee_flat, slippage

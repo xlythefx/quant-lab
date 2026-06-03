@@ -211,8 +211,17 @@ class LunarStrategy(Strategy):
                   group="Direction"),
 
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
-                  description="Position size as % of current equity per trade."),
+                  description="Only used if Contract sizing is OFF — position as % of equity."),
+        ParamSpec("contracts", ParamType.INT, 1, min=1, max=100, step=1, group="Risk",
+                  description="Number of futures contracts per trade (TS nCon). With contract "
+                              "sizing, P&L = points × contracts × point_value ($50/pt for ES), "
+                              "matching TradeStation's 1-contract dollar scale."),
     ]
+
+    # Futures contract sizing: P&L scales by point_value ($50/pt for ES), 1 fixed
+    # contract — NOT % of equity. Makes dashboard dollars match TS's scale. The
+    # engines bake point_value into `units` so all P&L/equity math is unchanged.
+    USE_CONTRACT_SIZING = True
 
     META = StrategyMeta(
         id="lunar",
