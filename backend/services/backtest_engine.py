@@ -141,6 +141,17 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         df = df[df["time"] <= int(end_time)]
     df = df.reset_index(drop=True)
 
+    # Per-symbol backtest start floor declared by the strategy (e.g. Lunar on ES:
+    # TS datafeed only produces trades from 2018, so the dashboard comparison is
+    # restricted to that range). Only applied when the caller didn't pass an
+    # explicit start_time — the UI date-range picker always overrides this.
+    sym_start = getattr(strategy, "SYMBOL_BACKTEST_START", {}).get(symbol)
+    if sym_start and start_time is None and not df.empty:
+        from datetime import datetime, timezone
+        floor_ts = int(datetime.strptime(sym_start, "%Y-%m-%d")
+                       .replace(tzinfo=timezone.utc).timestamp())
+        df = df[df["time"] >= floor_ts].reset_index(drop=True)
+
     if df.empty:
         return _empty_result(strategy_id, symbol, timeframe, rc)
 

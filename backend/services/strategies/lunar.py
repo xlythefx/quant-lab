@@ -21,23 +21,35 @@ Original TS logic (verbatim):
 Both entries AND phase exits are session-gated.  Stop / target / breakeven /
 maxbars fire on every bar.
 
-Option-A fixes vs original broken port
----------------------------------------
-1. ATR now uses true session-level (1380m) OHLCV — groups 60m bars into sessions,
-   computes native session true-range and Wilder ATR, then maps back per bar.
-   Previously used 60m ATR shifted by session_bars which gave different values.
+Fixes vs original broken port (validated against TS ES trade list 2018–2026,
+see docs/lunar_es_tradestation_2018_2026.md)
+-----------------------------------------------------------------------------
+1. DATE-BASED PHASE + epoch correction. TS `Phase` is computed from `Date` (one
+   value per trading day — a step function), and MultiCharts' DateToJulian uses
+   a different epoch than astronomical JD. The old port used continuous per-bar
+   phase on the wrong epoch, entering on the wrong lunar days. Phase is now a
+   per-day step function with _PHASE_OFFSET / _DATE_SHIFT fit to TS entries.
 
-2. Stop / target / breakeven now detected via intra-bar high/low (not close).
-   Long  stop    : low  <= entry - stop$/pv
-   Long  target  : high >= entry + tgt$/pv
-   Short stop    : high >= entry + stop$/pv
-   Short target  : low  <= entry - tgt$/pv
-   Matches TS setstoploss / setprofittarget intra-bar semantics.
+2. SESSION-BASED phase lags. Phase[1]/[35]/[65] in TS (on ~23-bar/day data) really
+   compare consecutive DAILY phase values. We detect peaks/troughs on the per-
+   session daily phase using session offsets (phase_lag_near/mid/far now count
+   sessions, not bars) — robust to our data's ~19 bars/day.
 
-3. Flat-bar guard added: skips session-open bar if high == low (TS HighS<>LowS).
+3. ATR uses last two COMPLETED sessions (s-1 vs s-2), not the forming current
+   session — removes look-ahead and makes live == backtest. Session-level Wilder
+   ATR(11) on grouped 60m bars matches TS `avgtruerange of data2` (1380m).
 
-Fill price at engine level is still next-bar open (engine limitation; Option B
-would fix this by supporting exact level fills).
+4. Intra-bar stop/target/breakeven (low for long stop, high for long target …)
+   matching TS setstoploss/setprofittarget; flat-bar guard (HighS<>LowS).
+
+5. Option-B exact fills: stop/target/BE fill at the level (gap-protected), not
+   next-bar open. See exit_fill_long/short columns + backtest_engine.
+
+Residual gap vs TS (~52% win vs 63%) is data fidelity: our ES parquet is back-
+adjusted differently and has ~19 vs 23 bars/day, so intrabar highs/lows during a
+trade differ. Trade count (149 vs 156) and long/short split (104/45 vs 109/47)
+track closely. Dashboard restricts ES to 2018+ (SYMBOL_BACKTEST_START) to match
+the range TS actually traded.
 """
 from __future__ import annotations
 
@@ -52,14 +64,28 @@ from services.strategies.base import (
 
 _UNIX_EPOCH_JD = 2440587.5
 _LUNAR_PERIOD  = 29.53059
-_PHASE_OFFSET  = 0.4137
+# MultiCharts' DateToJulian uses a different epoch than the astronomical Julian
+# Day (2440587.5). The original TS offset 0.4137 was calibrated to MC's epoch;
+# porting it onto astronomical JD shifted the phase ~quarter-cycle, so Python
+# entered on the wrong lunar days. _PHASE_OFFSET / _DATE_SHIFT below were fit to
+# reproduce TS's actual ES entry dates (144/156 matched).
+_PHASE_OFFSET  = 0.046
+_DATE_SHIFT    = 4
 
 
-def _moon_phase(times_s: pd.Series) -> pd.Series:
-    julian = times_s / 86400.0 + _UNIX_EPOCH_JD + 2.0
-    raw    = julian / _LUNAR_PERIOD + _PHASE_OFFSET
-    frac   = raw - np.floor(raw)
-    return (2.0 * (frac - 0.5)).abs()
+def _moon_phase(times_s) -> pd.Series:
+    """Date-based moon phase — ONE value per UTC calendar day (a step function),
+    matching TS where `Phase` is computed from `Date` with no intraday component.
+    Returns a triangle wave: 1.0 at the cycle peak (full-moon proxy), 0.0 at trough."""
+    arr     = np.asarray(times_s, dtype=float)
+    day_mid = np.floor(arr / 86400.0) * 86400.0           # truncate to UTC midnight
+    julian  = day_mid / 86400.0 + _UNIX_EPOCH_JD + _DATE_SHIFT
+    raw     = julian / _LUNAR_PERIOD + _PHASE_OFFSET
+    frac    = raw - np.floor(raw)
+    result  = np.abs(2.0 * (frac - 0.5))
+    if isinstance(times_s, pd.Series):
+        return pd.Series(result, index=times_s.index)
+    return result
 
 
 def _session_ids(times: np.ndarray) -> np.ndarray:
@@ -107,14 +133,18 @@ def _session_atr_rising(df: pd.DataFrame, atr_period: int,
         sess_atr[i] = tr if (i == 0 or not np.isfinite(sess_atr[i - 1])) else \
                       sess_atr[i - 1] * (1 - alpha) + tr * alpha
 
-    # Map back: each bar gets its session's ATR comparison result
+    # Map back: each bar gets its session's ATR comparison result.
+    # Compare the two most recently COMPLETED sessions (s-1 vs s-2), NOT the
+    # current session — at session-open the current session is still forming, so
+    # using it would be look-ahead (and breaks live, where it's a 1-bar session).
+    # This matches TS `atr of data2 > atr[1]` referencing closed daily bars.
     sid_to_idx = {sid: i for i, sid in enumerate(unique)}
     rising = np.zeros(n, dtype=bool)
     for j in range(n):
         i = sid_to_idx[sids[j]]
-        if i < 1:
+        if i < 2:
             continue
-        curr = sess_atr[i]; prev = sess_atr[i - 1]
+        curr = sess_atr[i - 1]; prev = sess_atr[i - 2]
         if np.isfinite(curr) and np.isfinite(prev) and prev > 0:
             rising[j] = curr > prev * atr_rising_mult
     return rising
@@ -122,12 +152,16 @@ def _session_atr_rising(df: pd.DataFrame, atr_period: int,
 
 class LunarStrategy(Strategy):
     PARAM_SCHEMA = [
-        ParamSpec("phase_lag_near", ParamType.INT, 1,  min=1,   max=100,  step=1,  group="Phase",
-                  description="Near lag in bars."),
-        ParamSpec("phase_lag_mid",  ParamType.INT, 35, min=5,   max=3000, step=1,  group="Phase",
-                  description="Mid lag — the suspected phase extremum."),
-        ParamSpec("phase_lag_far",  ParamType.INT, 65, min=10,  max=6000, step=1,  group="Phase",
-                  description="Far lag."),
+        ParamSpec("phase_lag_near", ParamType.INT, 2,  min=1,  max=20, step=1, group="Phase",
+                  description="Near lag in SESSIONS. Phase is date-based (one value per "
+                              "trading day) so lags count sessions, not bars (matching TS "
+                              "where Phase is a per-Date step function)."),
+        ParamSpec("phase_lag_mid",  ParamType.INT, 3,  min=2,  max=30, step=1, group="Phase",
+                  description="Mid lag in sessions — the suspected phase extremum. "
+                              "Entry fires when sess-phase peaked/troughed this many "
+                              "sessions ago."),
+        ParamSpec("phase_lag_far",  ParamType.INT, 4,  min=3,  max=40, step=1, group="Phase",
+                  description="Far lag in sessions (must be > mid)."),
 
         ParamSpec("atr_period",      ParamType.INT,   11,  min=2,  max=60,  step=1,    group="ATR Filter",
                   description="ATR smoothing period (sessions). Original: 11 on data2 1380m."),
@@ -189,6 +223,22 @@ class LunarStrategy(Strategy):
                     color="rgba(192,180,255,0.55)", line_width=1),
     ]
 
+    # Restrict dashboard backtests to the range TS actually traded, so the
+    # numbers line up with the TradeStation reference (docs/lunar_es_*.md).
+    # The UI date-range picker overrides this; full data is still used for warmup.
+    SYMBOL_BACKTEST_START = {"ES": "2018-01-01"}
+
+    def __init__(self, params=None):
+        super().__init__(params)
+        # Migrate stale BAR-based phase lags (old defaults 1/35/65) to the new
+        # SESSION-based scheme (2/3/4). The old values exceed the new schema max
+        # (mid≤30, far≤40), so a cached/saved config from before this change would
+        # silently fire ~6x the entries. Detect those out-of-range values and reset.
+        if self.p.get("phase_lag_mid", 3) > 30 or self.p.get("phase_lag_far", 4) > 40:
+            self.p["phase_lag_near"] = 2
+            self.p["phase_lag_mid"]  = 3
+            self.p["phase_lag_far"]  = 4
+
     # ---- vectorized (backtest) ----------------------------------------
     def vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
         p    = self.p
@@ -199,43 +249,68 @@ class LunarStrategy(Strategy):
         open_ = out["open"].astype(float)
         time  = out["time"].astype(float)
 
-        phase = _moon_phase(time)
-
-        ln = int(p["phase_lag_near"])
-        lm = int(p["phase_lag_mid"])
-        lf = int(p["phase_lag_far"])
-        p_near = phase.shift(ln)
-        p_mid  = phase.shift(lm)
-        p_far  = phase.shift(lf)
-
-        peak_window   = (p_near < p_mid) & (p_mid > p_far)
-        trough_window = (p_near > p_mid) & (p_mid < p_far)
-
-        # FIX 1: True session-level ATR matching TS data2 (1380m).
-        atr_rising_arr = _session_atr_rising(out, int(p["atr_period"]),
-                                             float(p["atr_rising_mult"]))
-        atr_rising = pd.Series(atr_rising_arr, index=out.index)
-
-        sides      = p["sides"]
-        phase_flip = bool(p.get("phase_flip_exit", True))
-        _false_s   = pd.Series(False, index=out.index)
-        wle_arr = (peak_window if sides.get("long") else _false_s).fillna(False).to_numpy()
-        wse_arr = ((trough_window & atr_rising) if sides.get("short") else _false_s).fillna(False).to_numpy()
-        pel_arr = (trough_window if phase_flip else _false_s).fillna(False).to_numpy()
-        pes_arr = (peak_window   if phase_flip else _false_s).fillna(False).to_numpy()
+        phase = _moon_phase(time)   # date-based step function (one value/day)
 
         n      = len(out)
         time_a = time.to_numpy()
         high_a = high.to_numpy()
         low_a  = low.to_numpy()
         open_a = open_.to_numpy()
+        phase_a = phase.to_numpy()
 
-        # Session-open detection via time gaps (robust to DST).
+        # Session structure (robust to DST): a gap > one bar starts a new session.
+        sids = _session_ids(time_a)
+        nS = int(sids[-1]) + 1 if n else 0
         is_sess = np.zeros(n, dtype=bool)
-        is_sess[0] = True
+        if n:
+            is_sess[0] = True
         for i in range(1, n):
             if time_a[i] - time_a[i - 1] > 3600:
                 is_sess[i] = True
+
+        # Per-session daily phase = phase at each session-open bar (one value/session).
+        sess_open_bar = np.zeros(nS, dtype=int)
+        for i in range(n):
+            if is_sess[i] or i == 0:
+                sess_open_bar[sids[i]] = i
+        sess_phase = phase_a[sess_open_bar] if nS else np.array([])
+
+        # Session-level peak/trough detection at SESSION offsets near<mid<far.
+        # Peak at session (s-mid): sess_phase[s-near] < sess_phase[s-mid] > sess_phase[s-far].
+        ln = int(p["phase_lag_near"])
+        lm = int(p["phase_lag_mid"])
+        lf = int(p["phase_lag_far"])
+        sess_peak   = np.zeros(nS, dtype=bool)
+        sess_trough = np.zeros(nS, dtype=bool)
+        for s in range(lf, nS):
+            pn, pm, pf = sess_phase[s - ln], sess_phase[s - lm], sess_phase[s - lf]
+            sess_peak[s]   = (pn < pm) and (pm > pf)
+            sess_trough[s] = (pn > pm) and (pm < pf)
+
+        # FIX 1: True session-level ATR matching TS data2 (1380m), mapped per session.
+        atr_rising_bar  = _session_atr_rising(out, int(p["atr_period"]),
+                                              float(p["atr_rising_mult"]))
+        atr_rising_sess = atr_rising_bar[sess_open_bar] if nS else np.array([])
+
+        # Per-bar entry/exit arrays — TRUE only at session-open bars (TS OpenS gate).
+        sides      = p["sides"]
+        phase_flip = bool(p.get("phase_flip_exit", True))
+        long_on    = bool(sides.get("long"))
+        short_on   = bool(sides.get("short"))
+        wle_arr = np.zeros(n, dtype=bool)   # long entry  (peak)
+        wse_arr = np.zeros(n, dtype=bool)   # short entry (trough + ATR rising)
+        pel_arr = np.zeros(n, dtype=bool)   # long phase-flip exit  (trough)
+        pes_arr = np.zeros(n, dtype=bool)   # short phase-flip exit (peak)
+        for i in range(n):
+            if not is_sess[i]:
+                continue
+            s  = sids[i]
+            pk = sess_peak[s]
+            tr = sess_trough[s]
+            if long_on  and pk:                           wle_arr[i] = True
+            if short_on and tr and atr_rising_sess[s]:    wse_arr[i] = True
+            if phase_flip and tr:                         pel_arr[i] = True
+            if phase_flip and pk:                         pes_arr[i] = True
 
         cond_long      = np.zeros(n, dtype=bool)
         cond_short     = np.zeros(n, dtype=bool)
@@ -374,7 +449,11 @@ class LunarStrategy(Strategy):
         if not bool(candle.get("isClosed", False)):
             return None
         p      = self.p
-        warmup = max(int(p["phase_lag_far"]) + 10, int(p["atr_period"]) * 4)
+        # Phase lags + ATR are now SESSION-based; warm up enough whole sessions
+        # (~24 bars each) to cover the far lag and let Wilder ATR converge
+        # (3x the ATR window) so live matches the vectorized backtest closely.
+        warmup_sessions = max(int(p["phase_lag_far"]) + 3, int(p["atr_period"]) * 3)
+        warmup = warmup_sessions * 24
 
         buf = state.setdefault("buf", [])
         buf.append({
@@ -393,21 +472,32 @@ class LunarStrategy(Strategy):
         df     = pd.DataFrame(buf)
         time_s = df["time"].astype(float)
         phase  = _moon_phase(time_s)
+        phase_a = phase.to_numpy()
 
         ln = int(p["phase_lag_near"]); lm = int(p["phase_lag_mid"]); lf = int(p["phase_lag_far"])
-        if len(phase) <= lf:
+
+        # Session-based daily phase (matches vectorized): one value per session,
+        # taken at each session-open bar.
+        times_arr = df["time"].to_numpy().astype(float)
+        sids_live = _session_ids(times_arr)
+        nS_live = int(sids_live[-1]) + 1
+        sopen_live = {}
+        for i in range(len(times_arr)):
+            if i == 0 or sids_live[i] != sids_live[i - 1]:
+                sopen_live[sids_live[i]] = i
+        if nS_live <= lf:
             return None
-        p_near = float(phase.iloc[-1 - ln])
-        p_mid  = float(phase.iloc[-1 - lm])
-        p_far  = float(phase.iloc[-1 - lf])
+        sess_phase = np.array([phase_a[sopen_live[s]] for s in range(nS_live)])
+
+        cur_s = sids_live[-1]
+        pn = sess_phase[cur_s - ln]; pm = sess_phase[cur_s - lm]; pf = sess_phase[cur_s - lf]
+        peak_window   = (pn < pm) and (pm > pf)
+        trough_window = (pn > pm) and (pm < pf)
 
         # FIX 1: true session-level ATR from buffer
         atr_rising_arr = _session_atr_rising(df, int(p["atr_period"]),
                                              float(p["atr_rising_mult"]))
         atr_rising = bool(atr_rising_arr[-1])
-
-        peak_window   = (p_near < p_mid) and (p_mid > p_far)
-        trough_window = (p_near > p_mid) and (p_mid < p_far)
 
         c  = float(df["close"].iloc[-1])
         h  = float(df["high"].iloc[-1])
@@ -415,7 +505,6 @@ class LunarStrategy(Strategy):
         ts = int(df["time"].iloc[-1])
 
         # Detect session-open from time gap in buffer
-        times_arr = df["time"].to_numpy()
         is_sess = len(times_arr) < 2 or (times_arr[-1] - times_arr[-2] > 3600)
 
         state["bar_count"] = int(state.get("bar_count", 0)) + 1

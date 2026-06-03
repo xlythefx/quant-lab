@@ -76,6 +76,8 @@ class _Stream:
             self.atr_a = None
             self.has_atr_stop = False
             self.atr_mult = 0.0
+            self.has_exact_fills = False
+            self.efl_a = self.efs_a = None
             self.ts_to_idx = {}
         else:
             self.time_a  = sig_df["time"].to_numpy(dtype=np.int64)
@@ -91,6 +93,14 @@ class _Stream:
             self.has_atr_stop = "atr" in sig_df.columns and "atr_mult" in getattr(strategy, "p", {})
             self.atr_a    = sig_df["atr"].to_numpy(dtype=float) if self.has_atr_stop else None
             self.atr_mult = float(strategy.p["atr_mult"]) if self.has_atr_stop else 0.0
+
+            # Option-B exact fills (stop/target/BE fill at the level, gap-protected).
+            # Matches backtest_engine.run — without this the dashboard fills exits
+            # at next-bar open, giving a different (worse) win rate.
+            self.has_exact_fills = ("exit_fill_long" in sig_df.columns
+                                    and "exit_fill_short" in sig_df.columns)
+            self.efl_a = sig_df["exit_fill_long"].to_numpy(dtype=float)  if self.has_exact_fills else None
+            self.efs_a = sig_df["exit_fill_short"].to_numpy(dtype=float) if self.has_exact_fills else None
 
             self.ts_to_idx = {int(self.time_a[i]): i for i in range(len(self.time_a))}
 
@@ -246,6 +256,17 @@ def run_portfolio(specs: list[StrategySpec],
         if end_time is not None:
             df = df[df["time"] <= int(end_time)]
         df = df.reset_index(drop=True)
+
+        # Per-symbol backtest start floor declared by the strategy (e.g. Lunar on
+        # ES restricts the dashboard to 2018+ to match the TS reference). Only
+        # applied when no explicit start_time was passed (date picker overrides).
+        sym_start = getattr(strategy, "SYMBOL_BACKTEST_START", {}).get(spec.symbol)
+        if sym_start and start_time is None and not df.empty:
+            from datetime import datetime, timezone
+            floor_ts = int(datetime.strptime(sym_start, "%Y-%m-%d")
+                           .replace(tzinfo=timezone.utc).timestamp())
+            df = df[df["time"] >= floor_ts].reset_index(drop=True)
+
         sig_df = strategy.vectorized(df) if not df.empty else df
         streams.append(_Stream(spec, strategy, sig_df))
 
@@ -491,7 +512,11 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
         if s.has_atr_stop and np.isfinite(tr["atr_at_entry"]):
             stop_hit = prev_close <= tr["entry_price"] - s.atr_mult * tr["atr_at_entry"]
         if mean_revert or stop_hit:
-            fill = op * (1.0 - slippage)
+            # Option-B: exact stop/target/BE fill level when the strategy provides it.
+            if s.has_exact_fills and mean_revert and np.isfinite(s.efl_a[t - 1]):
+                fill = float(s.efl_a[t - 1]) * (1.0 - slippage)
+            else:
+                fill = op * (1.0 - slippage)
             _close_tranche(s, tr, "long", fill, ts, state,
                            fee_flat, fee_pct, slippage, starting_capital,
                            slipped=True)
@@ -507,7 +532,11 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
         if s.has_atr_stop and np.isfinite(tr["atr_at_entry"]):
             stop_hit = prev_close >= tr["entry_price"] + s.atr_mult * tr["atr_at_entry"]
         if mean_revert or stop_hit:
-            fill = op * (1.0 + slippage)
+            # Option-B: exact stop/target/BE fill level when the strategy provides it.
+            if s.has_exact_fills and mean_revert and np.isfinite(s.efs_a[t - 1]):
+                fill = float(s.efs_a[t - 1]) * (1.0 + slippage)
+            else:
+                fill = op * (1.0 + slippage)
             _close_tranche(s, tr, "short", fill, ts, state,
                            fee_flat, fee_pct, slippage, starting_capital,
                            slipped=True)
