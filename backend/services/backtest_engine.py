@@ -152,6 +152,15 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                        .replace(tzinfo=timezone.utc).timestamp())
         df = df[df["time"] >= floor_ts].reset_index(drop=True)
 
+    # Symmetric end cap (e.g. Lunar on ES restricts to TS's traded window ~Apr 2026).
+    # Only applied when no explicit end_time was passed (date picker overrides).
+    sym_end = getattr(strategy, "SYMBOL_BACKTEST_END", {}).get(symbol)
+    if sym_end and end_time is None and not df.empty:
+        from datetime import datetime, timezone
+        cap_ts = int(datetime.strptime(sym_end, "%Y-%m-%d")
+                     .replace(tzinfo=timezone.utc).timestamp())
+        df = df[df["time"] <= cap_ts].reset_index(drop=True)
+
     if df.empty:
         return _empty_result(strategy_id, symbol, timeframe, rc)
 

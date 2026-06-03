@@ -4,6 +4,40 @@
 > ES 1h parquet (May 2016 – May 2026). First trade: 4/6/2018. Use this for trade-by-trade diff.
 > See also: `lunar_tradestation_reference.md` for the longer 2008–2026 IS/OS summary.
 
+## Python port — where it lands vs this reference
+
+| Metric | TradeStation | Python (matched window) |
+|---|---:|---:|
+| Period | Apr 2018 – Apr 2026 | Jan 2018 – Apr 2026 |
+| Trades | 156 | 147 |
+| Win rate | 63.5% | 53.1% |
+| Long / Short | 109 / 47 | 103 / 44 |
+| Avg winner / loser | $1,906 / −$1,733 | ~$1,820 / −$1,710 (≈ match) |
+| Largest win / loss | $3,250 / −$1,762 | $3,250 / −$1,938 |
+
+**Entry dates match 144/156 (92%).** Per-trade economics (avg win/loss, stop/target
+levels) match almost exactly — the strategy logic is faithfully ported.
+
+### Why the residual win-rate gap (53% vs 63%) — and why it's NOT the data
+
+We investigated exhaustively. The gap is **not** date range, and **not** missing bars:
+
+- **"19 vs 23 bars/day" is a non-issue.** Full trading days have 23 bars on both sides.
+  The 19-bar days are US market *holidays* (Memorial Day, July 4, Thanksgiving, MLK,
+  Presidents Day…) — the market was closed, and TS shares the exact same short sessions.
+- **`DateToJulian` epoch is now exact, not fitted.** MultiCharts counts Julian days from
+  **Jan 1 1900** (astronomical JD − 2,415,018.5; verified `DateToJulian(1231025)=45224`
+  for 2023-10-25). `_moon_phase` uses this exact epoch + TS's `0.4137` offset.
+- **The gap is path-dependent phase divergence.** On ~10 lunar cycles Python catches the
+  *peak* (goes long) where TS catches the *trough* (goes short) of the same cycle — each
+  worth ~$3,250. One slightly mistimed entry cascades into different downstream trades.
+  This is the ceiling of date-based peak/trough detection vs TS's exact bar-by-bar
+  `Phase[1]/[35]/[65]` on its own feed; closing it would require replicating MultiCharts
+  internals. **We accept 92% entry-date fidelity** — the port behaves like TS's strategy.
+
+Dashboard restricts ES to `SYMBOL_BACKTEST_START`/`SYMBOL_BACKTEST_END` (2018-01-01 →
+2026-04-30) so the comparison window matches TS. The UI date picker overrides both.
+
 ## Setup
 
 | Field | Value |

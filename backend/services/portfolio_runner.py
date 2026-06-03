@@ -267,6 +267,14 @@ def run_portfolio(specs: list[StrategySpec],
                            .replace(tzinfo=timezone.utc).timestamp())
             df = df[df["time"] >= floor_ts].reset_index(drop=True)
 
+        # Symmetric end cap (e.g. Lunar on ES restricts to TS's window ~Apr 2026).
+        sym_end = getattr(strategy, "SYMBOL_BACKTEST_END", {}).get(spec.symbol)
+        if sym_end and end_time is None and not df.empty:
+            from datetime import datetime, timezone
+            cap_ts = int(datetime.strptime(sym_end, "%Y-%m-%d")
+                         .replace(tzinfo=timezone.utc).timestamp())
+            df = df[df["time"] <= cap_ts].reset_index(drop=True)
+
         sig_df = strategy.vectorized(df) if not df.empty else df
         streams.append(_Stream(spec, strategy, sig_df))
 

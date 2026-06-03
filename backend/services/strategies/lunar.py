@@ -24,11 +24,12 @@ maxbars fire on every bar.
 Fixes vs original broken port (validated against TS ES trade list 2018–2026,
 see docs/lunar_es_tradestation_2018_2026.md)
 -----------------------------------------------------------------------------
-1. DATE-BASED PHASE + epoch correction. TS `Phase` is computed from `Date` (one
-   value per trading day — a step function), and MultiCharts' DateToJulian uses
-   a different epoch than astronomical JD. The old port used continuous per-bar
-   phase on the wrong epoch, entering on the wrong lunar days. Phase is now a
-   per-day step function with _PHASE_OFFSET / _DATE_SHIFT fit to TS entries.
+1. DATE-BASED PHASE + EXACT DateToJulian epoch. TS `Phase` is computed from `Date`
+   (one value per trading day — a step function). MultiCharts' DateToJulian counts
+   from a Jan 1 1900 epoch (= astronomical JD - 2,415,018.5; verified
+   DateToJulian(1231025)=45224). The old port used continuous per-bar phase on the
+   astronomical epoch, entering on the wrong lunar days. Phase is now a per-day step
+   function using the exact TS epoch + TS's original 0.4137 offset (no fitting).
 
 2. SESSION-BASED phase lags. Phase[1]/[35]/[65] in TS (on ~23-bar/day data) really
    compare consecutive DAILY phase values. We detect peaks/troughs on the per-
@@ -45,11 +46,12 @@ see docs/lunar_es_tradestation_2018_2026.md)
 5. Option-B exact fills: stop/target/BE fill at the level (gap-protected), not
    next-bar open. See exit_fill_long/short columns + backtest_engine.
 
-Residual gap vs TS (~52% win vs 63%) is data fidelity: our ES parquet is back-
-adjusted differently and has ~19 vs 23 bars/day, so intrabar highs/lows during a
-trade differ. Trade count (149 vs 156) and long/short split (104/45 vs 109/47)
-track closely. Dashboard restricts ES to 2018+ (SYMBOL_BACKTEST_START) to match
-the range TS actually traded.
+Residual gap vs TS (~53% win vs 63%) is NOT data/date range — full days have 23 bars
+on both sides (19-bar days are shared US market holidays). It's path-dependent: on
+~10 cycles Python catches the peak (long) where TS catches the trough (short); one
+mistimed entry cascades. Entry dates still match 144/156. Trade count (147 vs 156)
+and long/short split (103/44 vs 109/47) track closely. Dashboard restricts ES to TS's
+window via SYMBOL_BACKTEST_START/END (2018-01-01 → 2026-04-30).
 """
 from __future__ import annotations
 
@@ -64,25 +66,28 @@ from services.strategies.base import (
 
 _UNIX_EPOCH_JD = 2440587.5
 _LUNAR_PERIOD  = 29.53059
-# MultiCharts' DateToJulian uses a different epoch than the astronomical Julian
-# Day (2440587.5). The original TS offset 0.4137 was calibrated to MC's epoch;
-# porting it onto astronomical JD shifted the phase ~quarter-cycle, so Python
-# entered on the wrong lunar days. _PHASE_OFFSET / _DATE_SHIFT below were fit to
-# reproduce TS's actual ES entry dates (144/156 matched).
-_PHASE_OFFSET  = 0.046
-_DATE_SHIFT    = 4
+# Exact replication of TS `DateToJulian`. MultiCharts/TradeStation count Julian
+# days from a Jan 1 1900 epoch, NOT the astronomical Julian Day (Jan 1 4713 BC).
+# The two differ by a constant: TS_julian = astronomical_JD - 2,415,018.5.
+# Verified against the documented reserved word: DateToJulian(1231025) = 45224
+# for 2023-10-25 (astronomical JD 2,460,242.5 - 2,415,018.5 = 45,224). Using this
+# exact epoch with TS's original 0.4137 offset reproduces the strategy's phase
+# with no fitted constants. (Earlier the port kept 0.4137 on the astronomical JD,
+# shifting the phase ~quarter-cycle and entering on the wrong lunar days.)
+_TS_JULIAN_OFFSET = 2415018.5
+_PHASE_OFFSET     = 0.4137
 
 
 def _moon_phase(times_s) -> pd.Series:
     """Date-based moon phase — ONE value per UTC calendar day (a step function),
     matching TS where `Phase` is computed from `Date` with no intraday component.
     Returns a triangle wave: 1.0 at the cycle peak (full-moon proxy), 0.0 at trough."""
-    arr     = np.asarray(times_s, dtype=float)
-    day_mid = np.floor(arr / 86400.0) * 86400.0           # truncate to UTC midnight
-    julian  = day_mid / 86400.0 + _UNIX_EPOCH_JD + _DATE_SHIFT
-    raw     = julian / _LUNAR_PERIOD + _PHASE_OFFSET
-    frac    = raw - np.floor(raw)
-    result  = np.abs(2.0 * (frac - 0.5))
+    arr        = np.asarray(times_s, dtype=float)
+    day_mid    = np.floor(arr / 86400.0) * 86400.0        # truncate to UTC midnight
+    ts_julian  = day_mid / 86400.0 + _UNIX_EPOCH_JD - _TS_JULIAN_OFFSET  # TS DateToJulian
+    raw        = ts_julian / _LUNAR_PERIOD + _PHASE_OFFSET
+    frac       = raw - np.floor(raw)
+    result     = np.abs(2.0 * (frac - 0.5))
     if isinstance(times_s, pd.Series):
         return pd.Series(result, index=times_s.index)
     return result
@@ -227,6 +232,9 @@ class LunarStrategy(Strategy):
     # numbers line up with the TradeStation reference (docs/lunar_es_*.md).
     # The UI date-range picker overrides this; full data is still used for warmup.
     SYMBOL_BACKTEST_START = {"ES": "2018-01-01"}
+    # Cap the END to TS's traded window too, so the dashboard comparison covers the
+    # same ~2018-2026 period TS did (TS last trade was Apr 2026). UI picker overrides.
+    SYMBOL_BACKTEST_END = {"ES": "2026-04-30"}
 
     def __init__(self, params=None):
         super().__init__(params)
