@@ -55,6 +55,7 @@ def list_strategies() -> list[dict]:
         d = cls.META.to_dict()
         d["symbol_defaults"] = dict(getattr(cls, "SYMBOL_DEFAULTS", {}) or {})
         d["timeframe_defaults"] = dict(getattr(cls, "TIMEFRAME_DEFAULTS", {}) or {})
+        d["presets"] = dict(getattr(cls, "PRESETS", {}) or {})
         out.append(d)
     return out
 

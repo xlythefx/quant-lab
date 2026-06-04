@@ -107,6 +107,10 @@ class Strategy(ABC):
     # Per-timeframe preset overrides. Applied before symbol defaults so symbol
     # wins over timeframe, both win over schema defaults. Same sparse merge rules.
     TIMEFRAME_DEFAULTS: dict[str, dict] = {}
+    # Named built-in presets shown in the StrategyEditor preset bar.
+    # Sparse: only params that differ from schema defaults. Same merge rules as
+    # SYMBOL_DEFAULTS (nested SESSIONS/SIDES are merged per sub-key).
+    PRESETS: dict[str, dict] = {}
 
     def __init__(self, params: Optional[dict] = None):
         self.p = self._merge_with_defaults(params or {})

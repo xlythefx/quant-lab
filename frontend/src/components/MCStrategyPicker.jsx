@@ -151,6 +151,8 @@ export default function MCStrategyPicker({ catalog, strategies, onChange }) {
           open
           schema={editingMeta.schema}
           params={strategies[editingIdx].params}
+          strategyId={editingMeta.id}
+          builtinPresets={editingMeta.presets || {}}
           onChange={() => { /* draft kept inside editor; apply on close */ }}
           onApply={(p) => onApplyParams(editingIdx, p)}
           onClose={() => setEditingIdx(null)}

@@ -723,6 +723,8 @@ export default function LiveAlerts() {
         open={paramsEditorOpen}
         schema={catalogById[draft.strategy_id]?.schema || []}
         params={draft.params || {}}
+        strategyId={draft.strategy_id}
+        builtinPresets={catalogById[draft.strategy_id]?.presets || {}}
         onClose={() => setParamsEditorOpen(false)}
         onApply={(p) => { setDraft((d) => ({ ...d, params: p })); setParamsEditorOpen(false); }}
         onResetDefaults={() => setDraft((d) => ({ ...d, params: {} }))}

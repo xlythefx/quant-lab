@@ -99,6 +99,20 @@ class VwmaReversionStrategy(Strategy):
         schema=PARAM_SCHEMA,
     )
 
+    PRESETS = {
+        "BTC 15m": {
+            "vwma_length":  15,
+            "z_threshold":  1.3,
+            "rsi_length":   15,
+            "sides":        {"long": True, "short": False},
+            "use_regime":   False,
+            "sessions":     {
+                "tokyo":  {"enabled": False},
+                "ny_pm":  {"enabled": True},
+            },
+        },
+    }
+
     TIMEFRAME_DEFAULTS = {
         "1m": {
             "z_threshold":   1.0,

@@ -859,6 +859,8 @@ export default function Dashboard() {
             color={s.color}
             schema={meta.schema}
             params={s.params}
+            strategyId={s.id}
+            builtinPresets={meta.presets || {}}
             onClose={() => setEditingId(null)}
             onApply={(p) => { onApplyParams(s.id, p); setEditingId(null); }}
             onSaveAsDefault={(p) => saveUserDefaults(s.id, p)}
