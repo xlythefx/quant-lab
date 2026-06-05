@@ -101,6 +101,25 @@ function WindowScheduleHint({ dataset, isBars, oosBars, embargoBars = 0 }) {
       <div className="text-[10px] uppercase tracking-wider text-muted mb-2">
         Window schedule · in calendar dates
       </div>
+
+      {/* The headline: what the stitched OOS report actually covers. This is
+          the real "test period" — NOT just the first window's dates below. */}
+      <div className="rounded border border-accent-cyan/30 bg-accent-cyan/5 px-3 py-2 mb-3">
+        <div className="text-[10px] uppercase tracking-wider text-accent-cyan/80 mb-0.5">
+          Stitched out-of-sample coverage
+        </div>
+        <div className="text-sm font-mono text-text">
+          {fmtDate(sched.oosStart)} → {fmtDate(sched.last)}
+          <span className="text-muted text-xs"> · {humanizeSpan(sched.last - sched.oosStart)}</span>
+        </div>
+        <div className="text-[11px] text-muted/80 mt-0.5">
+          The full unseen test — every 30-day OOS slice from {sched.nWindows} rolling windows, chained together.
+        </div>
+      </div>
+
+      <div className="text-[10px] uppercase tracking-wider text-muted/70 mb-1.5">
+        First window (example · the IS window slides forward each step)
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs font-mono">
         <div>
           <span className="text-accent-blue">Train (IS)</span>
@@ -114,8 +133,9 @@ function WindowScheduleHint({ dataset, isBars, oosBars, embargoBars = 0 }) {
         </div>
       </div>
       <div className="text-[11px] text-muted/80 mt-2">
-        First window shown. The OOS window then rolls forward by {oosBars} bars each step —
-        <span className="text-text font-mono"> ~{sched.nWindows} windows</span> covering through {fmtDate(sched.last)}.
+        IS is a <span className="text-text">rolling</span> {humanizeSpan(sched.isSpan)} window — each step it slides forward
+        by {oosBars} bars and re-optimizes, so window&nbsp;#{sched.nWindows} trains on late data and tests through {fmtDate(sched.last)}.
+        Want one fixed "train early, test recent" split instead? Use the <span className="text-text">Live-Test Holdout</span> preset.
       </div>
     </div>
   );
