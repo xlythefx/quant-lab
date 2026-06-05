@@ -273,6 +273,22 @@ function ParamInput({ spec, value, onChange }) {
       </div>
     );
   }
+  if (spec.type === "regimes") {
+    const labels = Object.keys(spec.default || {});
+    return (
+      <div>
+        {spec.description && <div className="text-[11px] text-muted mb-2">{spec.description}</div>}
+        <div className="flex flex-col gap-1.5">
+          {labels.map((lab) => (
+            <label key={lab} className="flex items-center gap-2 text-xs text-muted">
+              <Toggle checked={!!(v && v[lab])} onChange={(b) => onChange(spec.name, { ...v, [lab]: b })} />
+              {lab}
+            </label>
+          ))}
+        </div>
+      </div>
+    );
+  }
   return null;
 }
 
@@ -375,6 +391,13 @@ function Row({ label, hint, children }) {
  */
 function SessionsField({ spec, value, onChange }) {
   const v = value || {};
+  // Mirror the backend's per-session merge (base.py _merge_with_defaults):
+  // a stored session may carry only {enabled} (e.g. from a preset), so fall
+  // back to the schema default for start/end instead of showing 00:00.
+  const cfgFor = (key) => {
+    const dflt = (spec.default && spec.default[key]) || { enabled: false, start: "00:00", end: "00:00" };
+    return { ...dflt, ...(v[key] || {}) };
+  };
   const [picker, setPicker] = useState(null);  // { key, field: 'start' | 'end' } | null
   const [tz, setTz] = useState(getTz());
 
@@ -395,7 +418,7 @@ function SessionsField({ spec, value, onChange }) {
       {spec.description && <div className="text-[11px] text-muted mb-2">{spec.description}</div>}
       <div className="space-y-2">
         {Object.entries(SESSION_LABELS).map(([key, label]) => {
-          const cfg = v[key] || { enabled: false, start: "00:00", end: "00:00" };
+          const cfg = cfgFor(key);
           const setSub = (patch) => onChange(spec.name, { ...v, [key]: { ...cfg, ...patch } });
           return (
             <div key={key} className="px-2 py-1.5 rounded-md border border-line/60 bg-bg-elev/30">
@@ -421,12 +444,12 @@ function SessionsField({ spec, value, onChange }) {
 
       <TimePickerModal
         open={!!picker}
-        value={picker ? (v[picker.key]?.[picker.field] || "00:00") : "00:00"}
+        value={picker ? cfgFor(picker.key)[picker.field] : "00:00"}
         label={picker?.label}
         onClose={() => setPicker(null)}
         onChange={(hhmm) => {
           if (!picker) return;
-          const cur = v[picker.key] || { enabled: false, start: "00:00", end: "00:00" };
+          const cur = cfgFor(picker.key);
           onChange(spec.name, { ...v, [picker.key]: { ...cur, [picker.field]: hhmm } });
         }}
       />
