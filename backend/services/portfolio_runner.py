@@ -126,8 +126,18 @@ class _Stream:
         _broker = market_data.broker_for(spec.symbol, spec.timeframe)
         _meta   = assets.get(spec.symbol, _broker or market_data.BROKER_DEFAULT)
         self.contract_sizing = (_meta.asset_class == "equity_index_future" and _meta.contract_size > 1.0)
-        self.contract_units  = (float(strategy.p.get("contracts", 1)) * float(_meta.contract_size)
-                                if self.contract_sizing else 0.0)
+        self.n_contracts     = float(strategy.p.get("contracts", 1)) if self.contract_sizing else 0.0
+        self.contract_units  = self.n_contracts * float(_meta.contract_size) if self.contract_sizing else 0.0
+        # Fee config (set by run_portfolio after rc is read). Futures: flat $/contract;
+        # crypto/spot: flat + %-notional.
+        self.fee_flat = 0.0
+        self.fee_pct  = 0.0
+        self.futures_commission = 0.0
+
+    def fee(self, notional: float) -> float:
+        if self.contract_sizing:
+            return self.fee_flat + self.futures_commission * self.n_contracts
+        return self.fee_flat + abs(notional) * self.fee_pct
 
         # Most-recent close, used for MTM at unified timestamps where this
         # strategy doesn't have a bar.
@@ -193,7 +203,7 @@ def _counterfactual_pnl(stream: _Stream, signal_idx: int, side: str,
     if entry_fill <= 0:
         return None
     units = stream.contract_units if stream.contract_sizing else (equity_at_signal * stream.risk_frac) / entry_fill
-    fee_open = fee_flat + abs(entry_fill * units) * fee_pct
+    fee_open = stream.fee(entry_fill * units)
 
     # Walk forward looking for the same-side exit. We mirror the engine: act
     # on `bxl_a[k]` to close at the *next* bar's open.
@@ -207,7 +217,7 @@ def _counterfactual_pnl(stream: _Stream, signal_idx: int, side: str,
             else:
                 exit_fill = float(stream.open_a[k + 1]) * (1.0 + slippage)
                 pnl = (entry_fill - exit_fill) * units
-            fee_close = fee_flat + abs(exit_fill * units) * fee_pct
+            fee_close = stream.fee(exit_fill * units)
             return float(pnl - fee_open - fee_close)
     # No exit until end — mark to final close.
     final_close = float(stream.close_a[-1])
@@ -215,7 +225,7 @@ def _counterfactual_pnl(stream: _Stream, signal_idx: int, side: str,
         pnl = (final_close - entry_fill) * units
     else:
         pnl = (entry_fill - final_close) * units
-    fee_close = fee_flat + abs(final_close * units) * fee_pct
+    fee_close = stream.fee(final_close * units)
     return float(pnl - fee_open - fee_close)
 
 
@@ -249,6 +259,7 @@ def run_portfolio(specs: list[StrategySpec],
     starting_capital = float(rc["starting_capital"])
     fee_flat         = float(rc["fee_flat"])
     fee_pct          = float(rc["fee_pct"]) / 100.0
+    futures_commission = float(rc.get("futures_commission", 0.0))  # $/contract/side
     slippage         = float(rc["slippage_bps"]) / 10000.0
 
     # Sort by priority (stable for ties to preserve user list order). Keep
@@ -287,7 +298,11 @@ def run_portfolio(specs: list[StrategySpec],
             df = df[df["time"] <= cap_ts].reset_index(drop=True)
 
         sig_df = strategy.vectorized(df) if not df.empty else df
-        streams.append(_Stream(spec, strategy, sig_df))
+        st = _Stream(spec, strategy, sig_df)
+        st.fee_flat = fee_flat
+        st.fee_pct = fee_pct
+        st.futures_commission = futures_commission
+        streams.append(st)
 
     # Unified timeline = union of all streams' bar timestamps.
     all_ts: set[int] = set()
@@ -572,7 +587,7 @@ def _close_tranche(s: _Stream, tr: dict, side: str, fill: float, ts: int,
     record the trade. `slipped=False` for forced end-of-data closes which
     use the close price directly."""
     notional_close = abs(fill * tr["units"])
-    fee_close = fee_flat + notional_close * fee_pct
+    fee_close = s.fee(notional_close)
     if side == "long":
         pnl = (fill - tr["entry_price"]) * tr["units"] - fee_close
     else:
@@ -608,7 +623,7 @@ def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
             return
         units = s.contract_units if s.contract_sizing else (cur_eq * s.risk_frac) / fill
         notional = abs(fill * units)
-        fee_open = fee_flat + notional * fee_pct
+        fee_open = s.fee(notional)
         required = notional + fee_open
         # Futures (contract sizing) are margin-based — don't cash-gate on full
         # notional; only the fee needs to be funded.

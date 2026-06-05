@@ -23,7 +23,8 @@ _LOCK = Lock()
 DEFAULTS: dict = {
     "starting_capital": float(STARTING_CAPITAL),
     "fee_flat":   0.0,           # flat $ per trade (each side)
-    "fee_pct":    0.04,          # % of notional per trade (each side)
+    "fee_pct":    0.04,          # % of notional per trade (each side) — crypto/spot
+    "futures_commission": 0.0,   # flat $ per CONTRACT per side — index futures (ES etc.)
     "slippage_bps": 1.0,         # basis points applied to fill price
     "pyramiding": 10.0,          # legacy fallback; pyramiding is per-strategy
 }
@@ -41,6 +42,7 @@ def _coerce(d: dict) -> dict:
     out["starting_capital"] = max(1.0, out["starting_capital"])
     out["fee_flat"] = max(0.0, out["fee_flat"])
     out["fee_pct"] = max(0.0, min(10.0, out["fee_pct"]))
+    out["futures_commission"] = max(0.0, out["futures_commission"])
     out["slippage_bps"] = max(0.0, min(500.0, out["slippage_bps"]))
     out["pyramiding"] = max(1.0, min(100.0, out["pyramiding"]))
     return out

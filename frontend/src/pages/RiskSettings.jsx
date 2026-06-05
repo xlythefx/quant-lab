@@ -14,10 +14,11 @@ import {
 import { TZ_PRESETS, getTz, setTz, convertUtcHHmm } from "../services/timezone.js";
 
 const RISK_DEFAULTS = {
-  starting_capital: 100000,
-  fee_flat:         0.0,
-  fee_pct:          0.04,
-  slippage_bps:     1.0,
+  starting_capital:   100000,
+  fee_flat:           0.0,
+  fee_pct:            0.04,
+  futures_commission: 0.0,
+  slippage_bps:       1.0,
 };
 
 const FIELDS = [
@@ -26,7 +27,9 @@ const FIELDS = [
   { key: "fee_flat",         label: "Flat Fee per Side",    unit: "$",   step: 0.1,  min: 0,
     hint: "Charged on both entry and exit." },
   { key: "fee_pct",          label: "Fee % per Side",       unit: "%",   step: 0.01, min: 0, max: 10,
-    hint: "Of notional. Charged on both entry and exit." },
+    hint: "Of notional (crypto/spot). Charged on both entry and exit." },
+  { key: "futures_commission", label: "Futures Commission / Contract", unit: "$", step: 0.25, min: 0,
+    hint: "Flat $ per contract per side for index futures (ES, NQ…). Replaces the % fee for contract-sized instruments." },
   { key: "slippage_bps",     label: "Slippage",             unit: "bps", step: 0.5,  min: 0, max: 500,
     hint: "Adverse fill price applied to each entry & exit." },
   // risk_pct and pyramiding are now configured per-strategy in the strategy Settings panel.
@@ -128,6 +131,7 @@ export default function RiskSettings() {
             <div className="text-muted">Starting capital</div><div className="text-text">{fmtUsd(cfg.starting_capital)}</div>
             <div className="text-muted">Flat fee</div>        <div className="text-text">{fmtUsd(cfg.fee_flat)}</div>
             <div className="text-muted">Fee %</div>           <div className="text-text">{fmtNum(cfg.fee_pct)}%</div>
+            <div className="text-muted">Futures comm.</div>   <div className="text-text">{fmtUsd(cfg.futures_commission ?? 0)}/contract</div>
             <div className="text-muted">Slippage</div>        <div className="text-text">{fmtNum(cfg.slippage_bps)} bps</div>
           </div>
         </div>

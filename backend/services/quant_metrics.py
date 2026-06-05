@@ -178,11 +178,12 @@ def _risk_adjusted(trades: list[dict], equity_curve: list[dict],
 
     sortino = None
     if r.size >= 2:
-        downside = r[r < 0]
-        if downside.size >= 2:
-            dd_std = float(downside.std(ddof=1))
-            if dd_std > 0:
-                sortino = float(r.mean() / dd_std * math.sqrt(bars_per_year))
+        # Standard target downside deviation (MAR=0): RMS of shortfalls below 0
+        # over ALL periods — not std() of only the negative returns.
+        shortfall = np.minimum(r, 0.0)
+        dd_dev = float(np.sqrt(np.mean(shortfall ** 2)))
+        if dd_dev > 0:
+            sortino = float(r.mean() / dd_dev * math.sqrt(bars_per_year))
 
     # Max drawdown % for Calmar / MAR
     peak = np.maximum.accumulate(eq)

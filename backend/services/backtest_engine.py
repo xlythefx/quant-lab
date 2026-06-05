@@ -115,6 +115,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     starting_capital = float(rc["starting_capital"])
     fee_flat         = float(rc["fee_flat"])
     fee_pct          = float(rc["fee_pct"]) / 100.0
+    futures_commission = float(rc.get("futures_commission", 0.0))  # $/contract/side
     slippage         = float(rc["slippage_bps"]) / 10000.0
 
     cls = get_strategy_class(strategy_id)
@@ -202,8 +203,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     _broker = market_data.broker_for(symbol, timeframe)
     _meta   = assets.get(symbol, _broker or market_data.BROKER_DEFAULT)
     contract_sizing = (_meta.asset_class == "equity_index_future" and _meta.contract_size > 1.0)
-    contract_units  = (float(strategy.p.get("contracts", 1)) * float(_meta.contract_size)
-                       if contract_sizing else 0.0)
+    n_contracts     = float(strategy.p.get("contracts", 1)) if contract_sizing else 0.0
+    contract_units  = n_contracts * float(_meta.contract_size) if contract_sizing else 0.0
+
+    def _fee(notional: float) -> float:
+        """Per-side fee. Futures: flat $/contract. Crypto/spot: flat + %-notional."""
+        if contract_sizing:
+            return fee_flat + futures_commission * n_contracts
+        return fee_flat + abs(notional) * fee_pct
 
     n = len(sig_df)
 
@@ -245,7 +252,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                     else:
                         fill = op * (1.0 - slippage)
                     notional_close = abs(fill * tr["units"])
-                    fee_close = fee_flat + notional_close * fee_pct
+                    fee_close = _fee(notional_close)
                     pnl = (fill - tr["entry_price"]) * tr["units"] - fee_close
                     realized_cum += pnl
                     trades_list.append(_trade(
@@ -271,7 +278,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                     else:
                         fill = op * (1.0 + slippage)
                     notional_close = abs(fill * tr["units"])
-                    fee_close = fee_flat + notional_close * fee_pct
+                    fee_close = _fee(notional_close)
                     pnl = (tr["entry_price"] - fill) * tr["units"] - fee_close
                     realized_cum += pnl
                     trades_list.append(_trade(
@@ -293,7 +300,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 fill = op * (1.0 + slippage)
                 if fill > 0:
                     units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill
-                    fee_open = fee_flat + abs(fill * units) * fee_pct
+                    fee_open = _fee(fill * units)
                     realized_cum -= fee_open
                     tranches_long.append({
                         "entry_price": fill,
@@ -309,7 +316,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 fill = op * (1.0 - slippage)
                 if fill > 0:
                     units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill
-                    fee_open = fee_flat + abs(fill * units) * fee_pct
+                    fee_open = _fee(fill * units)
                     realized_cum -= fee_open
                     tranches_short.append({
                         "entry_price": fill,
@@ -352,7 +359,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         final_ts = int(time_a[-1])
         for tr in tranches_long:
             notional_close = abs(final_close * tr["units"])
-            fee_close = fee_flat + notional_close * fee_pct
+            fee_close = _fee(notional_close)
             pnl = (final_close - tr["entry_price"]) * tr["units"] - fee_close
             realized_cum += pnl
             trades_list.append(_trade(
@@ -363,7 +370,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             ))
         for tr in tranches_short:
             notional_close = abs(final_close * tr["units"])
-            fee_close = fee_flat + notional_close * fee_pct
+            fee_close = _fee(notional_close)
             pnl = (tr["entry_price"] - final_close) * tr["units"] - fee_close
             realized_cum += pnl
             trades_list.append(_trade(
