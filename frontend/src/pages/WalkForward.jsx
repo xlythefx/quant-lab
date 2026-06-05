@@ -68,6 +68,59 @@ function fmtDate(epoch) {
   return new Date(epoch * 1000).toISOString().slice(0, 10);
 }
 
+// Human-readable calendar span from a number of seconds.
+function humanizeSpan(seconds) {
+  const days = seconds / 86400;
+  if (days < 45) return `~${Math.round(days)} days`;
+  const months = days / 30.44;
+  if (months < 18) return `~${months.toFixed(months < 3 ? 1 : 0)} months`;
+  return `~${(days / 365.25).toFixed(1)} years`;
+}
+
+// Translate IS/OOS bar counts into calendar dates for the FIRST walk-forward
+// window, using the dataset's average bar spacing (futures have gaps, so this
+// is approximate but far clearer than raw bar counts).
+function WindowScheduleHint({ dataset, isBars, oosBars, embargoBars = 0 }) {
+  const sched = useMemo(() => {
+    if (!dataset) return null;
+    const { first_time: first, last_time: last, rows } = dataset;
+    if (!first || !last || !rows || rows < 2) return null;
+    const secPerBar = (last - first) / (rows - 1);
+    const isSpan  = isBars * secPerBar;
+    const oosSpan = oosBars * secPerBar;
+    const embSpan = (embargoBars || 0) * secPerBar;
+    const isEnd   = first + isSpan;
+    const oosStart = isEnd + embSpan;
+    const oosEnd  = oosStart + oosSpan;
+    const nWindows = Math.max(0, Math.floor((rows - isBars - (embargoBars || 0)) / Math.max(1, oosBars)));
+    return { first, isEnd, oosStart, oosEnd, isSpan, oosSpan, nWindows, last };
+  }, [dataset, isBars, oosBars, embargoBars]);
+  if (!sched) return null;
+  return (
+    <div className="rounded-md border border-line bg-bg-elev/30 p-3">
+      <div className="text-[10px] uppercase tracking-wider text-muted mb-2">
+        Window schedule · in calendar dates
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs font-mono">
+        <div>
+          <span className="text-accent-blue">Train (IS)</span>
+          <span className="text-muted"> · {humanizeSpan(sched.isSpan)}</span>
+          <div className="text-text">{fmtDate(sched.first)} → {fmtDate(sched.isEnd)}</div>
+        </div>
+        <div>
+          <span className="text-accent-cyan">Test (OOS)</span>
+          <span className="text-muted"> · {humanizeSpan(sched.oosSpan)}</span>
+          <div className="text-text">{fmtDate(sched.oosStart)} → {fmtDate(sched.oosEnd)}</div>
+        </div>
+      </div>
+      <div className="text-[11px] text-muted/80 mt-2">
+        First window shown. The OOS window then rolls forward by {oosBars} bars each step —
+        <span className="text-text font-mono"> ~{sched.nWindows} windows</span> covering through {fmtDate(sched.last)}.
+      </div>
+    </div>
+  );
+}
+
 function wfKey(result) {
   if (!result) return null;
   return `WF|${result.strategy_id}|${result.symbol}|${result.timeframe}`;
@@ -572,6 +625,13 @@ function SetupTab({
           </select>
         </Field>
       </div>
+
+      <WindowScheduleHint
+        dataset={currentDataset}
+        isBars={isBars}
+        oosBars={oosBars}
+        embargoBars={embargoBars}
+      />
 
       <div className="flex items-center gap-3">
         <Field label={`Workers (CPUs)`}>
