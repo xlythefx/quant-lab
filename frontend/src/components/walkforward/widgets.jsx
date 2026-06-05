@@ -780,11 +780,14 @@ export function PnlHeatmapGrid({ pnlGrid, cntGrid }) {
 
 // -- SessionsEditor — configurable session time windows ----------------------
 
+// Matched to the VWMA reversion strategy's own trading sessions (UTC) so the
+// Overview -> Session Breakdown buckets line up with the windows the strategy
+// actually trades. (Reporting only -- these don't change which trades happen.)
 const DEFAULT_SESSIONS = [
-  { name: "New York",  start: "13:30", end: "20:00", enabled: true },
-  { name: "London",    start: "07:00", end: "15:30", enabled: true },
-  { name: "Tokyo",     start: "23:00", end: "08:00", enabled: false },
-  { name: "Overnight", start: "20:00", end: "07:00", enabled: false },
+  { name: "Tokyo",        start: "00:00", end: "04:00", enabled: true },
+  { name: "London",       start: "05:00", end: "12:30", enabled: true },
+  { name: "NY morning",   start: "12:30", end: "16:00", enabled: true },
+  { name: "NY afternoon", start: "17:00", end: "20:00", enabled: true },
 ];
 
 export function SessionsEditor({ value, onChange }) {
