@@ -111,6 +111,20 @@ class VwmaReversionStrategy(Strategy):
                 "ny_pm":  {"enabled": True},
             },
         },
+        "LTCUSDT": {
+            "vwma_length":  23,
+            "z_threshold":  1.5,
+            "rsi_length":   15,
+            "atr_length":   10,
+            "atr_mult":     6.0,
+            "sides":        {"long": True, "short": False},
+            "sessions":     {
+                "tokyo":  {"enabled": True},   # Asia
+                "london": {"enabled": True},   # London
+                "ny_am":  {"enabled": False},  # Main (off)
+                "ny_pm":  {"enabled": False},
+            },
+        },
     }
 
     TIMEFRAME_DEFAULTS = {
