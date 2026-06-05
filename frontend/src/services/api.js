@@ -273,3 +273,14 @@ export async function testLiveAlert({ rule_name, action = "BUY" }) {
   const { data } = await api.post("/api/live-alerts/test", { rule_name, action });
   return data; // {ok, url?, payload?: {secret redacted}, error?}
 }
+
+// Server-side strategy presets (persisted to data/presets.json, git-trackable).
+export async function getPresets(strategyId) {
+  const { data } = await api.get("/api/presets", { params: { strategy_id: strategyId } });
+  return data.presets; // {name: params}
+}
+
+export async function savePresets(strategyId, presets) {
+  const { data } = await api.put("/api/presets", { strategy_id: strategyId, presets });
+  return data.presets; // {name: params}
+}

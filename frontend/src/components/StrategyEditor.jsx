@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import TimePickerModal from "./TimePickerModal.jsx";
 import { getTz, convertUtcHHmm, tzShort } from "../services/timezone.js";
+import { getPresets, savePresets as apiSavePresets } from "../services/api.js";
 
 const SESSION_LABELS = {
   tokyo:  "Tokyo",
@@ -9,31 +10,33 @@ const SESSION_LABELS = {
   ny_pm:  "NY afternoon",
 };
 
-// ---------------------------------------------------------------------------
-// Preset helpers — stored in localStorage under ql.presets.{strategyId}
-// ---------------------------------------------------------------------------
-function loadPresets(strategyId) {
-  if (!strategyId) return [];
-  try { return JSON.parse(localStorage.getItem(`ql.presets.${strategyId}`) || "[]"); }
-  catch { return []; }
-}
-function savePresets(strategyId, presets) {
-  if (!strategyId) return;
-  try { localStorage.setItem(`ql.presets.${strategyId}`, JSON.stringify(presets)); } catch {}
-}
-
 export default function StrategyEditor({
   open, schema, params, onChange, onClose, onApply, onResetDefaults, onSaveAsDefault, color,
   strategyId, builtinPresets = {},
 }) {
   const [draft, setDraft] = useState(params || {});
   const [saved, setSaved] = useState(false);
+  // Server-side user presets, kept as [{name, params}] for the UI.
   const [presets, setPresets] = useState([]);
   const [savingName, setSavingName] = useState("");
-  const [showSaveInput, setShowSaveInput] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
 
   useEffect(() => { setDraft(params || {}); }, [params, open]);
-  useEffect(() => { if (open) setPresets(loadPresets(strategyId)); }, [open, strategyId]);
+  useEffect(() => {
+    if (!open || !strategyId) { setPresets([]); return; }
+    let alive = true;
+    getPresets(strategyId)
+      .then((obj) => { if (alive) setPresets(Object.entries(obj || {}).map(([name, p]) => ({ name, params: p }))); })
+      .catch(() => { if (alive) setPresets([]); });
+    return () => { alive = false; };
+  }, [open, strategyId]);
+
+  // Persist the current preset list to the server ([{name,params}] → {name: params}).
+  const persist = (list) => {
+    const obj = {};
+    for (const p of list) obj[p.name] = p.params;
+    apiSavePresets(strategyId, obj).catch(() => {});
+  };
 
   const groups = useMemo(() => {
     const g = {};
@@ -81,15 +84,15 @@ export default function StrategyEditor({
     if (!name) return;
     const next = [...presets.filter((x) => x.name !== name), { name, params: { ...draft } }];
     setPresets(next);
-    savePresets(strategyId, next);
+    persist(next);
     setSavingName("");
-    setShowSaveInput(false);
+    setShowSaveModal(false);
   };
 
   const deletePreset = (name) => {
     const next = presets.filter((x) => x.name !== name);
     setPresets(next);
-    savePresets(strategyId, next);
+    persist(next);
   };
 
   return (
@@ -128,29 +131,14 @@ export default function StrategyEditor({
             )}
           </select>
           <button
-            onClick={() => setShowSaveInput((v) => !v)}
-            title="Save current params as preset"
-            className="px-2.5 py-1 rounded-md border border-accent-blue/40 text-accent-blue text-xs hover:bg-accent-blue/10 shrink-0"
+            onClick={() => { setSavingName(""); setShowSaveModal(true); }}
+            disabled={!strategyId}
+            title="Save current params as a preset (stored server-side)"
+            className="px-2.5 py-1 rounded-md border border-accent-blue/40 text-accent-blue text-xs hover:bg-accent-blue/10 disabled:opacity-40 shrink-0"
           >
             + Save
           </button>
         </div>
-
-        {showSaveInput && (
-          <div className="flex gap-2">
-            <input
-              autoFocus
-              type="text"
-              value={savingName}
-              onChange={(e) => setSavingName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") savePreset(); if (e.key === "Escape") setShowSaveInput(false); }}
-              placeholder="Preset name…"
-              className="flex-1 px-2 py-1 rounded-md bg-bg-elev border border-line font-mono text-xs focus:outline-none focus:border-accent-blue"
-            />
-            <button onClick={savePreset} className="px-3 py-1 rounded-md bg-accent-blue text-white text-xs font-medium">Save</button>
-            <button onClick={() => setShowSaveInput(false)} className="text-xs text-muted hover:text-text">✕</button>
-          </div>
-        )}
 
         {/* Chips row: built-ins (★, no delete) + user presets (deletable) */}
         {(Object.keys(builtinPresets).length > 0 || presets.length > 0) && (
@@ -207,6 +195,50 @@ export default function StrategyEditor({
           </button>
         </div>
       </div>
+
+      {/* Save-preset modal */}
+      {showSaveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setShowSaveModal(false)}>
+          <div className="bg-bg-panel border border-line rounded-2xl shadow-2xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-line">
+              <h3 className="text-base font-semibold">Save preset</h3>
+              <p className="text-xs text-muted mt-0.5">
+                Saves the current params server-side (persists across browsers; commit
+                <span className="font-mono"> data/presets.json</span> to sync via git).
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <input
+                autoFocus
+                type="text"
+                value={savingName}
+                onChange={(e) => setSavingName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") savePreset(); if (e.key === "Escape") setShowSaveModal(false); }}
+                placeholder="Preset name (e.g. ZECUSDT)…"
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+              />
+              {presets.some((p) => p.name === savingName.trim()) && savingName.trim() && (
+                <div className="text-[11px] text-accent-yellow">A preset named "{savingName.trim()}" exists — it will be overwritten.</div>
+              )}
+              <div className="rounded-md bg-bg-elev/50 border border-line/60 px-3 py-2 max-h-40 overflow-y-auto">
+                <div className="text-[10px] uppercase tracking-wider text-muted mb-1">Saving these values</div>
+                <div className="font-mono text-[11px] text-muted/90 space-y-0.5">
+                  {(schema || []).filter((s) => draft[s.name] !== undefined).map((s) => (
+                    <div key={s.name} className="flex justify-between gap-3">
+                      <span className="text-muted">{s.name}</span>
+                      <span className="text-text">{typeof draft[s.name] === "object" ? JSON.stringify(draft[s.name]) : String(draft[s.name])}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-line flex items-center justify-end gap-2">
+              <button onClick={() => setShowSaveModal(false)} className="px-3 py-1.5 rounded-md border border-line text-muted text-sm hover:text-text">Cancel</button>
+              <button onClick={savePreset} disabled={!savingName.trim()} className="px-4 py-1.5 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50">Save</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
