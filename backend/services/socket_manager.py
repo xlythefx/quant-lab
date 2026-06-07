@@ -19,11 +19,11 @@ from services.ts_csv_stream import TsCsvStream, _csv_path
 
 log = logging.getLogger(__name__)
 
-StreamKey = Tuple[str, str, str]  # (mode, symbol, timeframe)
+StreamKey = Tuple[str, str, str, str]  # (mode, symbol, timeframe, broker)
 
 
-def room_name(mode: str, symbol: str, timeframe: str) -> str:
-    return f"{mode}_{symbol}_{timeframe}"
+def room_name(mode: str, symbol: str, timeframe: str, broker: str = "") -> str:
+    return f"{mode}_{symbol}_{timeframe}_{broker}"
 
 
 class SocketManager:
@@ -41,8 +41,8 @@ class SocketManager:
     # ---- internal stream factory --------------------------------------
     def _make_stream(self, mode: str, symbol: str, tf: str, speed: int,
                      start_time: int | None = None, end_time: int | None = None,
-                     loop: bool = True) -> CandleStream:
-        key = (mode, symbol, tf)
+                     loop: bool = True, broker: str | None = None) -> CandleStream:
+        key = (mode, symbol, tf, broker or "")
 
         def emit(candle):
             if candle.get("__stream_error"):
@@ -73,23 +73,24 @@ class SocketManager:
                 symbol, tf, p,
             )
         return BacktestStream(symbol, tf, emit, speed=speed,
-                              start_time=start_time, end_time=end_time, loop=loop)
+                              start_time=start_time, end_time=end_time, loop=loop,
+                              broker=broker)
 
     # ---- internal listener API (for strategy runners) -----------------
-    def add_listener(self, mode: str, symbol: str, tf: str, fn) -> None:
-        key = (mode, symbol, tf)
+    def add_listener(self, mode: str, symbol: str, tf: str, fn, broker: str | None = None) -> None:
+        key = (mode, symbol, tf, broker or "")
         with self._lock:
             self._listeners.setdefault(key, []).append(fn)
             # Make sure the stream is alive even if no browser is listening yet.
             stream = self._streams.get(key)
             if stream is None or not stream.is_running():
-                stream = self._make_stream(mode, symbol, tf, speed=60)
+                stream = self._make_stream(mode, symbol, tf, speed=60, broker=broker)
                 self._streams[key] = stream
                 stream.start()
                 log.info("Started stream %s (listener-driven)", room_name(*key))
 
-    def remove_listener(self, mode: str, symbol: str, tf: str, fn) -> None:
-        key = (mode, symbol, tf)
+    def remove_listener(self, mode: str, symbol: str, tf: str, fn, broker: str | None = None) -> None:
+        key = (mode, symbol, tf, broker or "")
         with self._lock:
             lst = self._listeners.get(key)
             if lst and fn in lst:
@@ -111,8 +112,8 @@ class SocketManager:
     # ---- subscribe / unsubscribe --------------------------------------
     def subscribe(self, sid: str, mode: str, symbol: str, tf: str, speed: int = 60,
                   start_time: int | None = None, end_time: int | None = None,
-                  loop: bool = True):
-        key = (mode, symbol, tf)
+                  loop: bool = True, broker: str | None = None):
+        key = (mode, symbol, tf, broker or "")
         room = room_name(*key)
 
         with self._lock:
@@ -125,7 +126,7 @@ class SocketManager:
             if stream is None or not stream.is_running():
                 stream = self._make_stream(mode, symbol, tf, speed,
                                            start_time=start_time, end_time=end_time,
-                                           loop=loop)
+                                           loop=loop, broker=broker)
                 self._streams[key] = stream
                 stream.start()
                 log.info("Started stream %s (subscribers=1)", room)
@@ -135,8 +136,8 @@ class SocketManager:
         # join_room must run in the SocketIO server context.
         self._sio.server.enter_room(sid, room)
 
-    def unsubscribe(self, sid: str, mode: str, symbol: str, tf: str):
-        key = (mode, symbol, tf)
+    def unsubscribe(self, sid: str, mode: str, symbol: str, tf: str, broker: str | None = None):
+        key = (mode, symbol, tf, broker or "")
         room = room_name(*key)
         self._sio.server.leave_room(sid, room)
 
@@ -151,12 +152,12 @@ class SocketManager:
 
     def cleanup_sid(self, sid: str):
         keys = list(self._sid_rooms.pop(sid, set()))
-        for (mode, symbol, tf) in keys:
-            self.unsubscribe(sid, mode, symbol, tf)
+        for (mode, symbol, tf, broker) in keys:
+            self.unsubscribe(sid, mode, symbol, tf, broker=broker)
 
     # ---- backtest controls --------------------------------------------
-    def set_speed(self, symbol: str, tf: str, speed: int) -> bool:
-        key = ("backtest", symbol, tf)
+    def set_speed(self, symbol: str, tf: str, speed: int, broker: str | None = None) -> bool:
+        key = ("backtest", symbol, tf, broker or "")
         with self._lock:
             stream = self._streams.get(key)
             if isinstance(stream, BacktestStream):

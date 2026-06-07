@@ -24,12 +24,13 @@ import { usePersistentState } from "../services/usePersistentState.js";
  */
 
 const CLASS_META = {
-  crypto:               { label: "Crypto",      order: 0 },
-  commodity:            { label: "Commodities", order: 1 },
-  forex:                { label: "Forex",       order: 2 },
-  equity_index_future:  { label: "Futures",     order: 3 },
-  stock:                { label: "Stocks",      order: 4 },
-  index:                { label: "Indices",     order: 5 },
+  crypto:               { label: "Crypto",             order: 0 },
+  commodity:            { label: "Commodities",        order: 1 },
+  forex:                { label: "Forex",              order: 2 },
+  futures:              { label: "Futures (Databento)",    order: 3 },   // CME via GLBX.MDP3
+  equity_index_future:  { label: "Futures (TradeStation)", order: 3.5 }, // CSV import / legacy yfinance
+  stock:                { label: "Stocks",             order: 4 },
+  index:                { label: "Indices",            order: 5 },
 };
 
 function labelFor(cls) {
@@ -42,7 +43,7 @@ function compareClass(a, b) {
   return oa - ob;
 }
 
-export default function SymbolSelector({ value, options = [], datasets, onChange }) {
+export default function SymbolSelector({ value, options = [], datasets, onChange, broker = null }) {
   // CRITICAL: call ALL hooks unconditionally before any early return. React
   // detects hook count changes between renders as "Expected static flag was
   // missing" — which would fire here on first paint (datasets=[]) → second
@@ -66,36 +67,58 @@ export default function SymbolSelector({ value, options = [], datasets, onChange
     ? activeClass
     : (classesPresent[0] || "crypto");
 
-  // Symbols belonging to the active asset class — driven off `datasets` so a
-  // symbol that appears in `options` but isn't in any catalog is dropped
-  // (shouldn't happen in practice).
-  const symbolsForClass = useMemo(() => {
+  // Rows belonging to the active asset class — driven off `datasets` so each
+  // option carries its broker. The same symbol can exist under more than one
+  // broker (e.g. ES on databento AND tradestation); we key options by
+  // symbol+broker so they stay independently selectable, and label the broker
+  // when a symbol is ambiguous within the class.
+  const rowsForClass = useMemo(() => {
     if (!hasDatasets) return [];
-    const set = new Set();
+    const seen = new Set();
+    const rows = [];
     for (const d of datasets) {
-      if ((d.asset_class || "crypto") === effectiveClass) {
-        set.add(d.symbol);
-      }
+      if ((d.asset_class || "crypto") !== effectiveClass) continue;
+      const b = d.broker || "";
+      const k = `${d.symbol}::${b}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      rows.push({ symbol: d.symbol, broker: b });
     }
-    // Preserve order from the parent's `options` array when possible (it may
-    // already be sorted in a meaningful way), append any leftovers sorted.
-    const ordered = options.filter((s) => set.has(s));
-    for (const s of Array.from(set).sort()) {
-      if (!ordered.includes(s)) ordered.push(s);
+    // Preserve the parent's `options` order when possible, then leftovers.
+    const rank = new Map(options.map((s, i) => [s, i]));
+    rows.sort((a, b2) => {
+      const ra = rank.has(a.symbol) ? rank.get(a.symbol) : 1e9;
+      const rb = rank.has(b2.symbol) ? rank.get(b2.symbol) : 1e9;
+      if (ra !== rb) return ra - rb;
+      return a.symbol.localeCompare(b2.symbol) || a.broker.localeCompare(b2.broker);
+    });
+    // Mark symbols that appear under more than one broker (need broker label).
+    const counts = {};
+    for (const r of rows) counts[r.symbol] = (counts[r.symbol] || 0) + 1;
+    for (const r of rows) {
+      r.id = `${r.symbol}::${r.broker}`;
+      r.label = counts[r.symbol] > 1 ? `${r.symbol} · ${r.broker}` : r.symbol;
     }
-    return ordered;
+    return rows;
   }, [datasets, effectiveClass, options, hasDatasets]);
 
-  // When the user switches tabs and the current `value` doesn't belong to
-  // the new class, auto-select the first symbol of the new class so the
-  // dashboard / backtest never sits on a stale symbol from another asset.
+  // The id of the currently-selected row. When the caller passes a `broker`,
+  // match on (symbol, broker); otherwise match on symbol only (legacy callers).
+  const selectedRow =
+    rowsForClass.find((r) => r.symbol === value && (broker == null || r.broker === broker)) ||
+    rowsForClass.find((r) => r.symbol === value) ||
+    null;
+
+  // When the user switches tabs and the current selection doesn't belong to
+  // the new class, auto-select the first row so the dashboard never sits on a
+  // stale symbol from another asset.
   useEffect(() => {
     if (!hasDatasets) return;
-    if (symbolsForClass.length > 0 && !symbolsForClass.includes(value)) {
-      onChange(symbolsForClass[0]);
+    if (rowsForClass.length > 0 && !selectedRow) {
+      onChange(rowsForClass[0].symbol, rowsForClass[0].broker || null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveClass, symbolsForClass.join(","), hasDatasets]);
+  }, [effectiveClass, rowsForClass.map((r) => r.id).join(","), hasDatasets]);
 
   // Legacy path: no asset-class metadata, render the flat row of buttons.
   // Safe to branch here — all hooks above have already been called.
@@ -124,20 +147,23 @@ export default function SymbolSelector({ value, options = [], datasets, onChange
       {/* Symbol dropdown — filtered to the active asset class. */}
       <div className="flex items-center gap-2">
         <span className="text-xs uppercase tracking-wider text-muted">Symbol</span>
-        {symbolsForClass.length === 0 ? (
+        {rowsForClass.length === 0 ? (
           <span className="text-xs text-muted italic">
             no {labelFor(effectiveClass).toLowerCase()} datasets —{" "}
             <a href="#downloads" className="text-accent-blue hover:underline">download one</a>
           </span>
         ) : (
           <select
-            value={value || ""}
-            onChange={(e) => onChange(e.target.value)}
+            value={selectedRow ? selectedRow.id : ""}
+            onChange={(e) => {
+              const row = rowsForClass.find((r) => r.id === e.target.value);
+              if (row) onChange(row.symbol, row.broker || null);
+            }}
             className="px-2.5 py-1.5 text-sm font-mono rounded-md border border-line bg-bg-panel text-text hover:bg-bg-elev focus:outline-none focus:border-accent-blue cursor-pointer"
           >
-            {!value && <option value="">— pick —</option>}
-            {symbolsForClass.map((s) => (
-              <option key={s} value={s}>{s}</option>
+            {!selectedRow && <option value="">— pick —</option>}
+            {rowsForClass.map((r) => (
+              <option key={r.id} value={r.id}>{r.label}</option>
             ))}
           </select>
         )}

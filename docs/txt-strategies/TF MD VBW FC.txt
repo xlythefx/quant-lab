@@ -1,0 +1,84 @@
+{
+instrument: @FC
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 1440m
+type: Trend Following - Multiday - VBW Engine
+IS: 01.01.2008 to 01.01.2020
+OS: 01.01.2020 to today
+}
+
+input: moneySTP(700);
+input: mincon(1), maxcon(1);//se imposti MaxCon a 1 ti fa lavorare sempre con 1 contratto  
+var: VF(0);//VF=0 per disattivarlo o 1 per attivarlo
+var: mult(0.8),N(6); 
+var: TGT(3), STP(3), K(1);
+var: Ncon(1), NconE(1),mp(0); 
+var: rng(1), bdy(1), comp(false), rit(0), VFS(false), AVF(0);
+
+mp=marketposition;
+avf=avgtruerange(2);
+
+Ncon=maxlist(mincon,minlist(round(moneySTP/((rng/STP)*bigpointvalue),0),maxcon));
+
+If dayofweek(date)=5  then
+begin
+rng=maxlist(HighW(0) -LowW(0), 0.0001);//per evitare la possibilit? che possa verificarsi una divisione per zero
+bdy=absvalue(OpenW(0)-CloseW(0));
+if bdy <= mult*rng then comp=True else comp=false;//non chiude sui max o min la settimana
+end;
+
+rit=0.05*avf;//anticipo l'ingresso in posizione per evitare slippage
+
+//VOLATILITY FILTER*********************************************************************************************
+If vf=0 THEN VFS=TRUE;
+If VF=1 THEN
+BEGIN
+IF avf<avgtruerange(22)[1] then VFS=TRUE else VFS=FALSE;
+END;
+//**************************************************************************************************************
+
+//INGRESSO IN POSZIONE******************************************************************************************
+Value1=highest(high,N);
+value2=lowest(low,N);
+If dayofweek(date)=5 and mp=0 and (HighS(0) <> LowS(0)) then
+begin
+If comp AND VFS and h< maxlist(value1,highw(0))-rit then buy ("eLv") Ncon contracts next bar at maxlist(value1,highw(0))-rit stop;
+If comp AND VFS and l>minlist(value2,loww(0))+rit then sellshort ("eSv") Ncon contracts next bar at minlist(value2,loww(0))+rit stop;
+End
+Else if dayofweek(date)<>0 and mp=0 then //puoi escudere gli ingressi in un certo giorno - con 0 disattivato
+begin 
+If comp AND VFS  and h<maxlist(value1,highw(1))-rit then buy ("eL") Ncon contracts next bar at maxlist(value1,highw(1))-rit stop;
+If comp AND VFS  and l>minlist(value2,loww(1))+rit then sellshort ("eS") Ncon contracts next bar at minlist(value2,loww(1))+rit stop;
+end;
+//**************************************************************************************************************
+
+//STOP IN PARI***************************************************************************************************
+value10=LOWEST(high,barssinceentry-1);
+value11=HIGHEST(low,barssinceentry-1);
+If mp=1 and CLOSE>ENTRYPRICE+rng/STP then sell("GSx-L") next bar at entryprice stop;//value11 stop;
+If mp=-1 and CLOSE<ENTRYPRICE-rng/STP then buy to cover("GSx-S") next bar at entryprice stop;//value10 stop;
+
+//USCITA A TARGET O IN STOP LOSS*********************************************************************************
+If marketposition<>0 then
+begin
+Sell ("TGT-L") next bar at entryprice+TGT*rng limit;
+Sell ("STP-L") next bar at entryprice-rng/STP stop;
+Buy to cover ("TGT-S") next bar  at entryprice-TGT*rng limit;
+Buy to cover ("STP-S") next bar at entryprice+rng/STP stop;
+end;
+
+//USCITA IN STOP CATASTROFICO************************************************************************************
+If mp<>0 and mp[1]=0 then NconE=Ncon;
+
+setstopcontract;
+setstoploss(K*(rng/STP)*Bigpointvalue);
+
+//USCITA ALLA FINE DELLA SETTIMANA******************************************************************************
+If (mp<>0 and dayofweek(date)=5) or (dayofweek(date)<dayofweek(date[1]) and mp[1]<>0)  then
+begin
+Sell ("EOWf-L") this bar at close;
+Buy  to cover ("EOWf-S") this bar at close;
+end;
+
+

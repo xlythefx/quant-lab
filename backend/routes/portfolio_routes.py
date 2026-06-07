@@ -50,13 +50,14 @@ def run_backtest_portfolio():
             symbol = validate_symbol(raw.get("symbol"))
             tf     = validate_timeframe(raw.get("timeframe"))
             params = raw.get("params") or {}
+            broker = (raw.get("broker") or None)
             try:
                 priority = int(raw.get("priority", 100))
             except (TypeError, ValueError):
                 raise ValidationError(f"strategies[{i}].priority must be an integer")
             specs.append(StrategySpec(strategy_id=sid, symbol=symbol,
                                       timeframe=tf, params=params,
-                                      priority=priority))
+                                      priority=priority, broker=broker))
         start_time = body.get("start_time")
         end_time   = body.get("end_time")
         if start_time is not None: start_time = int(start_time)

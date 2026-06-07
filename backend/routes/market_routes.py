@@ -7,6 +7,7 @@ REST endpoints for the market data layer.
   POST /api/backtest/prepare   body: {symbol, timeframe}
 """
 import logging
+import os
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
 
@@ -76,7 +77,7 @@ def datasets():
     return jsonify({"datasets": market_data.list_datasets()})
 
 
-_BROKERS = ("binance", "dukascopy", "yahoo", "tradestation")
+_BROKERS = ("binance", "dukascopy", "yahoo", "tradestation", "databento")
 
 
 @market_bp.post("/datasets/download")
@@ -215,12 +216,13 @@ def ohlcv():
         tf = validate_timeframe(request.args.get("timeframe"))
         limit = validate_limit(request.args.get("limit"))
         mode = validate_mode(request.args.get("mode"))
+        broker = (request.args.get("broker") or None)
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
 
     try:
         if mode == "backtest" or not market_data.is_binance_symbol(symbol):
-            data = market_data.tail_parquet(symbol, tf, limit)
+            data = market_data.tail_parquet(symbol, tf, limit, broker=broker)
         else:
             data = market_data.fetch_ohlcv(symbol, tf, limit)
     except Exception as e:
@@ -238,12 +240,13 @@ def backtest_seed():
         symbol = validate_symbol(request.args.get("symbol"))
         tf = validate_timeframe(request.args.get("timeframe"))
         limit = validate_limit(request.args.get("limit"), default=1500, maximum=10000)
+        broker = (request.args.get("broker") or None)
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
 
     try:
-        total, idx = market_data.replay_start_index(symbol, tf)
-        candles = market_data.seed_slice(symbol, tf, idx, limit)
+        total, idx = market_data.replay_start_index(symbol, tf, broker=broker)
+        candles = market_data.seed_slice(symbol, tf, idx, limit, broker=broker)
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
@@ -253,6 +256,7 @@ def backtest_seed():
     return jsonify({
         "symbol": symbol,
         "timeframe": tf,
+        "broker": broker,
         "total_rows": total,
         "start_index": idx,
         "start_time": candles[-1]["time"] if candles else None,
@@ -268,14 +272,23 @@ def backtest_prepare():
     try:
         symbol = validate_symbol(body.get("symbol"))
         tf = validate_timeframe(body.get("timeframe"))
+        broker = (body.get("broker") or None)
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
 
-    # Look up the parquet across all broker namespaces (Stage 1 multi-broker).
-    path = market_data.find_parquet(symbol, tf)
+    # If broker is given, check strictly that namespace; otherwise look up the
+    # parquet across all broker namespaces (first-found).
+    if broker:
+        path = market_data.parquet_path(symbol, tf, broker)
+        if not os.path.exists(path):
+            path = None
+    else:
+        path = market_data.find_parquet(symbol, tf)
     if path is None:
         return jsonify({
-            "error": f"No dataset for {symbol} {tf}. Open the Downloads page and pull a date range first.",
+            "error": f"No dataset for {symbol} {tf}"
+                     + (f" on {broker}" if broker else "")
+                     + ". Open the Downloads page and pull a date range first.",
             "missing": True,
         }), 404
 
@@ -284,6 +297,7 @@ def backtest_prepare():
     return jsonify({
         "symbol": symbol,
         "timeframe": tf,
+        "broker": broker or os.path.basename(os.path.dirname(path)),
         "cached": True,
         "rows": int(len(df)),
         "path": path,

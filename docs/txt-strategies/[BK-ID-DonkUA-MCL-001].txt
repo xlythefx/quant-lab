@@ -1,0 +1,66 @@
+{
+instrument: @MCL
+strategy ref: PAR_CL_15_202309301419
+platform: multicharts - tradestation datafeed
+session: default session 18-17
+timeframe: 12+1380m
+type: Breakout - Intraday - Donchian Engine UA
+IS: 01.01.2010 to 31.12.2017
+OS: 31.12.2017 to today
+
+brief description: la strategia entra breakout sul massimo/minimo della sessione precedente, assicurandosi che la il prezzo debba ancora fare
+il breakout (close contenuta nei lvl trigger). L'entrata e' concessa dalle 03:00 alle 16:00, escluso il Lunedi' ed e' concesso un ingresso per sessione.
+
+E' richiesto come pattern che la sessione odierna non abbia ancora avuto un'espansione di volatilita' e sono inibiti gli ingressi
+qualora il real body a 5d dovesse superare il suo range di un certo rapporto.
+
+Sono impostati valori di SL, TP e BE. Tutte le operazioni vengono chiuse a fine sessione.
+}
+
+input: nCon(1);
+var: stp(140), tgt(270), nBarExit(25);
+var: FiltroY(false), FiltroN(false);
+
+var: HighS0(0), HighS1(0), LowS0(0), LowS1(0);
+
+{PRICE REFERENCE}
+LowS0 = LowS(0);
+HighS0 = HighS(0);
+HighS1 = h[0] of data2;
+LowS1 = l[0] of data2;
+
+{FILTRI OPERATIVI}
+FiltroY = ((HighS0<(LowS0+LowS0*1.5 *0.01)));
+FiltroN = absvalue(O[4] of data2 - C[0] of data2) > 0.75 * (maxlist(H[0] of data2, H[1] of data2, H[2] of data2, H[3] of data2, H[4] of data2) - minlist(L[0] of data2, L[1] of data2, L[2] of data2, L[3] of data2, L[4] of data2));
+
+
+{TRADING}
+if (HighS(0)<>LowS(0)) and (dayofweek(d) <> 1) and (Time>=300 and Time<1600) and (EntriesToday(d) < 1) and (marketposition=0) and (FiltroY = true) and (FiltroN = false) then begin
+	if (c < HighS1) then
+		buy ("LE-Breakout-1") nCon contracts next bar at (HighS1-(2*minmove/pricescale)) stop;
+	if (c > LowS1) then
+		sellshort ("SE-Breakout-1") nCon contracts next bar at (LowS1+(2*minmove/pricescale)) stop;
+end;
+
+If marketposition = 1 and time >= 1645 and time < 1800 then sell ("LX - EndOfDay") this bar at close;
+If marketposition = -1 and time >= 1645 and time < 1800 then buytocover ("SX - EndOfDay") this bar at close;
+
+{PARTIAL EXIT}
+{If marketposition<>0 and barssinceentry >= nBarExit and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+	Buytocover ("SX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;}
+
+{EXITS}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);

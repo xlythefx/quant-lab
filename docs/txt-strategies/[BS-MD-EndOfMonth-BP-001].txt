@@ -1,0 +1,57 @@
+{
+instrument: @BP
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 60m
+type: Bias - Multiday - End of month Effect on Cable
+IS: 01.11.2014 to 15.04.2020
+OS: 15.04.2020 to today
+
+brief description: la strategia sfrutta un Bias rialzista dal giorno 28 del mese fino a fine mese. Gira la posizione Short da primo giorno del mese fino al 10mo.
+}
+
+input: Ncon(1);
+var: seiLong(0), seiShort(0), NuovoMese(0);
+var: stp(10), TgtL(6), TgtS(48), N(24); // moltiplicatori ATR x stop e target
+
+
+//Long Entry--------------------------------------------------
+if dayofmonth(date)>=28 and time>=1000 // filtro bias
+and seiLong=0 and c>bollingerband(c,20,1) and (HighS(0) <> LowS(0)) then begin // filtro bollinger band
+	buy ("EOM eL") Ncon contracts next bar at open;
+	seiLong=1; 
+	end;
+//Long Exit
+if dayofmonth(date)<dayofmonth(date[1]) then sell ("EOM xL") next bar at open; 
+if dayofmonth(date[0])<dayofmonth(date[1]) then seiLong=0;   
+
+
+//Short Entry-------------------------------------------------
+if NuovoMese=1 and date<>date[1] then NuovoMese=0;
+if dayofmonth(date[0])<dayofmonth(date[1]) then NuovoMese=1;
+
+if NuovoMese=1 and t>=0300 and c<o // filtro bias
+and seiShort=0 and (HighS(0) <> LowS(0)) then begin
+	sellshort ("EOM eS") Ncon contracts next bar at open;
+	seiShort=1;
+	end;
+
+//Short Exit
+if dayofmonth(date)>=10 then begin // uscita short
+	buytocover("EOM xS") next bar at open; 
+	seiShort=0;
+	end; 
+
+setstopcontract;
+
+if marketposition=1 then begin
+	setprofittarget(TgtL*avgtruerange(n)*bigpointvalue);
+	//if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end; 
+
+if marketposition=-1 then begin 
+	setprofittarget(TgtS*avgtruerange(n)*bigpointvalue);
+	//if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+Setstoploss(stp*avgtruerange(n)*bigpointvalue)

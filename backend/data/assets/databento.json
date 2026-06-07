@@ -1,0 +1,50 @@
+{
+  "ES": {
+    "asset_class": "futures",
+    "execution_model": "futures",
+    "base": "S&P500",
+    "quote": "USD",
+    "contract_size": 50.0,
+    "tick_size": 0.25,
+    "market_hours_tz": "America/Chicago",
+    "swap_long_pct": 0.0,
+    "swap_short_pct": 0.0,
+    "leverage_max": 20.0
+  },
+  "NQ": {
+    "asset_class": "futures",
+    "execution_model": "futures",
+    "base": "Nasdaq-100",
+    "quote": "USD",
+    "contract_size": 20.0,
+    "tick_size": 0.25,
+    "market_hours_tz": "America/Chicago",
+    "swap_long_pct": 0.0,
+    "swap_short_pct": 0.0,
+    "leverage_max": 20.0
+  },
+  "CL": {
+    "asset_class": "futures",
+    "execution_model": "futures",
+    "base": "WTI Crude Oil",
+    "quote": "USD",
+    "contract_size": 1000.0,
+    "tick_size": 0.01,
+    "market_hours_tz": "America/Chicago",
+    "swap_long_pct": 0.0,
+    "swap_short_pct": 0.0,
+    "leverage_max": 10.0
+  },
+  "GC": {
+    "asset_class": "futures",
+    "execution_model": "futures",
+    "base": "Gold",
+    "quote": "USD",
+    "contract_size": 100.0,
+    "tick_size": 0.10,
+    "market_hours_tz": "America/Chicago",
+    "swap_long_pct": 0.0,
+    "swap_short_pct": 0.0,
+    "leverage_max": 10.0
+  }
+}

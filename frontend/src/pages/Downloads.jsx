@@ -48,12 +48,12 @@ const TABS = [
   {
     id: "futures",
     label: "Futures",
-    broker: "yahoo",
-    source: "Yahoo Finance (free)",
+    broker: "databento",
+    source: "Databento (CME Globex MDP 3.0)",
     defaultSymbol: "ES",
-    suggested: ["ES"],
+    suggested: ["ES", "NQ", "CL", "GC"],
     enabled: true,
-    note: "E-mini index futures via Yahoo Finance. Yahoo caps intraday history at ~730 days for 60min bars (less for shorter TFs). Symbol → Yahoo ticker mapping lives in data/assets/yahoo.json (ES → ES=F). Add more symbols there as needed.",
+    note: "CME futures (ES, NQ, CL, GC) via Databento's GLBX.MDP3 dataset. Bare roots map to the continuous front-month contract (ES → ES.c.0); an explicit code like ESH4 pulls that single contract. 5m/15m are resampled from 1m. Requires DATABENTO_API_KEY in backend/.env. Contract specs live in data/assets/databento.json.",
   },
   {
     id: "tradestation",

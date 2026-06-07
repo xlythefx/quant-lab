@@ -1,6 +1,7 @@
 """QuantLab — ui.py"""
 
 import ctypes
+import os
 import subprocess
 import sys
 import threading
@@ -21,6 +22,7 @@ if sys.platform == "win32":
 ROOT_DIR      = Path(__file__).resolve().parent
 BACKEND_DIR   = ROOT_DIR / "backend"
 FRONTEND_DIR  = ROOT_DIR / "frontend"
+VPS_DIR       = ROOT_DIR / "vps-deployment"
 BACKEND_PORT  = 6173
 FRONTEND_PORT = 5173
 PROJECT_PORTS = [BACKEND_PORT, FRONTEND_PORT]
@@ -565,6 +567,98 @@ class NetstatTab(tk.Frame):
         self.after(600, self.refresh)
 
 
+# ── Build / Git / Deploy tab ────────────────────────────────────────────────
+
+class BuildTab(tk.Frame):
+    """One-shot project commands: venv, frontend build, git, deploy."""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=C["bg"])
+        self._build()
+
+    def _build(self):
+        bar = tk.Frame(self, bg=C["bg3"])
+        bar.pack(fill="x")
+        tk.Label(bar, text="Build · Git · Deploy", font=("Consolas", 11, "bold"),
+                 bg=C["bg3"], fg=C["text"], padx=12, pady=8).pack(side="left")
+        tk.Label(bar, text="  one-shot commands — output below",
+                 font=("Consolas", 8), bg=C["bg3"], fg=C["muted"]).pack(side="left")
+
+        body = tk.Frame(self, bg=C["bg"])
+        body.pack(fill="x", padx=8, pady=8)
+
+        def group(title):
+            lf = tk.LabelFrame(body, text=title, bg=C["bg"], fg=C["muted"],
+                               font=("Consolas", 9), bd=1, relief="solid",
+                               labelanchor="nw", padx=6, pady=6)
+            lf.pack(side="left", fill="both", expand=True, padx=4)
+            return lf
+
+        g1 = group(" Build ")
+        _flat_btn(g1, "Build Frontend (prod)", C["green"],
+                  lambda: self._run("build frontend", "npm run build", FRONTEND_DIR)).pack(fill="x", pady=3)
+        _flat_btn(g1, "Open data folder", C["text"], self._open_data).pack(fill="x", pady=3)
+        tk.Label(g1, text="deps install globally — no venv",
+                 font=("Consolas", 7), bg=C["bg"], fg=C["dim"]).pack(anchor="w", pady=(4, 0))
+
+        g2 = group(" Git ")
+        for label, cmd in [("status", "git status"), ("pull", "git pull"), ("push", "git push")]:
+            _flat_btn(g2, f"git {label}", C["text"],
+                      lambda c=cmd, l=label: self._run(f"git {l}", c, ROOT_DIR)).pack(fill="x", pady=3)
+
+        g3 = group(" Deploy ")
+        _flat_btn(g3, "Deploy to VPS", C["yellow"], self._deploy).pack(fill="x", pady=3)
+        tk.Label(g3, text="runs vps-deployment/deploy.py", font=("Consolas", 7),
+                 bg=C["bg"], fg=C["dim"]).pack(anchor="w", pady=(4, 0))
+
+        tk.Label(self, text="  output", font=("Consolas", 8),
+                 bg=C["bg"], fg=C["muted"]).pack(anchor="w", padx=8)
+        self.log = LogPane(self, height=16)
+        self.log.pack(fill="both", expand=True, padx=6, pady=(0, 8))
+
+    def _run(self, label, cmd, cwd):
+        self.log.write(f"$ {cmd}", "info")
+
+        def worker():
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(cwd), shell=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    bufsize=1, universal_newlines=True, creationflags=_cflags(),
+                )
+                for line in proc.stdout:
+                    s = line.rstrip()
+                    if s:
+                        self.log.write(s)
+                code = proc.wait()
+                self.log.write(f"{label} finished (exit {code})",
+                               "info" if code == 0 else "err")
+            except Exception as exc:  # noqa: BLE001
+                self.log.write(f"{label} error: {exc}", "err")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _deploy(self):
+        script = VPS_DIR / "deploy.py"
+        if not script.exists():
+            self.log.write(f"deploy.py not found at {script}", "err")
+            return
+        self._run("deploy", f'"{sys.executable}" deploy.py', VPS_DIR)
+
+    def _open_data(self):
+        d = BACKEND_DIR / "data"
+        d.mkdir(exist_ok=True)
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(d))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(d)])
+            else:
+                subprocess.run(["xdg-open", str(d)])
+        except Exception as exc:  # noqa: BLE001
+            self.log.write(f"open data error: {exc}", "err")
+
+
 # ── Custom title bar ───────────────────────────────────────────────────────
 
 class TitleBar(tk.Frame):
@@ -744,6 +838,10 @@ class App(tk.Tk):
         # tab 2 — Netstat
         self._netstat = NetstatTab(nb)
         nb.add(self._netstat, text="  Netstat  ")
+
+        # tab 3 — Build / Git / Deploy
+        self._build_tab = BuildTab(nb)
+        nb.add(self._build_tab, text="  Build · Git · Deploy  ")
 
     # ── global commands ───────────────────────────────────────────────
 

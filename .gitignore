@@ -3,10 +3,13 @@ backend/data/*.parquet
 backend/data/**/*.parquet
 backend/__pycache__/
 backend/**/__pycache__/
+__pycache__/
 frontend/node_modules/
 frontend/dist/
 .DS_Store
 *.log
+# ...but keep the strategy reference exports tracked
+!docs/txt-strategies/export.log
 backend/.env
 .env
 .claude/
@@ -20,6 +23,11 @@ vendor/
 
 # Raw broker/strategy CSV data — kept local
 backend/data/tradestation/
+# Root TradeStation live-feed CSV drop (raw data, regenerated locally)
+/tradestation/**/*.csv
+
+# Local backup archives
+*.rar
 
 # Runtime webhook config — contains live URLs and secrets
 backend/data/live_alerts.json

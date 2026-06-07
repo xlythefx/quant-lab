@@ -1,0 +1,42 @@
+{
+instrument: @EC
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 60m
+type: BIAS - Intraday
+IS: 01.01.2007 to 19.11.2019
+OS: 19.11.2019 to today
+
+brief description: la strategia sfrutta un bias rialzista il mercoledi e un bias ribassista il venerdi.
+
+Uscite a tempo, SL TP e BE.
+}
+
+input: nCon(1);
+var: stp(1300), tgt(2600);
+
+//rialzista 
+If (HighS(0) <> LowS(0)) and dayofweek(date)=3 and (t>=1000 and t<=1100) And (c of data2 < l of data2+(h of data2-l of data2)/3)
+	then buy ("LE-BIAS") next bar at L limit;
+
+If t=200 and marketposition = 1 then sell ("LX-BIAS") next bar at open;
+
+//ribassista
+If (HighS(0) <> LowS(0)) and dayofweek(date)=5 and (t>=0000 and t<=0100) And (c of data2 < H of data2-(h of data2-l of data2)/3)
+	then sellshort ("SE-BIAS") next bar at H  limit;
+
+If t=1000 and marketposition =-1 then buytocover ("SX-BIAS") next bar at open;
+
+{USCITE}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);

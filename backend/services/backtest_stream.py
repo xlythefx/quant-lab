@@ -40,6 +40,7 @@ class BacktestStream(CandleStream):
         start_time: int | None = None,
         end_time: int | None = None,
         loop: bool = True,
+        broker: str | None = None,
     ):
         super().__init__(symbol, timeframe, on_update)
         self._speed = max(1, min(int(speed), BACKTEST_MAX_SPEED))
@@ -47,6 +48,7 @@ class BacktestStream(CandleStream):
         self._start_time = start_time
         self._end_time = end_time
         self._loop = bool(loop)
+        self.broker = broker
 
     def set_speed(self, speed: int):
         self._speed = max(1, min(int(speed), BACKTEST_MAX_SPEED))
@@ -57,7 +59,7 @@ class BacktestStream(CandleStream):
 
     def _run(self):
         try:
-            df = load_parquet(self.symbol, self.timeframe)
+            df = load_parquet(self.symbol, self.timeframe, broker=self.broker)
         except Exception as e:
             log.exception("[%s] failed to load parquet: %s", self._name(), e)
             self.on_update({"__stream_error": True, "message": str(e)})
@@ -75,14 +77,14 @@ class BacktestStream(CandleStream):
         if self._start_index is not None:
             start_idx = self._start_index
         elif self._start_time is not None:
-            start_idx = time_to_index(self.symbol, self.timeframe, self._start_time, side="left")
+            start_idx = time_to_index(self.symbol, self.timeframe, self._start_time, side="left", broker=self.broker)
         else:
-            _, start_idx = replay_start_index(self.symbol, self.timeframe)
+            _, start_idx = replay_start_index(self.symbol, self.timeframe, broker=self.broker)
         start_idx = max(0, min(start_idx, n - 1))
 
         # Resolve end (inclusive).
         if self._end_time is not None:
-            end_idx = time_to_index(self.symbol, self.timeframe, self._end_time, side="right")
+            end_idx = time_to_index(self.symbol, self.timeframe, self._end_time, side="right", broker=self.broker)
             end_idx = max(start_idx, min(end_idx, n - 1))
         else:
             end_idx = n - 1

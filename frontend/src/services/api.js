@@ -12,24 +12,24 @@ export async function getSymbols() {
   return data;
 }
 
-export async function getOHLCV({ symbol, timeframe, mode = "backtest", limit = 500 }) {
+export async function getOHLCV({ symbol, timeframe, mode = "backtest", limit = 500, broker }) {
   const { data } = await api.get("/api/ohlcv", {
-    params: { symbol, timeframe, mode, limit },
+    params: { symbol, timeframe, mode, limit, broker },
   });
   return data.candles;
 }
 
-export async function getBacktestSeed({ symbol, timeframe, limit = 1500 }) {
+export async function getBacktestSeed({ symbol, timeframe, limit = 1500, broker }) {
   // Returns history slice ending at the same row BacktestStream will
   // replay from — guarantees timestamps line up so update() can append.
   const { data } = await api.get("/api/backtest/seed", {
-    params: { symbol, timeframe, limit },
+    params: { symbol, timeframe, limit, broker },
   });
   return data; // {candles, start_index, start_time, total_rows}
 }
 
-export async function prepareBacktest({ symbol, timeframe }) {
-  const { data } = await api.post("/api/backtest/prepare", { symbol, timeframe }, {
+export async function prepareBacktest({ symbol, timeframe, broker }) {
+  const { data } = await api.post("/api/backtest/prepare", { symbol, timeframe, broker }, {
     timeout: 900_000, // 1m downloads can take several minutes on cold cache
   });
   return data;
@@ -88,9 +88,9 @@ export async function getStrategies() {
 }
 
 /** Hindsight backtest — returns full result {candles, overlays, trades, equity, stats, analytics}. */
-export async function runBacktest({ strategy_id, symbol, timeframe, params, start_time, end_time }) {
+export async function runBacktest({ strategy_id, symbol, timeframe, params, start_time, end_time, broker }) {
   const { data } = await api.post("/api/strategies/run", {
-    strategy_id, symbol, timeframe, params, start_time, end_time,
+    strategy_id, symbol, timeframe, params, start_time, end_time, broker,
   }, { timeout: 900_000 });
   return data;
 }
@@ -212,6 +212,92 @@ export async function runMonteCarlo({ strategies, start_time, end_time,
     method, n_sims, block_size, seed,
   });
   return data;
+}
+
+// ---------------------------------------------------------------------------
+// Market Lab — read-only structural analysis (synchronous)
+// ---------------------------------------------------------------------------
+
+/** Regime classification + forward-return / transition stats. */
+export async function marketLabRegime({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/regime", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Realized vol, clustering, EWMA/persistence forecast + skill. */
+export async function marketLabVolatility({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/volatility", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Day/hour (UTC) returns, autocorrelation, distribution, conditional streaks. */
+export async function marketLabStatistics({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/statistics", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Mean-reversion alpha scanner: VWMA z-score + RSI setup edge, by regime, with significance. */
+export async function marketLabScan({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/scan", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Feature importance: which causal indicators predict the next move (honest train/test). */
+export async function marketLabFeatureImportance({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/feature-importance", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Mean-reversion scan across many symbols → ranked edge table. */
+export async function marketLabScanBatch({ symbols, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/scan-batch", {
+    symbols, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** KMeans candle-shape clustering with forward-return stats per cluster. */
+export async function marketLabPatterns({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/patterns", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Similarity search: nearest historical windows to the latest window + their outcomes. */
+export async function marketLabSimilarity({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/similarity", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+// Model Bench (async LSTM training job)
+export async function startModelBench(spec) {
+  const { data } = await api.post("/api/modelbench/start", spec);
+  return data; // {job_id, ok}
+}
+export async function cancelModelBench() {
+  const { data } = await api.post("/api/modelbench/cancel");
+  return data;
+}
+export async function getModelBenchStatus() {
+  const { data } = await api.get("/api/modelbench/status");
+  return data;
+}
+export async function getModelBenchLastResult() {
+  const { data } = await api.get("/api/modelbench/last_result");
+  return data.result;
 }
 
 // ---------------------------------------------------------------------------

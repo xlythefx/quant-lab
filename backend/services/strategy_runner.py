@@ -73,12 +73,13 @@ def _emit_signal(strategy_id: str, sid: str, sig: Signal, *,
 
 class VectorizedRunner:
     def __init__(self, sid: str, strategy_id: str, strategy, symbol: str,
-                 timeframe: str, socket_manager):
+                 timeframe: str, socket_manager, broker: str | None = None):
         self.sid = sid
         self.strategy_id = strategy_id
         self.strategy = strategy
         self.symbol = symbol
         self.timeframe = timeframe
+        self.broker = broker
         self._sm = socket_manager
         self._listener = None
         # Precomputed once at start():
@@ -94,12 +95,12 @@ class VectorizedRunner:
         self._overlays: dict[str, list] = {}
 
     def start(self):
-        df = market_data.load_parquet(self.symbol, self.timeframe)
+        df = market_data.load_parquet(self.symbol, self.timeframe, broker=self.broker)
         # Backtest replay starts mid-file (~70%). Trim the simulation to
         # match so equity starts at 100% at the replay cursor — otherwise
         # the curve would start at whatever value the precompute reached
         # over the unseen history, which is confusing.
-        _, start_idx = market_data.replay_start_index(self.symbol, self.timeframe)
+        _, start_idx = market_data.replay_start_index(self.symbol, self.timeframe, broker=self.broker)
         start_ts = int(df.iloc[start_idx]["time"])
 
         # Delegate the backtest math to backtest_engine.run() — pyramiding,
@@ -109,7 +110,7 @@ class VectorizedRunner:
         # match Walk-Forward / Grid / Monte Carlo / Cost Sweep exactly.
         result = backtest_engine.run(
             self.strategy_id, self.symbol, self.timeframe, dict(self.strategy.p),
-            start_time=start_ts,
+            start_time=start_ts, broker=self.broker,
         )
         equity_curve = result.get("equity") or []
         trades = result.get("trades") or []
@@ -194,7 +195,7 @@ class VectorizedRunner:
         def listener(candle):
             self._on_candle(candle)
         self._listener = listener
-        self._sm.add_listener("backtest", self.symbol, self.timeframe, listener)
+        self._sm.add_listener("backtest", self.symbol, self.timeframe, listener, broker=self.broker)
 
         rc = result.get("risk_config") or {}
         log.info("[%s] vectorized precompute done (%d bars, %d trades, "
@@ -254,7 +255,7 @@ class VectorizedRunner:
 
     def stop(self):
         if self._listener:
-            self._sm.remove_listener("backtest", self.symbol, self.timeframe, self._listener)
+            self._sm.remove_listener("backtest", self.symbol, self.timeframe, self._listener, broker=self.broker)
             self._listener = None
 
 
@@ -264,9 +265,10 @@ class VectorizedRunner:
 
 class LiveRunner:
     def __init__(self, sid: str, strategy_id: str, strategy, symbol: str,
-                 timeframe: str, socket_manager):
+                 timeframe: str, socket_manager, broker: str | None = None):
         self.sid = sid
         self.strategy_id = strategy_id
+        self.broker = broker
         self.strategy = strategy
         self.symbol = symbol
         self.timeframe = timeframe
@@ -317,7 +319,7 @@ class LiveRunner:
         def listener(candle):
             self._on_candle(candle)
         self._listener = listener
-        self._sm.add_listener("live", self.symbol, self.timeframe, listener)
+        self._sm.add_listener("live", self.symbol, self.timeframe, listener, broker=self.broker)
 
     def _on_candle(self, candle):
         sig = self.strategy.on_candle(candle, self._state)
@@ -360,5 +362,5 @@ class LiveRunner:
 
     def stop(self):
         if self._listener:
-            self._sm.remove_listener("live", self.symbol, self.timeframe, self._listener)
+            self._sm.remove_listener("live", self.symbol, self.timeframe, self._listener, broker=self.broker)
             self._listener = None

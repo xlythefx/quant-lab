@@ -1,0 +1,82 @@
+{
+instrument: @MES
+strat ref: PAR_ES_5_202306241615
+platform: multicharts - ASCII datafeed
+session: default timezone: sun-fri 17-16 (CT)
+timeframe: 5 + 1380 m
+type: Trend Following - Multiday - ORB Engine
+IS: 01.01.2008 to 31.12.2018
+OS: 31.12.2018 to today
+
+brief description:
+ - trigger: alle 11:00 (exchange time) il mercato guarda indietro fino alle 07:30 (42 barre) e cerca il massimo piu alto e il minimo piu basso
+   registrati in quell'arco temporale. Questi livelli diventano il massimo l'ingresso long e il minimo l'ingresso short. La timewindow di ingresso
+   e' impostata fino a due ore dopo il rilevamento (13:00).
+ 
+ - filtri (pattern):
+   - lato long: non ci sono filtri a pattern, il trigger funzionava gia' benissimo da solo
+   - lato short: si va short se il massimo di ieri e' il piu' alto delle ultime 4 giornate (rimanda alla natura mean-reversion di questo mercato).
+                 al contrario non si va short se il minimo di ieri e' piu' basso del minimo di 5 giorni fa.
+                 
+ - uscite:
+   - reverse di posizione
+   - stop e target: non sono speculari i takeprofit, sul lato long era piu' conveniente lasciar correre il trade rispetto al lato short
+   - uscita a tempo: il trade rimane aperto massimo 8 giorni
+}
+
+input: nCon(1);
+var: stpL(80), tgtL(220), stpS(80), tgtS(60), nBarExitL(405), nBarExitS(160);
+var: myLE(0), mySE(0), FiltroY(false), FiltroN(false);
+
+{ENTRY LVLS CALCULATION}
+if time = 1100 then begin
+	myLE = Highest(high, 42);
+	mySE = Lowest(low, 42);
+end;
+
+{FILTRI OPERATIVI}
+FiltroY = (H[0] of data2 > H[1] of data2) and (H[0] of data2 > H[2] of data2) and (H[0] of data2 > H[3] of data2);
+FiltroN = (L[0] of data2 < L[4] of data2);
+
+{TRADING}
+if (HighS(0) <> LowS(0)) and ((time > 1100) and (time <= 1300)) and (EntriesToday(d) < 1) then begin
+	If c > myLE then begin
+		If marketposition = -1 then buytocover ("SX-SAR") this bar at close;
+		buy ("LE-Multiday") nCon contracts next bar at market;
+	end;
+
+	if c < mySE and (FiltroY = true) and (FiltroN = false) then begin
+		If marketposition = 1 then sell ("LX-SAR") this bar at close;
+		sellshort ("SE-Multiday") nCon contracts next bar at market;
+	end;
+end;
+
+{
+{USCITA PARZIALE}
+If marketposition = 1 and barssinceentry >= nBarExitL and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+
+If marketposition =-1 and barssinceentry >= nBarExitS and nCon > 1 and openpositionprofit > 0 then begin
+	Buytocover ("SX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+}
+
+{MAX DAYS - 2208 barre a 5 minuti sono 8 giorni}
+If marketposition<>0 and barssinceentry >= 2208 then sell ("LX-MaxDays") this bar at close;
+
+{EXITS}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stpL*nCon) then sell ("LX-Breakeven") next bar at entryprice+(2*minmove/pricescale) stop;
+	if stpL > 0 then Sell ("LX-StopLoss") next bar at entryprice-(stpL/bigpointvalue) stop;
+	if tgtL > 0 then Sell ("LX-Target") next bar at entryprice+(tgtL/bigpointvalue) limit;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stpS*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(2*minmove/pricescale) stop;	
+	if stpS > 0 then Buytocover ("SX-StopLoss") next bar at entryprice+(stpS/bigpointvalue) stop;
+	if tgtS > 0 then Buytocover ("SX-Target") next bar at entryprice-(tgtS/bigpointvalue) limit;
+end;
+
+setstopcontract;
+setstoploss(800); //inserisco questo stop perche' gli altri due non funzionerebbero sulla prima barra in cui il trade entra

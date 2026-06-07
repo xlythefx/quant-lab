@@ -1,0 +1,44 @@
+{
+instrument: @GC
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 60m
+type: BIAS - Intraday
+IS: 01.01.2007 to 19.11.2019
+OS: 19.11.2019 to today
+
+brief description: la strategia sfrutta un bias rialzista aprendo la posizione il venerdi e tenendola nel weekend e si posiziona short nella notte di
+lunedi o giovedi.
+
+Uscite a tempo, SL TP e BE.
+}
+
+input: nCon(1);
+var: stp(1700), tgt(2800);
+
+{BIAS-1}
+If T=0900 and dayofweek(date)=5 and (HighS(0) <> LowS(0))
+	then buy ("LE-EoW") next bar at open;
+
+If dayofweek(date)=0 and t>=2000 and marketposition = 1
+	then sell ("LX-EoW") next bar at open;
+
+{BIAS-2}
+If (T>=100 and T<=300) and (dayofweek(date)=1 or dayofweek(date)=4) and (HighS(0) <> LowS(0))
+	then sellshort ("SE-BIAS") next bar at lowest(l,2) stop;
+
+If T=1000 and marketposition =-1 then buytocover ("SX-BIAS") next bar at open;
+
+{USCITE}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);

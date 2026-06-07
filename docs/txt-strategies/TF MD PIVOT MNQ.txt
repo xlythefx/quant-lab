@@ -1,0 +1,63 @@
+{
+instrument: @MNQ
+strat ref: PAR_NQ_15_202308201302
+platform: multicharts - ASCII datafeed
+session: default timezone: sun-fri 17-16 (CT)
+timeframe: 46 + 1380 m
+type: Trend Following - Pivot Points Engine - Multiday
+IS: 01.01.2008 to 31.12.2018
+OS: 31.12.2018 to today
+
+brief description:
+	- entry: la strategia utilizza con livello breakout di ingresso l'R1 Pivot Point calcolato sulla sessione
+	precedente. La time window e' impostata dalle 08:00 alle 15:30 e gli ingressi sono filtrati con un pattern
+	che verifica che la sessione precedente abbia chiuso negativamente.
+	
+	- uscite: stop, takeprofit. Sono forzate le uscite dopo 14 giorni che la posizione rimane a mercato.
+}
+
+input: nCon(1);
+var: stp(155), tgt(300), nBarExit(125);
+var: FiltroY(false);
+
+var: CloseS1(0), HighS1(0), LowS1(0);
+
+{RIFERIMENTI DI PREZZO}
+CloseS1 = c[0] of data2;
+HighS1 = h[0] of data2;
+LowS1 = l[0] of data2;
+
+{FILTRI OPERATIVI PRICE PATTERN}
+FiltroY = (C[0] of data2 < O[0] of data2);
+
+{PIVOT POINTS}
+var: mypivot(0), myS1(0), myS2(0), myR1(0), myR2(0);
+mypivot = (HighS1+LowS1+CloseS1)/3;
+myR1 = 2*mypivot-LowS1;
+myS1 = 2*mypivot-HighS1;
+myR2 = mypivot + (HighS1-LowS1);
+myS2 = mypivot - (HighS1-LowS1);
+
+{TRADING}
+if (HighS(0) <> LowS(0)) and (Time>=800 or Time<1530) and marketposition = 0 and (EntriesToday(d) < 1) and (FiltroY = true) and (C < myR1) then
+	buy ("LE-Breakout-1") nCon contracts next bar at (myR1-(2*minmove/pricescale)) stop;
+
+{
+{USCITA PARZIALE}
+If marketposition<>0 and barssinceentry >= nBarExit and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+}
+
+{MAX DAYS - 420 barre a 46 minuti sono 14 giorni}
+If marketposition<>0 and barssinceentry >= 420 then sell ("LX-MaxDays") this bar at close;
+
+{EXITS}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+if stp > 0 then setstoploss(stp);
+if tgt > 0 then Setprofittarget(tgt);

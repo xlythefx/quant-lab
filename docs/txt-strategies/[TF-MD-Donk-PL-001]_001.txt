@@ -1,0 +1,54 @@
+{
+instrument: @PL
+platform: multicharts - tradestation datafeed
+session: default session 18-17 (NY)
+timeframe: 60+1380m
+type: Trend Following - Multiday - Donchian Engine QTLab
+IS: 01.01.2008 to 31.12.2019
+OS: 01.01.2020 to today
+
+brief description: la strategia utilizza un motore breakout entrando sul massimo/minimo (donchian) delle ultime 4 sessioni.
+Vengono utilizzati dei pattern di prezzo come filtri (inside) e dei filtri temporali asimmetrici tra long e short.
+Le uscite sono tramite trailing profit, SL, BE, temporali.
+}
+
+input: nCon(1);
+var: pH(4), pL(4), pXL(25), pXS(25), stp(1100), tgt(0), nBarExit(75);
+ 
+var: Inside(false), BiasL(false), BiasS(false);
+
+Inside = maxlist(c of data2, o of data2) < h[1] of data2 
+         and minlist(C of data2, o of data2) > l[1] of data2;
+
+BiasL=dayofweek(date)<>1 and dayofweek(date)<>0;
+BiasS=dayofweek(date)<>5;
+
+if (HighS(0) <> LowS(0)) and EntriesToday(date)<1 and Inside then	begin
+	if BiasL then
+		Buy ("LE-Breakout-1") nCon contracts next bar at (highest(High of data2,pH)-(2*minmove/pricescale)) stop;
+	if BiasS then
+		Sellshort ("SE-Breakout-1") nCon contracts next bar at (lowest(low of data2,pL)+(2*minmove/pricescale)) stop;
+end;
+
+If marketposition<>0 then begin
+	Sell ("LX-Trailing") next bar at lowest(High,pXL) stop;
+	Buy to cover ("SX-Trailing") next bar at highest(Low,pXS) stop;
+	
+	If barssinceentry >= nBarExit then begin
+		Sell ("LX-nBarX") next bar at market;
+		Buytocover ("SX-nBarX") next bar at market;
+	end;
+end;
+
+If marketposition = 1 then begin
+	if openpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+if stp > 0 then setstoploss(stp);
+if tgt > 0 then Setprofittarget(tgt);

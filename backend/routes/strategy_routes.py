@@ -40,6 +40,7 @@ def run_strategy():
         symbol = validate_symbol(body.get("symbol"))
         tf = validate_timeframe(body.get("timeframe"))
         params = body.get("params") or {}
+        broker = (body.get("broker") or None)
         start_time = body.get("start_time")
         end_time = body.get("end_time")
         if start_time is not None: start_time = int(start_time)
@@ -49,7 +50,7 @@ def run_strategy():
 
     try:
         spec = StrategySpec(strategy_id=strategy_id, symbol=symbol,
-                            timeframe=tf, params=params, priority=1)
+                            timeframe=tf, params=params, priority=1, broker=broker)
         pres = portfolio_runner.run_portfolio(
             [spec], start_time=start_time, end_time=end_time,
         )

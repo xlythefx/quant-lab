@@ -96,7 +96,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         df: Optional[pd.DataFrame] = None,
-        risk_overrides: Optional[dict] = None) -> dict:
+        risk_overrides: Optional[dict] = None,
+        broker: Optional[str] = None) -> dict:
     """Run a backtest.
 
     `df`: if provided, use it directly (and copy it) instead of loading from
@@ -135,7 +136,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     pyramiding_param = strategy.p.get("pyramiding", rc.get("pyramiding", 1))
     max_tranches = max(1, int(float(pyramiding_param)))
 
-    df = df.copy() if df is not None else market_data.load_parquet(symbol, timeframe)
+    df = df.copy() if df is not None else market_data.load_parquet(symbol, timeframe, broker=broker)
     if start_time is not None:
         df = df[df["time"] >= int(start_time)]
     if end_time is not None:
@@ -200,9 +201,9 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     # 'equity_index_future', e.g. ES with contract_size=50) size as N contracts ×
     # multiplier so the existing `move × units` P&L math yields TS-style dollars
     # ($50/pt). Everything else (crypto, commodities) stays %-of-equity sizing.
-    _broker = market_data.broker_for(symbol, timeframe)
+    _broker = broker or market_data.broker_for(symbol, timeframe)
     _meta   = assets.get(symbol, _broker or market_data.BROKER_DEFAULT)
-    contract_sizing = (_meta.asset_class == "equity_index_future" and _meta.contract_size > 1.0)
+    contract_sizing = (_meta.asset_class in ("equity_index_future", "futures") and _meta.contract_size > 1.0)
     n_contracts     = float(strategy.p.get("contracts", 1)) if contract_sizing else 0.0
     contract_units  = n_contracts * float(_meta.contract_size) if contract_sizing else 0.0
 

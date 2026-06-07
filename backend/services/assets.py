@@ -50,8 +50,8 @@ _CACHE_LOCK = threading.Lock()
 # and API payloads stay strings end-to-end.
 # ---------------------------------------------------------------------------
 
-ASSET_CLASSES = ("crypto", "forex", "stock", "index", "commodity")
-EXECUTION_MODELS = ("spot_crypto", "forex_cfd", "stock_cfd", "stock_cash", "commodity_cfd")
+ASSET_CLASSES = ("crypto", "forex", "stock", "index", "commodity", "futures")
+EXECUTION_MODELS = ("spot_crypto", "forex_cfd", "stock_cfd", "stock_cash", "commodity_cfd", "futures")
 
 
 @dataclass(frozen=True)

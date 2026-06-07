@@ -20,21 +20,21 @@ class StrategyManager:
         self._lock = Lock()
 
     @staticmethod
-    def _key(sid, strategy_id, symbol, tf, mode):
-        return (sid, strategy_id, symbol, tf, mode)
+    def _key(sid, strategy_id, symbol, tf, mode, broker=None):
+        return (sid, strategy_id, symbol, tf, mode, broker or "")
 
-    def start(self, sid, strategy_id, symbol, tf, mode, params: dict | None = None):
+    def start(self, sid, strategy_id, symbol, tf, mode, params: dict | None = None, broker: str | None = None):
         params = params or {}
         cls = get_strategy_class(strategy_id)
         strategy = cls(params)
         if mode == "backtest":
-            runner = VectorizedRunner(sid, strategy_id, strategy, symbol, tf, self._sm)
+            runner = VectorizedRunner(sid, strategy_id, strategy, symbol, tf, self._sm, broker=broker)
         elif mode == "live":
-            runner = LiveRunner(sid, strategy_id, strategy, symbol, tf, self._sm)
+            runner = LiveRunner(sid, strategy_id, strategy, symbol, tf, self._sm, broker=broker)
         else:
             raise ValueError(f"unknown mode: {mode}")
 
-        key = self._key(sid, strategy_id, symbol, tf, mode)
+        key = self._key(sid, strategy_id, symbol, tf, mode, broker)
         with self._lock:
             existing = self._runners.pop(key, None)
             if existing:
@@ -48,8 +48,8 @@ class StrategyManager:
         }, to=sid)
         log.info("started runner %s", key)
 
-    def stop(self, sid, strategy_id, symbol, tf, mode):
-        key = self._key(sid, strategy_id, symbol, tf, mode)
+    def stop(self, sid, strategy_id, symbol, tf, mode, broker: str | None = None):
+        key = self._key(sid, strategy_id, symbol, tf, mode, broker)
         with self._lock:
             runner = self._runners.pop(key, None)
         if runner:
@@ -60,10 +60,10 @@ class StrategyManager:
             }, to=sid)
             log.info("stopped runner %s", key)
 
-    def apply(self, sid, strategy_id, symbol, tf, mode, params: dict | None = None):
+    def apply(self, sid, strategy_id, symbol, tf, mode, params: dict | None = None, broker: str | None = None):
         """Stop + start with new params. Equity resets."""
-        self.stop(sid, strategy_id, symbol, tf, mode)
-        self.start(sid, strategy_id, symbol, tf, mode, params)
+        self.stop(sid, strategy_id, symbol, tf, mode, broker=broker)
+        self.start(sid, strategy_id, symbol, tf, mode, params, broker=broker)
 
     def cleanup_sid(self, sid: str):
         with self._lock:

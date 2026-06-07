@@ -8,6 +8,7 @@ import WalkForward from "./pages/WalkForward.jsx";
 import GridSearch from "./pages/GridSearch.jsx";
 import MonteCarlo from "./pages/MonteCarlo.jsx";
 import CostSweep from "./pages/CostSweep.jsx";
+import MarketLab from "./pages/MarketLab.jsx";
 import LiveAlerts from "./pages/LiveAlerts.jsx";
 import Landing from "./pages/Landing.jsx";
 import Login from "./pages/Login.jsx";
@@ -54,6 +55,7 @@ export default function App() {
   if (view === "gridsearch")   return <GridSearch />;
   if (view === "montecarlo")   return <MonteCarlo />;
   if (view === "costsweep")    return <CostSweep />;
+  if (view === "marketlab")    return <MarketLab />;
   if (view === "livealerts")   return <LiveAlerts />;
 
   // Dashboard — page-enter fades it in; ripple overlay bursts on mount

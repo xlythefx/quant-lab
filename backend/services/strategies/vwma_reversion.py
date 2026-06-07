@@ -16,7 +16,9 @@ import pandas as pd
 from services.strategies.base import (
     Strategy, StrategyMeta, ParamSpec, ParamType, Signal, OverlaySpec,
 )
-from services.strategies.regime import RegimeDetector
+from services.strategies.regime import (
+    RegimeDetector, REGIME_LABELS, _regime_labels, _regime_params,
+)
 from services.strategies.session_utils import parse_hhmm, in_window_live, session_mask
 
 
@@ -85,6 +87,16 @@ class VwmaReversionStrategy(Strategy):
                   description="Block entries when ADX signals a trending market. Exits still fire."),
         ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime"),
         ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime"),
+        ParamSpec("use_five_regime", ParamType.BOOL, False, group="Regime",
+                  description="Use the 5-regime classifier (Trend↑/Trend↓/High-Vol/Quiet/Choppy) instead "
+                              "of the binary ADX filter. Requires Use Regime on. Only the regimes checked "
+                              "below are allowed to take entries."),
+        ParamSpec("allowed_regimes", ParamType.REGIMES,
+                  {"Trending Up": False, "Trending Down": False,
+                   "High-Volatility": False, "Quiet": True, "Choppy-Range": True},
+                  group="Regime",
+                  description="When the 5-regime engine is on, only allow entries while the market is in "
+                              "one of the checked regimes."),
         ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
                   description="Max concurrent positions per side. Each tranche is sized at the strategy's Risk%. Set to 1 to disable stacking."),
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
@@ -122,6 +134,18 @@ class VwmaReversionStrategy(Strategy):
                 "tokyo":  {"enabled": True},   # Asia
                 "london": {"enabled": True},   # London
                 "ny_am":  {"enabled": False},  # Main (off)
+                "ny_pm":  {"enabled": False},
+            },
+        },
+        "ZECUSDT": {
+            "vwma_length":  17,
+            "z_threshold":  1.5,
+            "rsi_length":   15,
+            "sides":        {"long": True, "short": False},
+            "sessions":     {
+                "tokyo":  {"enabled": True},   # Asia
+                "london": {"enabled": True},   # London
+                "ny_am":  {"enabled": True},   # Main (on)
                 "ny_pm":  {"enabled": False},
             },
         },
@@ -187,9 +211,20 @@ class VwmaReversionStrategy(Strategy):
             short_cond = pd.Series(False, index=out.index)
 
         if p.get("use_regime"):
-            ranging = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"]).detect(out)
-            long_cond  = long_cond  & ranging
-            short_cond = short_cond & ranging
+            if p.get("use_five_regime"):
+                # 5-regime membership filter (causal labeler shared with Market Lab).
+                rp = _regime_params({
+                    "adx_period": p["regime_adx_period"],
+                    "adx_trend_thresh": p["regime_adx_threshold"],
+                })
+                labels = _regime_labels(out, rp)
+                allowed = [k for k, on in (p.get("allowed_regimes") or {}).items() if on]
+                in_regime = pd.Series(np.isin(labels, allowed), index=out.index)
+            else:
+                # Binary ADX ranging filter (original behavior).
+                in_regime = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"]).detect(out)
+            long_cond  = long_cond  & in_regime
+            short_cond = short_cond & in_regime
 
         # Walk forward to compute entries / exits respecting position state.
         n = len(out)
@@ -292,6 +327,14 @@ class VwmaReversionStrategy(Strategy):
 
         p = self.p
         warmup = max(p["vwma_length"], p["rsi_length"], p["atr_length"]) * 4
+        # The 5-regime labeler needs enough trailing history for its volatility
+        # lookback, or the live label won't match the backtest label.
+        if p.get("use_regime") and p.get("use_five_regime"):
+            rp_live = _regime_params({
+                "adx_period": p["regime_adx_period"],
+                "adx_trend_thresh": p["regime_adx_threshold"],
+            })
+            warmup = max(warmup, int(rp_live["vol_lookback"]) + int(rp_live["vol_window"]))
         buf = state.setdefault("buf", [])
         buf.append({
             "time": int(candle["time"]),
@@ -351,9 +394,19 @@ class VwmaReversionStrategy(Strategy):
         sides = p["sides"]
 
         if p.get("use_regime") and pos == 0:
-            rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
-            if rd.last_adx(df) >= p["regime_adx_threshold"]:
-                return None  # trending — block new entries; exits still fire below
+            if p.get("use_five_regime"):
+                rp = _regime_params({
+                    "adx_period": p["regime_adx_period"],
+                    "adx_trend_thresh": p["regime_adx_threshold"],
+                })
+                last_label = _regime_labels(df, rp)[-1]
+                allowed = [k for k, on in (p.get("allowed_regimes") or {}).items() if on]
+                if last_label not in allowed:
+                    return None  # current regime not allowed — block new entries; exits still fire
+            else:
+                rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
+                if rd.last_adx(df) >= p["regime_adx_threshold"]:
+                    return None  # trending — block new entries; exits still fire below
 
         if pos == 0:
             if not in_sess:

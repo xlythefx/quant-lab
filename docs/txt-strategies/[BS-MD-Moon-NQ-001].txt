@@ -1,0 +1,51 @@
+{
+instrument: @NQ
+platform: multicharts - tradestation datafeed
+session: default session 17-16
+timeframe: 60+1380m
+type: Bias - Multiday - Moon Cycle Engine QTLab
+IS: 01.01.2008 to 31.12.2019
+OS: 01.01.2020 to today
+
+brief description: la strategia utilizza un motore bias che sfrutta le ciclicita' della luna come hedge.
+Le uscite sono o per fine Bias, per SL, TP, BE e a tempo dopo circa 15 giorni a mercato (maxbars).
+}
+input: nCon(1);
+var: AtrPeriod(10), stp(3000), tgt(4250), nBarExit(345);
+Var: Phase(0), atr(0);
+
+Phase = AbsValue(2 * (FracPortion(DateToJulian(Date+2)/29.53059 + .4137) -.5));
+
+if OpenS(0)<>OpenS(0)[1] and (HighS(0) <> LowS(0)) then begin
+	If entriestoday(d) < 1 and Phase[1] < Phase[35] and Phase[35] > Phase[65]
+		then Buy ("LE - Full Moon") nCon contracts next bar at market;
+		
+	if phase[1] > Phase[35] and Phase[35] < Phase[65]
+		then Sell ("LX - Full Moon Exit") next bar at market;
+	
+	atr = avgtruerange(AtrPeriod) of data2;
+	
+	If entriestoday(d) < 1 and atr >1*atr[1] and Phase[1] > Phase[35] and Phase[35] < Phase[65]
+		then Sellshort ("SE - New Moon") nCon contracts next bar at market;
+		
+	if Phase[1] < Phase[35] and Phase[35] > Phase[65]
+		then Buytocover ("SX - New Moon Exit") next bar at market;
+end;
+
+If barssinceentry >= nBarExit then begin
+	Sell ("LX-nBarX") next bar at market;
+	Buytocover ("SX-nBarX") next bar at market;
+end;
+	
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);

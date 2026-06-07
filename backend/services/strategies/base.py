@@ -23,6 +23,7 @@ class ParamType(str, Enum):
     BOOL = "bool"
     SESSIONS = "sessions"   # multi-checkbox: tokyo / london / ny_am / ny_pm
     SIDES = "sides"         # multi-checkbox: long / short
+    REGIMES = "regimes"     # multi-checkbox: the 5 regime labels (allow entries in checked regimes)
 
 
 @dataclass
@@ -129,6 +130,11 @@ class Strategy(ABC):
                 elif spec.type == ParamType.BOOL:
                     v = bool(v)
                 elif spec.type == ParamType.SIDES:
+                    merged = dict(spec.default)
+                    merged.update({k: bool(val) for k, val in (v or {}).items()})
+                    v = merged
+                elif spec.type == ParamType.REGIMES:
+                    # Dict-of-bools keyed by the 5 regime labels; merge per key.
                     merged = dict(spec.default)
                     merged.update({k: bool(val) for k, val in (v or {}).items()})
                     v = merged

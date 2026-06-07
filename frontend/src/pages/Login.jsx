@@ -3,7 +3,7 @@ import { login } from "../services/auth.js";
 import LoadingScreen from "../components/LoadingScreen.jsx";
 
 const CRED_USER = "administrator";
-const CRED_PASS = "Jdewg3vpq9Y0a~gO";
+const CRED_PASS = "qweqwe";
 
 export default function Login() {
   const [username, setUsername] = useState("");

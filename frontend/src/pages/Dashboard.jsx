@@ -121,6 +121,7 @@ export default function Dashboard() {
   const [mode,         setMode]         = usePersistentState("ql.dash.mode",         "backtest");
   const [backtestKind, setBacktestKind] = usePersistentState("ql.dash.backtestKind", "hindsight");
   const [symbol,       setSymbol]       = usePersistentState("ql.dash.symbol",       "");
+  const [broker,       setBroker]       = usePersistentState("ql.dash.broker",       "");
   const [timeframe,    setTimeframe]    = usePersistentState("ql.dash.timeframe",    "15m");
   const [speed,        setSpeed]        = usePersistentState("ql.dash.speed",        60);
 
@@ -181,12 +182,13 @@ export default function Dashboard() {
   useEffect(() => {
     if (symbol && symbolList.length > 0 && !symbolList.includes(symbol)) {
       setSymbol("");
+      setBroker("");
     }
   }, [symbolList]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (mode !== "backtest" || !symbol) return;
-    const tfs = datasets.filter((d) => d.symbol === symbol).map((d) => d.timeframe);
+    const tfs = datasets.filter((d) => d.symbol === symbol && (!broker || d.broker === broker)).map((d) => d.timeframe);
     if (tfs.length > 0 && !tfs.includes(timeframe)) {
       setTimeframe(tfs.includes("15m") ? "15m" : tfs[0]);
     }
@@ -195,9 +197,9 @@ export default function Dashboard() {
   // Live mode: futures/commodity symbols stream from TradeStation CSV (1H only).
   // Auto-correct timeframe whenever the symbol or mode changes.
   const _FUTURES_LIVE_TF = "1h";
-  const _FUTURES_CLASSES = new Set(["equity_index_future", "commodity"]);
+  const _FUTURES_CLASSES = new Set(["equity_index_future", "commodity", "futures"]);
   const _liveAssetClass = (
-    datasets.find((d) => d.symbol === symbol)?.asset_class          // has backtest data
+    datasets.find((d) => d.symbol === symbol && (!broker || d.broker === broker))?.asset_class  // has backtest data
     || localStorage.getItem("ql.symbolSelector.assetClass")         // read active tab
     || "crypto"
   );
@@ -210,7 +212,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (mode !== "backtest" || backtestKind !== "replay") return;
-    const ds = datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe);
+    const ds = datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe && (!broker || d.broker === broker));
     if (!ds) return;
     setRange((r) => ({
       start: r.start || epochToDateStr(ds.first_time),
@@ -242,12 +244,12 @@ export default function Dashboard() {
   }, [timeframe]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const tfsForSymbol = mode === "backtest"
-    ? datasets.filter((d) => d.symbol === symbol).map((d) => d.timeframe)
+    ? datasets.filter((d) => d.symbol === symbol && (!broker || d.broker === broker)).map((d) => d.timeframe)
     : _isFuturesLive ? [_FUTURES_LIVE_TF]   // only 1h available from TradeStation CSV
     : null;
 
   const datasetExists = mode !== "backtest" || datasets.some(
-    (d) => d.symbol === symbol && d.timeframe === timeframe,
+    (d) => d.symbol === symbol && d.timeframe === timeframe && (!broker || d.broker === broker),
   );
 
   const streaming = mode === "live"
@@ -256,7 +258,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (mode === "backtest" && backtestKind === "replay" && armed) {
-      wsSetSpeed({ symbol, timeframe, speed });
+      wsSetSpeed({ symbol, timeframe, speed, broker: broker || undefined });
     }
   }, [speed, mode, backtestKind, symbol, timeframe, armed]);
 
@@ -333,20 +335,21 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
+    const brk = broker || undefined;
     if (!streaming) {
-      for (const s of active) stopStrategy({ strategy_id: s.id, symbol, timeframe, mode });
+      for (const s of active) stopStrategy({ strategy_id: s.id, symbol, timeframe, mode, broker: brk });
       clearAllStrategySubscriptions();
       return;
     }
     resetStreamingState();
     for (const s of active) {
-      startStrategy({ strategy_id: s.id, symbol, timeframe, mode, params: s.params });
+      startStrategy({ strategy_id: s.id, symbol, timeframe, mode, params: s.params, broker: brk });
     }
     return () => {
-      for (const s of active) stopStrategy({ strategy_id: s.id, symbol, timeframe, mode });
+      for (const s of active) stopStrategy({ strategy_id: s.id, symbol, timeframe, mode, broker: brk });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [streaming, mode, symbol, timeframe, active.length]);
+  }, [streaming, mode, symbol, timeframe, broker, active.length]);
 
   // ---- Hindsight runner (portfolio mode) -----------------------
   //
@@ -366,11 +369,11 @@ export default function Dashboard() {
     setHindsightLoading(true);
 
     try {
-      const candlesP = getOHLCV({ symbol, timeframe, mode: "backtest", limit: 200000 });
+      const candlesP = getOHLCV({ symbol, timeframe, mode: "backtest", limit: 200000, broker: broker || undefined });
       const portfolioP = runPortfolioBacktest({
         strategies: active.map((s, i) => ({
           strategy_id: s.id, symbol, timeframe,
-          params: s.params, priority: i + 1,
+          params: s.params, priority: i + 1, broker: broker || undefined,
         })),
       });
 
@@ -464,7 +467,7 @@ export default function Dashboard() {
   const reRunOneHindsight = async (id, params) => {
     if (!symbol || !staticData) return;
     try {
-      const r = await runBacktest({ strategy_id: id, symbol, timeframe, params });
+      const r = await runBacktest({ strategy_id: id, symbol, timeframe, params, broker: broker || undefined });
       const newMarkers = tradesToMarkers(r.trades || []);
       setStaticData((prev) => ({
         ...prev,
@@ -497,13 +500,13 @@ export default function Dashboard() {
       setEquityPoints((prev) => ({ ...prev, [id]: [] }));
       setMarkersByStrategy((prev) => ({ ...prev, [id]: [] }));
       setStatsById((prev) => ({ ...prev, [id]: undefined }));
-      applyStrategy({ strategy_id: id, symbol, timeframe, mode, params });
+      applyStrategy({ strategy_id: id, symbol, timeframe, mode, params, broker: broker || undefined });
     }
   };
 
   const onRunReplay = async () => {
     try {
-      await prepareBacktest({ symbol, timeframe });
+      await prepareBacktest({ symbol, timeframe, broker: broker || undefined });
       setArmed(true);
     } catch (e) {
       if (e?.response?.status === 404) {
@@ -517,6 +520,7 @@ export default function Dashboard() {
         start_time: dateStrToEpoch(range.start),
         end_time: dateStrToEpoch(range.end, true),
         loop: true,
+        broker: broker || undefined,
       }
     : undefined;
 
@@ -600,7 +604,7 @@ export default function Dashboard() {
 
       {/* Controls */}
       <div className="px-6 py-3 flex flex-wrap items-center gap-6 border-b border-line bg-bg-panel/30">
-        <SymbolSelector value={symbol} options={symbolList} datasets={datasets} onChange={setSymbol} />
+        <SymbolSelector value={symbol} broker={broker || null} options={symbolList} datasets={datasets} onChange={(sym, brk) => { setSymbol(sym); setBroker(brk || ""); }} />
         <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
         {mode === "backtest" && (
           <BacktestKindToggle value={backtestKind} onChange={setBacktestKind} />
@@ -787,6 +791,7 @@ export default function Dashboard() {
               key="stream-chart"
               mode={mode}
               symbol={symbol}
+              broker={broker || undefined}
               timeframe={timeframe}
               speed={speed}
               markersByStrategy={markersByStrategy}

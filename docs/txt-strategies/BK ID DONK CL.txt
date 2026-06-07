@@ -1,0 +1,81 @@
+{
+instrument: @CL
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 60+1380m
+type: Donchian Breakout - Intraday - QTLab Engine
+IS: 01.01.2006 to 19.11.2019
+OS: 19.11.2019 to today
+
+brief description: la strategia utilizza come motore un donchian breakout applicato sul chart a 60 min.
+}
+
+{INPUT & VARS}
+input: nCon(1); // imposto numero di contratti
+var: stp(1200), tgt(2400); // valore di sl e tgt per singolo contratto
+
+var: p1(36),p3(6),N(5); // input donchian channel
+var: mult(0.75);
+
+var: CloseStrong(false), CloseWeak(false),MovingUp(true), vf2(true);
+var: rng(1), bdy(1), comp(false);
+
+
+{FILTRI}
+If average(C of data2,100)>average(C of data2,100)[1] then MovingUp=true else MovingUp=false; // verifico se la media a 100 gg e' piu' alta della stessa media calcolata dal giorno prima
+If C of data2>H of data2-(H of data2-L of data2)/N then CloseStrong=true else CloseStrong=false; // closestrong=true se la sessione chiude nel 20% superiore del range (range/N(5))
+If C of data2<L of data2+(H of data2-L of data2)/N then CloseWeak=true else CloseWeak=false; // closeweak=true se la sessione chiude nel 20% inferiore del range (range/N(5))
+
+If dayofweek(date)=5  then // se venerdi calcolo il filtro vf2
+begin
+	rng=maxlist(HighW(0) -LowW(0), 0.0001);//per evitare la possibilita che possa verificarsi una divisione per zero
+	bdy=absvalue(OpenW(0)-CloseW(0));
+	if bdy <= mult*rng then vf2=True else vf2=false;//non chiude sui max o min la settimana
+end;
+
+
+{INGRESSO IN POSIZIONE}
+if marketposition=0 // se flat
+and HighS(0) <> LowS(0)
+and entriestoday(date)<1 // se oggi non ho ancora operato
+and t>0200 and t<1700 //opera quando posso monitorarlo
+then
+begin
+	If  CloseStrong=false
+	And MovingUp
+	And vf2
+	then Buy ("eL") nCon contracts next bar at highest(H,p1)-1 point stop; // anticipa di un tick l'ingresso per ottimizzare slippage
+
+	If  vf2 
+	//And CloseWeak=false
+	then Sellshort ("eS") nCon contracts next bar at lowest(L,p1)+1 point stop; // anticipa di un tick l'ingresso per ottimizzare slippage
+end;
+
+{EXIT TRAILING STOP}
+if T<>1700 then
+begin
+	Sell ("xL") next bar at minlist(lowest(H,p3),h-avgtruerange(23)) stop;
+	Buy to cover ("xS") next bar at maxlist(highest(L,p3),l+avgtruerange(23)) stop;
+end;
+
+
+{EXIT A FINE SESSIONE}
+If T>=1700 then
+begin 
+	buytocover ("EoD-S-Exit") next bar at c limit; // le uscite vengono fatte dopo le 17:00 con ordini limit per evitare slippage
+	sell ("EoD-L-Exit") next bar at c limit;
+end;
+
+{BREAKEVEN}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);

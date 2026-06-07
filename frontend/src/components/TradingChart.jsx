@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createChart, CrosshairMode, LineStyle } from "lightweight-charts";
 import { getOHLCV, getBacktestSeed } from "../services/api.js";
 import { subscribeCandles, socket } from "../services/socket.js";
+import { usePersistentState } from "../services/usePersistentState.js";
 
 const MAX_BARS = 100000;
 const SEED_LIMIT = 5000;
@@ -14,7 +15,7 @@ const SEED_LIMIT = 5000;
  */
 // Session band colors (matches StrategyEditor labels).
 const SESSION_BAND_COLORS = {
-  tokyo:  "rgba(59,130,246,0.07)",   // blue
+  tokyo:  "rgba(239,68,68,0.07)",    // red
   london: "rgba(34,197,94,0.07)",    // green
   ny_am:  "rgba(245,158,11,0.07)",   // amber
   ny_pm:  "rgba(139,92,246,0.07)",   // violet
@@ -34,7 +35,7 @@ function _hhmmToSec(s) {
 }
 
 export default function TradingChart({
-  mode, symbol, timeframe, speed,
+  mode, symbol, timeframe, speed, broker,
   onMissingDataset,
   // streaming-only:
   markersByStrategy = {},
@@ -54,10 +55,18 @@ export default function TradingChart({
   // strategyId -> overlayKey -> lineSeries
   const indicatorSeriesRef = useRef({});
   const bandsLayerRef = useRef(null);     // overlay div for session bands
+  // Live mirrors of session config + visibility. The scroll handlers are
+  // subscribed once (in the [isStatic] effect) and would otherwise close over
+  // stale prop/state values, blanking the bands on the first scroll.
+  const sessionsRef = useRef(null);
+  const showSessionsRef = useRef(true);
 
   const [last, setLast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
+  // User-controlled visibility of the session-highlight bands. Persisted so the
+  // choice sticks across reloads. Defaults to on to preserve prior behaviour.
+  const [showSessions, setShowSessions] = usePersistentState("ql.chart.showSessions", true);
 
   const isStatic = !!staticData;
 
@@ -70,7 +79,8 @@ export default function TradingChart({
     const chart = chartRef.current;
     if (!layer || !chart) return;
     layer.innerHTML = "";
-    if (!sessions) return;
+    const sessions = sessionsRef.current;
+    if (!sessions || !showSessionsRef.current) return;
 
     const ts = chart.timeScale();
     const tr = ts.getVisibleRange();
@@ -116,8 +126,13 @@ export default function TradingChart({
     seriesRef.current?.applyOptions({ priceFormat: _priceFormat(symbol) });
   }, [symbol]);
 
-  // Re-render bands when sessions prop changes.
-  useEffect(() => { _renderSessionBands(); }, [sessions]);
+  // Re-render bands when sessions prop or visibility toggle changes. Mirror the
+  // values into refs first so the long-lived scroll handlers see fresh state.
+  useEffect(() => {
+    sessionsRef.current = sessions;
+    showSessionsRef.current = showSessions;
+    _renderSessionBands();
+  }, [sessions, showSessions]);
 
   const _removeStrategyOverlays = (strategyId) => {
     const chart = chartRef.current;
@@ -401,10 +416,10 @@ export default function TradingChart({
       try {
         let candles;
         if (mode === "backtest") {
-          const seed = await getBacktestSeed({ symbol, timeframe, limit: SEED_LIMIT });
+          const seed = await getBacktestSeed({ symbol, timeframe, limit: SEED_LIMIT, broker });
           candles = seed.candles;
         } else {
-          candles = await getOHLCV({ symbol, timeframe, mode, limit: 1000 });
+          candles = await getOHLCV({ symbol, timeframe, mode, limit: 1000, broker });
         }
         if (cancelled) return;
 
@@ -413,7 +428,7 @@ export default function TradingChart({
         setLoading(false);
 
         unsub = subscribeCandles({
-          mode, symbol, timeframe, speed,
+          mode, symbol, timeframe, speed, broker,
           ...(replayOpts || {}),
         }, apply, (msg) => { if (!cancelled) setErr(msg); });
       } catch (e) {
@@ -436,7 +451,7 @@ export default function TradingChart({
       unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isStatic, mode, symbol, timeframe]);
+  }, [isStatic, mode, symbol, timeframe, broker]);
 
   // Streaming-mode marker reconciliation (signals trickle in over time).
   useEffect(() => {
@@ -474,6 +489,21 @@ export default function TradingChart({
           </span>
         )}
       </div>
+
+      {sessions && (
+        <button
+          type="button"
+          onClick={() => setShowSessions((v) => !v)}
+          title={showSessions ? "Hide session highlight bands" : "Show session highlight bands"}
+          className={`absolute top-3 right-3 z-10 px-2 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-md border transition-colors ${
+            showSessions
+              ? "bg-accent-violet/20 text-accent-violet border-accent-violet/40"
+              : "bg-bg-elev/60 text-muted border-line hover:text-text"
+          }`}
+        >
+          Sessions {showSessions ? "on" : "off"}
+        </button>
+      )}
 
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center text-muted text-sm bg-bg/40 backdrop-blur-sm z-20">

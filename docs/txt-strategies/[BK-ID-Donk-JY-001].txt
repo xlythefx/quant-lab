@@ -1,0 +1,75 @@
+{
+instrument: @JY
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 60+1380m
+type: Donchian Breakout - Intraday - QTLab Engine
+IS: 01.01.2006 to 19.11.2019
+OS: 19.11.2019 to today
+
+brief description: la strategia utilizza come motore un donchian breakout applicato sul chart a 60 min.
+}
+
+input: nCon(1);
+var: stp(700), tgt(1000);
+var: p1(36),p3(6),N(4); 
+
+var: CloseStrong(false), CloseWeak(false), BuyDay(TRUE), SellDay(TRUE), vf3(true);
+
+//Chiude nel quartile superiore 
+If C of data2>H of data2-(H of data2-L of data2)/N then CloseStrong=true else CloseStrong=false;
+//Chiude nel quartile inferiore 
+If C of data2<L of data2+(H of data2-L of data2)/N then CloseWeak=true else CloseWeak=false;
+
+if l of data2>l[2] of data2 then BuyDay=true else BuyDay=false;
+if h of data2<h[2] of data2 then SellDay=true else SellDay=false;
+
+If absvalue(O of data2-c of data2)<0.66*(h of data2-l of data2) then vf3=True else vf3=false;
+
+
+{TRADING}
+if mp=0 
+and entriestoday(date)<1
+and HighS(0) <> LowS(0)
+then
+begin
+	If  CloseStrong=false
+	and BuyDay 
+	and (T>=1900 or t<=100)
+	and dayofweek(date)<>4 
+	then Buy ("eL") nCon contracts next bar at highest(H,p1)+1 point stop;
+
+	If  CloseWeak=false 
+	and SellDay
+	and T<=1500 
+	and dayofweek(date)<>1
+	And vf3
+	then Sellshort ("eS") nCon contracts next bar at lowest(L,p1)-1 point stop;
+end;
+
+{USCITA TRAILING STOP}
+if T<>1700 then
+begin
+	Sell ("xL") next bar at minlist(lowest(H,p3),h-avgtruerange(23)) stop;
+	Buy to cover ("xS") next bar at maxlist(highest(L,p3),l+avgtruerange(23)) stop;
+end;
+
+{TIME EXIT}
+If t=500 and c>entryprice then sell ("BailOut-xL") next bar at c limit;
+If t=300 and c<entryprice then buytocover ("BailOut-xS") next bar at c limit;
+
+
+{BREAKEVEN}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+{STP E TGT MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);
+

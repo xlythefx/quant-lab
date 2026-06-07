@@ -31,7 +31,7 @@ socket.io.on("reconnect", () => {
  * onUpdate receives the full candle payload:
  *   {time, open, high, low, close, volume, isClosed, mode, symbol, timeframe}
  */
-export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_time, end_time, loop }, onUpdate, onError) {
+export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_time, end_time, loop, broker }, onUpdate, onError) {
   // Tear down any prior subscription first so we never run two streams.
   if (activeSub) {
     socket.emit("unsubscribe", activeSub);
@@ -40,6 +40,7 @@ export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_ti
   if (start_time != null) activeSub.start_time = start_time;
   if (end_time != null) activeSub.end_time = end_time;
   if (loop != null) activeSub.loop = loop;
+  if (broker != null) activeSub.broker = broker;
 
   const handler = (candle) => {
     if (
@@ -82,8 +83,8 @@ export function subscribeCandles({ mode, symbol, timeframe, speed = 60, start_ti
   };
 }
 
-export function setSpeed({ symbol, timeframe, speed }) {
-  socket.emit("set_speed", { symbol, timeframe, speed });
+export function setSpeed({ symbol, timeframe, speed, broker }) {
+  socket.emit("set_speed", { symbol, timeframe, speed, broker });
   if (activeSub) activeSub.speed = speed;
 }
 
@@ -112,20 +113,20 @@ socket.io.on("reconnect", () => {
 
 export function startStrategy(payload) {
   // payload: {strategy_id, symbol, timeframe, mode, params}
-  const k = `${payload.strategy_id}|${payload.symbol}|${payload.timeframe}|${payload.mode}`;
+  const k = `${payload.strategy_id}|${payload.symbol}|${payload.timeframe}|${payload.mode}|${payload.broker || ""}`;
   activeStrategyStarts.set(k, payload);
   if (socket.connected) socket.emit("strategy_start", payload);
   else socket.once("connect", () => socket.emit("strategy_start", payload));
 }
 
 export function stopStrategy(payload) {
-  const k = `${payload.strategy_id}|${payload.symbol}|${payload.timeframe}|${payload.mode}`;
+  const k = `${payload.strategy_id}|${payload.symbol}|${payload.timeframe}|${payload.mode}|${payload.broker || ""}`;
   activeStrategyStarts.delete(k);
   socket.emit("strategy_stop", payload);
 }
 
 export function applyStrategy(payload) {
-  const k = `${payload.strategy_id}|${payload.symbol}|${payload.timeframe}|${payload.mode}`;
+  const k = `${payload.strategy_id}|${payload.symbol}|${payload.timeframe}|${payload.mode}|${payload.broker || ""}`;
   activeStrategyStarts.set(k, payload);
   socket.emit("strategy_apply", payload);
 }
@@ -216,6 +217,34 @@ export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onErr
     gs_complete:  wrap(onComplete),
     gs_cancelled: wrap(onCancelled),
     gs_error:     wrap(onError),
+  };
+  for (const [evt, fn] of Object.entries(h)) {
+    if (fn) socket.on(evt, fn);
+  }
+  return () => {
+    for (const [evt, fn] of Object.entries(h)) {
+      if (fn) socket.off(evt, fn);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Model Bench events (LSTM training)
+// ---------------------------------------------------------------------------
+/**
+ * Subscribe to model-bench job events. Returns an unsubscribe fn.
+ *   onProgress({job_id, epoch, total_epochs, train_loss, val_loss})
+ *   onComplete({job_id, result})
+ *   onCancelled({job_id})
+ *   onError({job_id, message})
+ */
+export function subscribeModelBench({ onProgress, onComplete, onCancelled, onError } = {}) {
+  const wrap = (fn) => (fn ? (p) => fn(p) : null);
+  const h = {
+    mb_progress:  wrap(onProgress),
+    mb_complete:  wrap(onComplete),
+    mb_cancelled: wrap(onCancelled),
+    mb_error:     wrap(onError),
   };
   for (const [evt, fn] of Object.entries(h)) {
     if (fn) socket.on(evt, fn);

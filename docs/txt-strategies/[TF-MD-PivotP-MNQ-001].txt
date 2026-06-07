@@ -1,0 +1,93 @@
+{
+instrument: @MNQ
+old strategy ref: PAR_NQ_30_202308161126
+platform: multicharts - tradestation datafeed
+session:
+	- data1: default sess 17-16
+	- data2: custom session 08:30 - 15:15 mon-fri (US Stock cash)
+timeframe: 15+1380m
+type: Breakout - Multiday - UA Engine Pivot Points
+IS: 01.01.2008 to 31.12.2017
+OS: 01.01.2018 to today
+
+brief description: la strategia utilizza come livelli di ingresso i Pivot Points calcolati sulla sessione cash del mercato azionario americano (data2).
+Sono applicati filtri asimmetrici tra long e short. Le operazioni vengono chiuse tramite SL, TP, BE e in caso di molteplici contratti meta' della posizione viene chiusa dopo N barre.
+
+Il sistema e' sviluppato tutto praticamente in forma asimmetrica date le notevoli differenze che il motore base aveva tra lato short e long.
+}
+
+input: nCon(1);
+var: kSTPL(1.8), kTGTL(3.5), stpL(200), kSTPS(0.5), kTGTS(1.5), stpS(60), nBarExitL(85), nBarExitS(15), PosTimeLmt(300);
+var: ATR(0), FiltroEsp(false), FiltroLY(false), FiltroSY(false);
+
+var: CloseS1(0), CloseS2(0), HighS0(0), HighS1(0), OpenS0(0), OpenS1(0), LowS0(0), LowS1(0);
+
+{RIFERIMENTI DI PREZZO}
+CloseS1 = c[0] of data2;
+CloseS2 = c[1] of data2;
+HighS1 = h[0] of data2; HighS0 = HighS(0);
+OpenS1 = o[0] of data2; OpenS0 = OpenS(0);
+LowS1 = l[0] of data2; LowS0 = LowS(0);
+
+{FILTRI OPERATIVI PRICE PATTERN}
+FiltroEsp = (HighS0>(LowS0+LowS0*0.5 *0.01));
+FiltroLY = ((HighS0-OpenS0)> ((HighS1-OpenS1)*1));
+FiltroSY = ((CloseS1>(CloseS2+CloseS2*1  *0.01)));
+
+{PIVOT POINTS}
+var: mypivot(0), myS1(0), myS2(0), myR1(0), myR2(0);
+mypivot = (HighS1+LowS1+CloseS1)/3;
+myR1 = 2*mypivot-LowS1;
+myS1 = 2*mypivot-HighS1;
+myR2 = mypivot + (HighS1-LowS1);
+myS2 = mypivot - (HighS1-LowS1);
+
+{CALCOLO ATR}
+ATR = (AvgTrueRange(5) of data2);
+
+{TRADING}
+if (HighS(0) <> LowS(0)) and (dayofweek(d) <> 0) and (EntriesToday(d) < 1) and (FiltroEsp = true) then begin
+
+	if (FiltroLY = true) and (c > myR1) then begin
+		if marketposition =-1 then buytocover ("SX-SAR") this bar at close; {USCITA DALLA POSIZIONE PER EVITARE STOP AND REVERSE}
+		buy ("LE-Breakout-1") nCon contracts next bar at market;
+	end;
+		
+	if (FiltroSY = true) and (C < myS1) then begin
+		if marketposition = 1 then sell ("LX-SAR") this bar at close; {USCITA DALLA POSIZIONE PER EVITARE STOP AND REVERSE}
+		sellshort ("SE-Breakout-1") nCon contracts next bar at market;	
+	end;
+end;
+
+{
+{USCITA PARZIALE}
+If marketposition = 1 and barssinceentry >= nBarExitL and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+
+If marketposition =-1 and barssinceentry >= nBarExitS and nCon > 1 and openpositionprofit > 0 then begin
+	Buytocover ("SX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+}
+
+{USCITA DOPO 300 BARRE A MERCATO - CIRCA 10 GG MAX}
+If marketposition <> 0 and barssinceentry >= PosTimeLmt then begin
+	Sell ("LX-PosTimeLmt") next bar at market;
+	Buytocover ("SX-PosTimeLmt") next bar at market;
+end;
+
+{USCITE}
+If marketposition = 1 then begin
+	if maxpositionprofit >= minlist((ATR*kSTPL*bigpointvalue*nCon),(stpL*nCon)) then sell ("LX-Breakeven") next bar at entryprice+(5*minmove/pricescale) stop;
+	Sell ("LX-StopLoss") next bar at entryprice-(minlist((ATR*kSTPL),(stpL/bigpointvalue))) stop;
+	Sell ("LX-Target") next bar at entryprice+(ATR*kTGTL) limit;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= minlist((ATR*kSTPS*bigpointvalue*nCon),(stpS*nCon)) then buytocover ("SX-Breakeven") next bar at entryprice-(5*minmove/pricescale) stop;
+	Buytocover ("SX-StopLoss") next bar at entryprice+(minlist((ATR*kSTPS),(stpS/bigpointvalue))) stop;
+	Buytocover ("SX-Target") next bar at entryprice-(ATR*kTGTS) limit;
+end;
+
+setstopcontract;
+setstoploss(2000); //inserisco questo stop loss perche' gli altri due sulla prima barra in posizione non funzionano

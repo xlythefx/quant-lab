@@ -1,0 +1,50 @@
+{
+instrument: @MCL
+platform: multicharts - tradestation datafeed
+session: default
+timeframe: 10+1380m
+type: Bias - Intraday
+IS: 01.01.2007 to 19.11.2019
+OS: 19.11.2019 to today
+
+brief description: la strategia sfrutta un bias short il lunedi dalle 01:00 alle 13:00, e un bias long il venerdi dalle 13:00 alle 16:50.
+
+E' inserita un'uscita di emergenza (se per qualsiasi motivo le uscite forzate bias dovessero saltare) dopo 138 bars in posizione.
+}
+
+input: nCon(1);
+var: nBarExit(138);
+var: kSTPL(0.9), kTGTL(1.4), stpL(130), kSTPS(0.4), kTGTS(1.2), stpS(130);
+var: ATR(0);
+
+ATR = (AvgTrueRange(5) of data2);
+
+if (HighS(0) <> LowS(0)) and (ATR < (AvgTrueRange(10) of data2)) and (EntriesToday(d) < 1) then begin
+	if (dayofweek(d) = 1) and (time = 0050) then sellshort ("SE-Bias-ID") nCon contracts next bar at market;
+	if (dayofweek(d) = 5) and (time = 1250) then buy ("LE-Bias-ID") nCon contracts next bar at market;
+end;
+
+If marketposition = -1 and dayofweek(d) = 1 and time = 1250 then buytocover ("SX-Bias-ID") this bar at close;
+If marketposition =  1 and dayofweek(d) = 5 and time = 1640 then sell ("LX-Bias-ID") this bar at close;
+
+If marketposition<>0 and barssinceentry >= nBarExit then begin
+	Buytocover ("SX-Emergency") next bar at market;
+	sell ("LX-Emergency") next bar at market;
+end;
+	
+{USCITE}
+If marketposition = 1 then begin
+	if maxpositionprofit >= minlist((ATR*kSTPL*bigpointvalue*nCon),(stpL*nCon)) then sell ("LX-Breakeven") next bar at entryprice+(5*minmove/pricescale) stop;
+	Sell ("LX-StopLoss") next bar at entryprice-(minlist((ATR*kSTPL),(stpL/bigpointvalue))) stop;
+	Sell ("LX-Target") next bar at entryprice+(ATR*kTGTL) limit;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= minlist((ATR*kSTPS*bigpointvalue*nCon),(stpS*nCon)) then buytocover ("SX-Breakeven") next bar at entryprice-(5*minmove/pricescale) stop;
+	Buytocover ("SX-StopLoss") next bar at entryprice+(minlist((ATR*kSTPS),(stpS/bigpointvalue))) stop;
+	Buytocover ("SX-Target") next bar at entryprice-(ATR*kTGTS) limit;
+end;
+
+{STOP EMERGENZA}
+setstopcontract;
+setstoploss(1300); //inserisco lo sl anche con keyword perche' quelli sopra si attivano dopo 1 barra

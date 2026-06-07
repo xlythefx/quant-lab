@@ -1,0 +1,55 @@
+{
+instrument: @ES
+strategy ref: PAR_ES_30__1440_202315071225
+platform: multicharts - ASCII datafeed
+session: default timezone: sun-fri 17-16 (CT)
+timeframe: 23+1380 m
+type: Mean Reverting - Multiday - RSI Engine - Long Only
+IS: 01.01.2008 to 31.12.2018
+OS: 31.12.2018 to today
+
+brief description:
+	- entry: come base e' applicato un filtro sul trend (il mercato deve trovarsi sopra la media a 200 periodi daily)
+	e il prezzo deve trovarsi in una fase di ipervenduto (RSI < 20). Per entrare a mercato  applicato e' applicato un
+	filtro sulla volatilita' che richiede che il range1d > range2d.
+	
+	- uscite: stop loss ed e' prevista inoltre l'uscita nel caso in cui l'RSI dovesse andare sopra 80
+	(soglia di iper comprato). Il mantenimento del trade a mercato e' limitato a un massimo di 10 giorni.
+}
+
+input: nCon(1);
+var: stp(1400), nBarExit(135);
+var: DailySMA200Length(200), RSIOversold(20), RSIOverbought(80);
+
+{INDICATORS}
+var: DailySMA200(0), DailyRSI(0);
+DailySMA200 = AverageFC(c, DailySMA200Length) data2;
+DailyRSI = RSI(c, 2) data2;
+
+{TRADING}
+if (HighS(0) <> LowS(0)) and (EntriesToday(d) < 1) and ((H[0] of data2 - L[0] of data2) > (H[1] of data2 - L[1] of data2)) then begin
+	if (C[0] of data2 > DailySMA200) and (DailyRSI < RSIOversold) and (t>1700 or time <1600) then
+		buy ("LE-RSIOversold") nCon contracts next bar at open;		
+end;
+
+{
+{USCITA PARZIALE DOPO X BARRE}
+If marketposition<>0 and barssinceentry >= nBarExit and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+}
+
+{MAX DAYS IN TRADE - USCITA A TEMPO - 600 barre sono 10gg da candele a 23 min}
+if marketposition <> 0 and barssinceentry >= 600 then sell ("LX-MaxDays") this bar at close;
+
+{USCITA - RSI OVERBOUGHT}
+if marketposition <> 0 and DailyRSI > RSIOverbought and (t>1700 or time <1600) then sell ("LX-RSIOverbought") next bar at open;
+
+{EXITS}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-TrailingSL") next bar at entryprice-(stp/bigpointvalue*0.5) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);

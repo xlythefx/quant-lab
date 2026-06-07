@@ -1,0 +1,65 @@
+{
+instrument: @ES
+strat ref: PAR_ES_15_202307151057
+platform: multicharts - ASCII datafeed
+session: default timezone: sun-fri 17-16 (CT)
+timeframe: 46+1380 m
+type: Trend Following - Multiday - Pivot Points Engine - Only long
+IS: 01.01.2008 to 31.12.2018
+OS: 31.12.2018 to today
+
+brief description:
+	- entry: la strategia utilizza con livello breakout di ingresso l'R1 Pivot Point calcolato sulla sessione
+	precedente. La time window e' impostata dalle 09:00 alle 16:00 e gli ingressi sono filtrati con un pattern
+	neutral (minimo di ieri superiore al minimo di 2gg fa, attenzione che la condizione e' stata cambiata rispetto
+	alla versione prec.) e vengono inibiti se c'e' una riduzione della volatilita' nelle ultime 3 sessioni (PtnLN).
+	
+	- uscite: stop, takeprofit e breakeven. Sono forzate le uscite dopo 9 giorni che la posizione rimane a mercato.
+}
+
+input: nCon(1);
+var: stp(1200), tgt(1700), nBarExit(65);
+var: FiltroY(false), FiltroN(false);
+
+var: CloseS1(0), HighS1(0), LowS1(0);
+
+{RIFERIMENTI DI PREZZO}
+CloseS1 = c[0] of data2;
+HighS1 = h[0] of data2;
+LowS1 = l[0] of data2;
+
+{FILTRI OPERATIVI PRICE PATTERN}
+FiltroY = (LowS1>L[1] of data2);
+FiltroN = (HighS1-LowS1) < (H[1] of data2-L[1] of data2) and (H[1] of data2-L[1] of data2) < (H[2] of data2-L[2] of data2);
+
+{PIVOT POINTS}
+var: mypivot(0), myS1(0), myS2(0), myR1(0), myR2(0);
+mypivot = (HighS1+LowS1+CloseS1)/3;
+myR1 = 2*mypivot-LowS1;
+myS1 = 2*mypivot-HighS1;
+myR2 = mypivot + (HighS1-LowS1);
+myS2 = mypivot - (HighS1-LowS1);
+
+{TRADING}
+if (HighS(0) <> LowS(0)) and (Time>=900 or Time<1600) and marketposition = 0 and (EntriesToday(d) < 1) and (FiltroY = true) and (FiltroN = false) and (C < myR1) then
+	buy ("LE-Breakout-1") nCon contracts next bar at (myR1-(2*minmove/pricescale)) stop;
+
+{
+{USCITA PARZIALE}
+If marketposition<>0 and barssinceentry >= nBarExit and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+}
+
+{MAX DAYS - 270 barre a 46 minuti sono 9 giorni}
+If marketposition<>0 and barssinceentry >= 270 then sell ("LX-MaxDays") this bar at close;
+
+{EXITS}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(2*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+if stp > 0 then setstoploss(stp);
+if tgt > 0 then Setprofittarget(tgt);

@@ -27,6 +27,8 @@ from routes.walkforward_routes import walkforward_bp
 from routes.grid_search_routes import grid_search_bp
 from routes.cost_sweep_routes import cost_sweep_bp
 from routes.monte_carlo_routes import monte_carlo_bp
+from routes.market_lab_routes import market_lab_bp
+from routes.model_bench_routes import model_bench_bp
 from routes.ai_routes import ai_bp
 from routes.live_alerts_routes import live_alerts_bp
 from routes.presets_routes import presets_bp
@@ -58,6 +60,8 @@ def create_app():
     app.register_blueprint(grid_search_bp)
     app.register_blueprint(cost_sweep_bp)
     app.register_blueprint(monte_carlo_bp)
+    app.register_blueprint(market_lab_bp)
+    app.register_blueprint(model_bench_bp)
     app.register_blueprint(ai_bp)
     app.register_blueprint(live_alerts_bp)
     app.register_blueprint(presets_bp)
@@ -101,6 +105,7 @@ def create_app():
             start_time = payload.get("start_time")
             end_time = payload.get("end_time")
             loop = bool(payload.get("loop", True))
+            broker = (payload.get("broker") or None)
             if start_time is not None: start_time = int(start_time)
             if end_time is not None: end_time = int(end_time)
         except (ValidationError, TypeError, ValueError) as e:
@@ -108,11 +113,13 @@ def create_app():
             return
 
         manager.subscribe(request.sid, mode, symbol, tf, speed=speed,
-                          start_time=start_time, end_time=end_time, loop=loop)
+                          start_time=start_time, end_time=end_time, loop=loop,
+                          broker=broker)
         socketio.emit(
             "subscribed",
             {"mode": mode, "symbol": symbol, "timeframe": tf, "speed": speed,
-             "start_time": start_time, "end_time": end_time, "loop": loop},
+             "start_time": start_time, "end_time": end_time, "loop": loop,
+             "broker": broker},
             to=request.sid,
         )
 
@@ -123,10 +130,11 @@ def create_app():
             mode = validate_mode((payload or {}).get("mode"))
             symbol = validate_symbol((payload or {}).get("symbol"))
             tf = validate_timeframe((payload or {}).get("timeframe"))
+            broker = ((payload or {}).get("broker") or None)
         except ValidationError as e:
             socketio.emit("error", {"event": "unsubscribe", "message": str(e)}, to=request.sid)
             return
-        manager.unsubscribe(request.sid, mode, symbol, tf)
+        manager.unsubscribe(request.sid, mode, symbol, tf, broker=broker)
 
     @socketio.on("set_speed")
     def on_set_speed(payload):
@@ -135,11 +143,12 @@ def create_app():
             symbol = validate_symbol((payload or {}).get("symbol"))
             tf = validate_timeframe((payload or {}).get("timeframe"))
             speed = int((payload or {}).get("speed"))
+            broker = ((payload or {}).get("broker") or None)
         except (ValidationError, TypeError, ValueError) as e:
             socketio.emit("error", {"event": "set_speed", "message": str(e)}, to=request.sid)
             return
-        ok = manager.set_speed(symbol, tf, speed)
-        socketio.emit("speed_changed", {"symbol": symbol, "timeframe": tf, "speed": speed, "ok": ok}, to=request.sid)
+        ok = manager.set_speed(symbol, tf, speed, broker=broker)
+        socketio.emit("speed_changed", {"symbol": symbol, "timeframe": tf, "speed": speed, "ok": ok, "broker": broker}, to=request.sid)
 
     # ---- Strategy events ---------------------------------------------
     def _parse_strategy_payload(payload):
@@ -151,18 +160,19 @@ def create_app():
         tf = validate_timeframe(payload.get("timeframe"))
         mode = validate_mode(payload.get("mode"))
         params = payload.get("params") or {}
-        return strategy_id, symbol, tf, mode, params
+        broker = (payload.get("broker") or None)
+        return strategy_id, symbol, tf, mode, params, broker
 
     @socketio.on("strategy_start")
     def on_strategy_start(payload):
         from flask import request
         try:
-            strategy_id, symbol, tf, mode, params = _parse_strategy_payload(payload)
+            strategy_id, symbol, tf, mode, params, broker = _parse_strategy_payload(payload)
         except (ValidationError, TypeError, ValueError) as e:
             socketio.emit("strategy_error", {"event": "strategy_start", "message": str(e)}, to=request.sid)
             return
         try:
-            strategy_mgr.start(request.sid, strategy_id, symbol, tf, mode, params)
+            strategy_mgr.start(request.sid, strategy_id, symbol, tf, mode, params, broker=broker)
         except FileNotFoundError as e:
             socketio.emit("strategy_error", {"event": "strategy_start", "strategy_id": strategy_id, "message": str(e)}, to=request.sid)
         except Exception as e:
@@ -173,22 +183,22 @@ def create_app():
     def on_strategy_stop(payload):
         from flask import request
         try:
-            strategy_id, symbol, tf, mode, _ = _parse_strategy_payload(payload)
+            strategy_id, symbol, tf, mode, _, broker = _parse_strategy_payload(payload)
         except (ValidationError, TypeError, ValueError) as e:
             socketio.emit("strategy_error", {"event": "strategy_stop", "message": str(e)}, to=request.sid)
             return
-        strategy_mgr.stop(request.sid, strategy_id, symbol, tf, mode)
+        strategy_mgr.stop(request.sid, strategy_id, symbol, tf, mode, broker=broker)
 
     @socketio.on("strategy_apply")
     def on_strategy_apply(payload):
         from flask import request
         try:
-            strategy_id, symbol, tf, mode, params = _parse_strategy_payload(payload)
+            strategy_id, symbol, tf, mode, params, broker = _parse_strategy_payload(payload)
         except (ValidationError, TypeError, ValueError) as e:
             socketio.emit("strategy_error", {"event": "strategy_apply", "message": str(e)}, to=request.sid)
             return
         try:
-            strategy_mgr.apply(request.sid, strategy_id, symbol, tf, mode, params)
+            strategy_mgr.apply(request.sid, strategy_id, symbol, tf, mode, params, broker=broker)
         except Exception as e:
             log.exception("strategy_apply failed")
             socketio.emit("strategy_error", {"event": "strategy_apply", "strategy_id": strategy_id, "message": str(e)}, to=request.sid)

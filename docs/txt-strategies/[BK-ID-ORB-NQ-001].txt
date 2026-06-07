@@ -1,0 +1,65 @@
+{
+instrument: @NQ
+strat ref: PAR_NQ_30_202307272046
+platform: multicharts - ASCII datafeed
+session: default session 17-16 (CT)
+timeframe: 6+1380m
+type: Breakout - Intraday - ORB engine
+IS: 01.01.2008 to 31.12.2018
+OS: 31.12.2018 to today
+
+brief description: la strategia entra sull'apertura della sessione odierna sommata/sottratta a meta' del range della
+sessione precedente. Gli ingressi sono effettuati dalle 07:00 alle 15:00 ed  prevista l'uscita a fine sessione (oltre
+che a stop, profit e breakeven).
+}
+
+Input: nCon(1);
+var: FiltroComp(false), FiltroSY(false), FiltroLN(false), LElvl(0), SElvl(0);
+var: stp(900), tgt(3600);
+
+{FILTRI OPERATIVI}
+FiltroComp = absvalue(O[4] of data2-C[0] of data2) < 0.5  *
+(maxlist(H[0] of data2, H[1] of data2, H[2] of data2, H[3] of data2, H[4] of data2) - minlist(L[0] of data2, L[1] of data2, L[2] of data2, L[3] of data2, L[4] of data2));
+
+FiltroLN = (H[1] of data2 >H[0] of data2 and L[1] of data2<L[0] of data2);
+FiltroSY = H[0] of data2<H[1] of data2 and L[0] of data2<L[1] of data2;
+
+LElvl = (OpenS(0) + ((H[0] of data2-L[0] of data2)*50/100));
+SElvl = (OpenS(0) - ((H[0] of data2-L[0] of data2)*50/100));
+
+{TRADING}
+If (HighS(0) <> LowS(0)) and (FiltroComp = true) and (EntriesToday(d) < 1) and (t > 700 And t < 1500) then begin
+	If (FiltroLN=False) then begin
+		If C < LElvl then begin
+			buy ("LE-Brk") nCon contracts next bar at (LElvl-(5*minmove/pricescale)) stop;
+		end Else begin
+			buy ("LE-Mkt") nCon contracts next bar at market;
+		end;
+	end;
+		
+	If (FiltroSY = true) then begin
+		If C > SElvl then begin
+			sellshort ("SE-Brk") nCon contracts next bar at (SElvl+(5*minmove/pricescale)) stop;
+		end Else begin
+			sellshort ("SE-Mkt") nCon contracts next bar at market;
+		end;
+	end;	
+end;
+
+{END OF DAY EXIT}
+If marketposition = 1 and (T >= 1548 and T < 1730) then sell ("LX-EndOfDay") this bar at close;
+If marketposition =-1 and (T >= 1548 and T < 1730) then buytocover ("SX-EndOfDay") this bar at close;
+
+{EXITS}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(5*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(5*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(stp);
+Setprofittarget(tgt);

@@ -1,0 +1,373 @@
+23:50:46 [INFO    ] ============================================================
+23:50:46 [INFO    ] MultiCharts Study Editor Exporter  [dry_run=False]
+23:50:46 [INFO    ] Output: C:\Users\Administrator\Desktop\multicharts Strategies\Strategies scraped
+23:50:46 [INFO    ] ============================================================
+23:50:49 [INFO    ] Found window  HWND=66286  title='MultiCharts Study Editor - [TF-MD-Donk-RB-001]'
+23:50:49 [INFO    ]   geometry: 932×602  at (737,180)
+23:50:49 [INFO    ] ----------------------------------------
+23:50:49 [INFO    ] Tab 1
+23:50:49 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-RB-001]'
+23:50:49 [INFO    ]   Strategy name: '[TF-MD-Donk-RB-001]'
+23:50:51 [DEBUG   ]   SHA256 : 179d4fccd84fc6f888031d23...  chars=2011
+23:50:51 [DEBUG   ]   (recorded as first-tab hash)
+23:50:51 [INFO    ]   Saved -> [TF-MD-Donk-RB-001].txt  (2,011 chars)
+23:50:53 [INFO    ] ----------------------------------------
+23:50:53 [INFO    ] Tab 2
+23:50:53 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-PL-001]'
+23:50:53 [INFO    ]   Strategy name: '[TF-MD-Donk-PL-001]'
+23:50:55 [DEBUG   ]   SHA256 : 44fb0f8cc921cff339e8c71d...  chars=1975
+23:50:55 [INFO    ]   Saved -> [TF-MD-Donk-PL-001].txt  (1,975 chars)
+23:50:57 [INFO    ] ----------------------------------------
+23:50:57 [INFO    ] Tab 3
+23:50:57 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-NG-001]'
+23:50:57 [INFO    ]   Strategy name: '[TF-MD-Donk-NG-001]'
+23:50:58 [DEBUG   ]   SHA256 : 44fb0f8cc921cff339e8c71d...  chars=1975
+23:50:58 [INFO    ]   Duplicate of '[TF-MD-Donk-PL-001].txt' -- skipping.
+23:51:00 [INFO    ] ----------------------------------------
+23:51:00 [INFO    ] Tab 4
+23:51:00 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-MGC-001]'
+23:51:00 [INFO    ]   Strategy name: '[TF-MD-Donk-MGC-001]'
+23:51:02 [DEBUG   ]   SHA256 : 153625e3b359a13a40f9abf8...  chars=1949
+23:51:02 [INFO    ]   Saved -> [TF-MD-Donk-MGC-001].txt  (1,949 chars)
+23:51:04 [INFO    ] ----------------------------------------
+23:51:04 [INFO    ] Tab 5
+23:51:04 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-Moon-MES-001]'
+23:51:04 [INFO    ]   Strategy name: '[BS-MD-Moon-MES-001]'
+23:51:06 [DEBUG   ]   SHA256 : ce3f1c3af8d4dd208deafd21...  chars=1824
+23:51:06 [INFO    ]   Saved -> [BS-MD-Moon-MES-001].txt  (1,824 chars)
+23:51:07 [INFO    ] ----------------------------------------
+23:51:07 [INFO    ] Tab 6
+23:51:07 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-MGC-001]'
+23:51:07 [INFO    ]   Strategy name: '[BS-ID-MGC-001]'
+23:51:09 [DEBUG   ]   SHA256 : 16fdef8ee0ffe8bc96e7a48c...  chars=1319
+23:51:09 [INFO    ]   Saved -> [BS-ID-MGC-001].txt  (1,319 chars)
+23:51:11 [INFO    ] ----------------------------------------
+23:51:11 [INFO    ] Tab 7
+23:51:11 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-MCL-001]'
+23:51:11 [INFO    ]   Strategy name: '[BS-ID-MCL-001]'
+23:51:13 [DEBUG   ]   SHA256 : 59842eabe0439f41c8467cca...  chars=2217
+23:51:13 [INFO    ]   Saved -> [BS-ID-MCL-001].txt  (2,217 chars)
+23:51:15 [INFO    ] ----------------------------------------
+23:51:15 [INFO    ] Tab 8
+23:51:15 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-GC-001]'
+23:51:15 [INFO    ]   Strategy name: '[BS-ID-GC-001]'
+23:51:16 [DEBUG   ]   SHA256 : ed30b11d5451042f2776b6a7...  chars=1321
+23:51:16 [INFO    ]   Saved -> [BS-ID-GC-001].txt  (1,321 chars)
+23:51:18 [INFO    ] ----------------------------------------
+23:51:18 [INFO    ] Tab 9
+23:51:18 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-EC-001]'
+23:51:18 [INFO    ]   Strategy name: '[BS-ID-EC-001]'
+23:52:52 [INFO    ] ============================================================
+23:52:52 [INFO    ] MultiCharts Study Editor Exporter  [dry_run=False]
+23:52:52 [INFO    ] Output: C:\Users\Administrator\Desktop\multicharts Strategies\Strategies scraped
+23:52:52 [INFO    ] ============================================================
+23:52:55 [INFO    ] Found window  HWND=66286  title='MultiCharts Study Editor - [BS-ID-EC-001]'
+23:52:55 [INFO    ]   geometry: 932×602  at (737,180)
+23:52:55 [INFO    ] ----------------------------------------
+23:52:55 [INFO    ] Tab 1
+23:52:55 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-EC-001]'
+23:52:55 [INFO    ]   Strategy name: '[BS-ID-EC-001]'
+23:52:57 [DEBUG   ]   SHA256 : f43f47bc61bda87b1cbc5ad8...  chars=1341
+23:52:57 [DEBUG   ]   (recorded as first-tab hash)
+23:52:57 [INFO    ]   Saved -> [BS-ID-EC-001].txt  (1,341 chars)
+23:52:59 [INFO    ] ----------------------------------------
+23:52:59 [INFO    ] Tab 2
+23:52:59 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-PivotP-MES-001]'
+23:52:59 [INFO    ]   Strategy name: '[BK-ID-PivotP-MES-001]'
+23:53:00 [DEBUG   ]   SHA256 : d79060d839a4c47d94d71482...  chars=3478
+23:53:00 [INFO    ]   Saved -> [BK-ID-PivotP-MES-001].txt  (3,478 chars)
+23:53:02 [INFO    ] ----------------------------------------
+23:53:02 [INFO    ] Tab 3
+23:53:02 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-PivotP-ES-001]'
+23:53:02 [INFO    ]   Strategy name: '[BK-ID-PivotP-ES-001]'
+23:53:04 [DEBUG   ]   SHA256 : 35e6c6ed48b1525f271c420e...  chars=3478
+23:53:04 [INFO    ]   Saved -> [BK-ID-PivotP-ES-001].txt  (3,478 chars)
+23:53:06 [INFO    ] ----------------------------------------
+23:53:06 [INFO    ] Tab 4
+23:53:06 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-ORB-NQ-001]'
+23:53:06 [INFO    ]   Strategy name: '[BK-ID-ORB-NQ-001]'
+23:53:07 [DEBUG   ]   SHA256 : 83cb60ce3f81d73f7055c1c5...  chars=2431
+23:53:07 [INFO    ]   Saved -> [BK-ID-ORB-NQ-001].txt  (2,431 chars)
+23:53:09 [INFO    ] ----------------------------------------
+23:53:09 [INFO    ] Tab 5
+23:53:09 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-ORB-MNQ-001]'
+23:53:09 [INFO    ]   Strategy name: '[BK-ID-ORB-MNQ-001]'
+23:53:11 [DEBUG   ]   SHA256 : 6650f5dc66cd9af51ba621c2...  chars=2430
+23:53:11 [INFO    ]   Saved -> [BK-ID-ORB-MNQ-001].txt  (2,430 chars)
+23:53:13 [INFO    ] ----------------------------------------
+23:53:13 [INFO    ] Tab 6
+23:53:13 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-DonkUA-MGC-001]'
+23:53:13 [INFO    ]   Strategy name: '[BK-ID-DonkUA-MGC-001]'
+23:53:15 [DEBUG   ]   SHA256 : 14d609a2b3e506e75113eb2a...  chars=2994
+23:53:15 [INFO    ]   Saved -> [BK-ID-DonkUA-MGC-001].txt  (2,994 chars)
+23:53:16 [INFO    ] ----------------------------------------
+23:53:16 [INFO    ] Tab 7
+23:53:16 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-DonkUA-GC-001]'
+23:53:16 [INFO    ]   Strategy name: '[BK-ID-DonkUA-GC-001]'
+23:53:18 [DEBUG   ]   SHA256 : 115001c8d98c12178baebdf0...  chars=2994
+23:53:18 [INFO    ]   Saved -> [BK-ID-DonkUA-GC-001].txt  (2,994 chars)
+23:53:20 [INFO    ] ----------------------------------------
+23:53:20 [INFO    ] Tab 8
+23:53:20 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-DonkUA-MCL-001]'
+23:53:20 [INFO    ]   Strategy name: '[BK-ID-DonkUA-MCL-001]'
+23:53:22 [DEBUG   ]   SHA256 : 8d29b1befde01b309a014e36...  chars=2770
+23:53:22 [INFO    ]   Saved -> [BK-ID-DonkUA-MCL-001].txt  (2,770 chars)
+23:53:24 [INFO    ] ----------------------------------------
+23:53:24 [INFO    ] Tab 9
+23:53:24 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-DonkUA-CL-001]'
+23:53:24 [INFO    ]   Strategy name: '[BK-ID-DonkUA-CL-001]'
+23:53:25 [DEBUG   ]   SHA256 : 3671c0ad587a4a984dbbc808...  chars=2771
+23:53:25 [INFO    ]   Saved -> [BK-ID-DonkUA-CL-001].txt  (2,771 chars)
+23:53:27 [INFO    ] ----------------------------------------
+23:53:27 [INFO    ] Tab 10
+23:53:27 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-Donk-JY-001]'
+23:53:27 [INFO    ]   Strategy name: '[BK-ID-Donk-JY-001]'
+23:53:29 [DEBUG   ]   SHA256 : 540317c3196bce5035067ba0...  chars=2209
+23:53:29 [INFO    ]   Saved -> [BK-ID-Donk-JY-001].txt  (2,209 chars)
+23:53:31 [INFO    ] ----------------------------------------
+23:53:31 [INFO    ] Tab 11
+23:53:31 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-Donk-EC-001]'
+23:53:31 [INFO    ]   Strategy name: '[BK-ID-Donk-EC-001]'
+23:53:32 [DEBUG   ]   SHA256 : 416a08df3a0143b0909c3f48...  chars=2593
+23:53:32 [INFO    ]   Saved -> [BK-ID-Donk-EC-001].txt  (2,593 chars)
+23:53:34 [INFO    ] ----------------------------------------
+23:53:34 [INFO    ] Tab 12
+23:53:34 [INFO    ]   Window title : 'MultiCharts Study Editor - [BK-ID-Donk-CL-001]'
+23:53:34 [INFO    ]   Strategy name: '[BK-ID-Donk-CL-001]'
+23:53:36 [DEBUG   ]   SHA256 : 8f9c4eae33e0459befdef805...  chars=2962
+23:53:36 [INFO    ]   Saved -> [BK-ID-Donk-CL-001].txt  (2,962 chars)
+23:53:38 [INFO    ] ----------------------------------------
+23:53:38 [INFO    ] Tab 13
+23:53:38 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-MCL-001]'
+23:53:38 [INFO    ]   Strategy name: '[TF-MD-Donk-MCL-001]'
+23:53:39 [DEBUG   ]   SHA256 : 017e33ee410b2e9a348b75a5...  chars=1997
+23:53:39 [INFO    ]   Saved -> [TF-MD-Donk-MCL-001].txt  (1,997 chars)
+23:53:41 [INFO    ] ----------------------------------------
+23:53:41 [INFO    ] Tab 14
+23:53:41 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-LH-001]'
+23:53:41 [INFO    ]   Strategy name: '[TF-MD-Donk-LH-001]'
+23:53:43 [DEBUG   ]   SHA256 : 24403406c1644d4fe139ccc9...  chars=1996
+23:53:43 [INFO    ]   Saved -> [TF-MD-Donk-LH-001].txt  (1,996 chars)
+23:53:45 [INFO    ] ----------------------------------------
+23:53:45 [INFO    ] Tab 15
+23:53:45 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-LC-001]'
+23:53:45 [INFO    ]   Strategy name: '[TF-MD-Donk-LC-001]'
+23:53:47 [DEBUG   ]   SHA256 : 2e5a6d07678566707298e021...  chars=2034
+23:53:47 [INFO    ]   Saved -> [TF-MD-Donk-LC-001].txt  (2,034 chars)
+23:53:48 [INFO    ] ----------------------------------------
+23:53:48 [INFO    ] Tab 16
+23:53:48 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-HO-001]'
+23:53:48 [INFO    ]   Strategy name: '[TF-MD-Donk-HO-001]'
+23:53:50 [DEBUG   ]   SHA256 : 24f4e098a768bb04f433494e...  chars=1999
+23:53:50 [INFO    ]   Saved -> [TF-MD-Donk-HO-001].txt  (1,999 chars)
+23:53:52 [INFO    ] ----------------------------------------
+23:53:52 [INFO    ] Tab 17
+23:53:52 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-GC-001]'
+23:53:52 [INFO    ]   Strategy name: '[TF-MD-Donk-GC-001]'
+23:53:54 [DEBUG   ]   SHA256 : 0668445e0a62462fa275ed28...  chars=1949
+23:53:54 [INFO    ]   Saved -> [TF-MD-Donk-GC-001].txt  (1,949 chars)
+23:53:56 [INFO    ] ----------------------------------------
+23:53:56 [INFO    ] Tab 18
+23:53:56 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-FC-001]'
+23:53:56 [INFO    ]   Strategy name: '[TF-MD-Donk-FC-001]'
+23:53:57 [DEBUG   ]   SHA256 : e32fe526785d28fd557983fc...  chars=2012
+23:53:57 [INFO    ]   Saved -> [TF-MD-Donk-FC-001].txt  (2,012 chars)
+23:53:59 [INFO    ] ----------------------------------------
+23:53:59 [INFO    ] Tab 19
+23:53:59 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-CT-001]'
+23:53:59 [INFO    ]   Strategy name: '[TF-MD-Donk-CT-001]'
+23:54:01 [DEBUG   ]   SHA256 : fd848cfa4bb8569b5afe195a...  chars=2079
+23:54:01 [INFO    ]   Saved -> [TF-MD-Donk-CT-001].txt  (2,079 chars)
+23:54:03 [INFO    ] ----------------------------------------
+23:54:03 [INFO    ] Tab 20
+23:54:03 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-CL-001]'
+23:54:03 [INFO    ]   Strategy name: '[TF-MD-Donk-CL-001]'
+23:54:04 [DEBUG   ]   SHA256 : 60fb6b4728ec6d2340919225...  chars=1997
+23:54:04 [INFO    ]   Saved -> [TF-MD-Donk-CL-001].txt  (1,997 chars)
+23:54:06 [INFO    ] ----------------------------------------
+23:54:06 [INFO    ] Tab 21
+23:54:06 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-MD-RSI-NQ-001]'
+23:54:06 [INFO    ]   Strategy name: '[MR-MD-RSI-NQ-001]'
+23:54:08 [DEBUG   ]   SHA256 : c59e416ee493fbeefe596d0a...  chars=2209
+23:54:08 [INFO    ]   Saved -> [MR-MD-RSI-NQ-001].txt  (2,209 chars)
+23:54:10 [INFO    ] ----------------------------------------
+23:54:10 [INFO    ] Tab 22
+23:54:10 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-MD-RSI-MNQ-001]'
+23:54:10 [INFO    ]   Strategy name: '[MR-MD-RSI-MNQ-001]'
+23:54:11 [DEBUG   ]   SHA256 : c2f86b84e2adbfc7e9e9bf73...  chars=2208
+23:54:11 [INFO    ]   Saved -> [MR-MD-RSI-MNQ-001].txt  (2,208 chars)
+23:54:13 [INFO    ] ----------------------------------------
+23:54:13 [INFO    ] Tab 23
+23:54:13 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-MD-RSI-MES-001]'
+23:54:13 [INFO    ]   Strategy name: '[MR-MD-RSI-MES-001]'
+23:54:15 [DEBUG   ]   SHA256 : b5dc79649676f1add59cb8df...  chars=2167
+23:54:15 [INFO    ]   Saved -> [MR-MD-RSI-MES-001].txt  (2,167 chars)
+23:54:17 [INFO    ] ----------------------------------------
+23:54:17 [INFO    ] Tab 24
+23:54:17 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-MD-RSI-ES-001]'
+23:54:17 [INFO    ]   Strategy name: '[MR-MD-RSI-ES-001]'
+23:54:19 [DEBUG   ]   SHA256 : 74e8ccaacbf0d9beeb561974...  chars=2167
+23:54:19 [INFO    ]   Saved -> [MR-MD-RSI-ES-001].txt  (2,167 chars)
+23:54:20 [INFO    ] ----------------------------------------
+23:54:20 [INFO    ] Tab 25
+23:54:20 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-ID-4dRangeRev-YM-001]'
+23:54:20 [INFO    ]   Strategy name: '[MR-ID-4dRangeRev-YM-001]'
+23:54:22 [DEBUG   ]   SHA256 : 018ead2af3086b408bb5303d...  chars=3101
+23:54:22 [INFO    ]   Saved -> [MR-ID-4dRangeRev-YM-001].txt  (3,101 chars)
+23:54:24 [INFO    ] ----------------------------------------
+23:54:24 [INFO    ] Tab 26
+23:54:24 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-ID-4dRangeRev-NQ-001]'
+23:54:24 [INFO    ]   Strategy name: '[MR-ID-4dRangeRev-NQ-001]'
+23:54:26 [DEBUG   ]   SHA256 : 49352c86732d29476573b365...  chars=3187
+23:54:26 [INFO    ]   Saved -> [MR-ID-4dRangeRev-NQ-001].txt  (3,187 chars)
+23:54:27 [INFO    ] ----------------------------------------
+23:54:27 [INFO    ] Tab 27
+23:54:27 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-ID-4dRangeRev-MYM-001]'
+23:54:27 [INFO    ]   Strategy name: '[MR-ID-4dRangeRev-MYM-001]'
+23:54:29 [DEBUG   ]   SHA256 : 623085a4aaaf8ff407303aa9...  chars=3100
+23:54:29 [INFO    ]   Saved -> [MR-ID-4dRangeRev-MYM-001].txt  (3,100 chars)
+23:54:31 [INFO    ] ----------------------------------------
+23:54:31 [INFO    ] Tab 28
+23:54:31 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-ID-4dRangeRev-MNQ-001]'
+23:54:31 [INFO    ]   Strategy name: '[MR-ID-4dRangeRev-MNQ-001]'
+23:54:33 [DEBUG   ]   SHA256 : 5531bee0e585861c44c8282a...  chars=3185
+23:54:33 [INFO    ]   Saved -> [MR-ID-4dRangeRev-MNQ-001].txt  (3,185 chars)
+23:54:35 [INFO    ] ----------------------------------------
+23:54:35 [INFO    ] Tab 29
+23:54:35 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-ID-4dRangeRev-MES-001]'
+23:54:35 [INFO    ]   Strategy name: '[MR-ID-4dRangeRev-MES-001]'
+23:54:36 [DEBUG   ]   SHA256 : 3fdb72c7cc0b70e926d342c7...  chars=3240
+23:54:36 [INFO    ]   Saved -> [MR-ID-4dRangeRev-MES-001].txt  (3,240 chars)
+23:54:38 [INFO    ] ----------------------------------------
+23:54:38 [INFO    ] Tab 30
+23:54:38 [INFO    ]   Window title : 'MultiCharts Study Editor - [MR-ID-4dRangeRev-ES-001]'
+23:54:38 [INFO    ]   Strategy name: '[MR-ID-4dRangeRev-ES-001]'
+23:54:40 [DEBUG   ]   SHA256 : 2c6a2bba55d18d5bb225748d...  chars=3242
+23:54:40 [INFO    ]   Saved -> [MR-ID-4dRangeRev-ES-001].txt  (3,242 chars)
+23:54:42 [INFO    ] ----------------------------------------
+23:54:42 [INFO    ] Tab 31
+23:54:42 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-Moon-YM-001]'
+23:54:42 [INFO    ]   Strategy name: '[BS-MD-Moon-YM-001]'
+23:54:43 [DEBUG   ]   SHA256 : d95cd898437beb8ffeb6cb54...  chars=1825
+23:54:43 [INFO    ]   Saved -> [BS-MD-Moon-YM-001].txt  (1,825 chars)
+23:54:45 [INFO    ] ----------------------------------------
+23:54:45 [INFO    ] Tab 32
+23:54:45 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-Moon-NQ-001]'
+23:54:45 [INFO    ]   Strategy name: '[BS-MD-Moon-NQ-001]'
+23:54:47 [DEBUG   ]   SHA256 : 8a3a549dff7c37c17889c8cf...  chars=1823
+23:54:47 [INFO    ]   Saved -> [BS-MD-Moon-NQ-001].txt  (1,823 chars)
+23:54:49 [INFO    ] ----------------------------------------
+23:54:49 [INFO    ] Tab 33
+23:54:49 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-Moon-MYM-001]'
+23:54:49 [INFO    ]   Strategy name: '[BS-MD-Moon-MYM-001]'
+23:54:50 [DEBUG   ]   SHA256 : 9c476b98e815fc3822cd9013...  chars=1824
+23:54:50 [INFO    ]   Saved -> [BS-MD-Moon-MYM-001].txt  (1,824 chars)
+23:54:52 [INFO    ] ----------------------------------------
+23:54:52 [INFO    ] Tab 34
+23:54:52 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-Moon-MNQ-001]'
+23:54:52 [INFO    ]   Strategy name: '[BS-MD-Moon-MNQ-001]'
+23:54:54 [DEBUG   ]   SHA256 : a9c8b023efc66d09ade9a8c6...  chars=1822
+23:54:54 [INFO    ]   Saved -> [BS-MD-Moon-MNQ-001].txt  (1,822 chars)
+23:54:56 [INFO    ] ----------------------------------------
+23:54:56 [INFO    ] Tab 35
+23:54:56 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-EndOfMonth-BP-001]'
+23:54:56 [INFO    ]   Strategy name: '[BS-MD-EndOfMonth-BP-001]'
+23:54:58 [DEBUG   ]   SHA256 : 260b498ffb2acca9d640d3e3...  chars=1989
+23:54:58 [INFO    ]   Saved -> [BS-MD-EndOfMonth-BP-001].txt  (1,989 chars)
+23:54:59 [INFO    ] ----------------------------------------
+23:54:59 [INFO    ] Tab 36
+23:54:59 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-VBW-MGC-001]'
+23:54:59 [INFO    ]   Strategy name: '[TF-MD-VBW-MGC-001]'
+23:55:01 [DEBUG   ]   SHA256 : e9d553a758f837a8fbf13715...  chars=3676
+23:55:01 [INFO    ]   Saved -> [TF-MD-VBW-MGC-001].txt  (3,676 chars)
+23:55:03 [INFO    ] ----------------------------------------
+23:55:03 [INFO    ] Tab 37
+23:55:03 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-PivotP-MNQ-001]'
+23:55:03 [INFO    ]   Strategy name: '[TF-MD-PivotP-MNQ-001]'
+23:55:05 [DEBUG   ]   SHA256 : 7d381ec9905382b1f8c9a354...  chars=3931
+23:55:05 [INFO    ]   Saved -> [TF-MD-PivotP-MNQ-001].txt  (3,931 chars)
+23:55:07 [INFO    ] ----------------------------------------
+23:55:07 [INFO    ] Tab 38
+23:55:07 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-PivotP-MES-001]'
+23:55:07 [INFO    ]   Strategy name: '[TF-MD-PivotP-MES-001]'
+23:55:08 [DEBUG   ]   SHA256 : 1e55b137ad8b08e1b6c46d7c...  chars=2443
+23:55:08 [INFO    ]   Saved -> [TF-MD-PivotP-MES-001].txt  (2,443 chars)
+23:55:10 [INFO    ] ----------------------------------------
+23:55:10 [INFO    ] Tab 39
+23:55:10 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-PivotP-ES-001]'
+23:55:10 [INFO    ]   Strategy name: '[TF-MD-PivotP-ES-001]'
+23:55:12 [DEBUG   ]   SHA256 : 950322354f93510701724857...  chars=2444
+23:55:12 [INFO    ]   Saved -> [TF-MD-PivotP-ES-001].txt  (2,444 chars)
+23:55:14 [INFO    ] ----------------------------------------
+23:55:14 [INFO    ] Tab 40
+23:55:14 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-ORB-MES-001]'
+23:55:14 [INFO    ]   Strategy name: '[TF-MD-ORB-MES-001]'
+23:55:15 [DEBUG   ]   SHA256 : 77075caf72108eb64832a98e...  chars=3611
+23:55:15 [INFO    ]   Saved -> [TF-MD-ORB-MES-001].txt  (3,611 chars)
+23:55:17 [INFO    ] ----------------------------------------
+23:55:17 [INFO    ] Tab 41
+23:55:17 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-ORB-ES-001]'
+23:55:17 [INFO    ]   Strategy name: '[TF-MD-ORB-ES-001]'
+23:55:19 [DEBUG   ]   SHA256 : e677490139681fa75d943899...  chars=3614
+23:55:19 [INFO    ]   Saved -> [TF-MD-ORB-ES-001].txt  (3,614 chars)
+23:55:21 [INFO    ] ----------------------------------------
+23:55:21 [INFO    ] Tab 42
+23:55:21 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-S-001]'
+23:55:21 [INFO    ]   Strategy name: '[TF-MD-Donk-S-001]'
+23:55:22 [DEBUG   ]   SHA256 : 22788ce26aa64013f23930a1...  chars=1968
+23:55:22 [INFO    ]   Saved -> [TF-MD-Donk-S-001].txt  (1,968 chars)
+23:55:24 [INFO    ] ----------------------------------------
+23:55:24 [INFO    ] Tab 43
+23:55:24 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-RB-001]'
+23:55:24 [INFO    ]   Strategy name: '[TF-MD-Donk-RB-001]'
+23:55:26 [DEBUG   ]   SHA256 : 179d4fccd84fc6f888031d23...  chars=2011
+23:55:26 [INFO    ]   Saved -> [TF-MD-Donk-RB-001]_001.txt  (2,011 chars)
+23:55:28 [INFO    ] ----------------------------------------
+23:55:28 [INFO    ] Tab 44
+23:55:28 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-PL-001]'
+23:55:28 [INFO    ]   Strategy name: '[TF-MD-Donk-PL-001]'
+23:55:30 [DEBUG   ]   SHA256 : 44fb0f8cc921cff339e8c71d...  chars=1975
+23:55:30 [INFO    ]   Saved -> [TF-MD-Donk-PL-001]_001.txt  (1,975 chars)
+23:55:32 [INFO    ] ----------------------------------------
+23:55:32 [INFO    ] Tab 45
+23:55:32 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-NG-001]'
+23:55:32 [INFO    ]   Strategy name: '[TF-MD-Donk-NG-001]'
+23:55:33 [DEBUG   ]   SHA256 : f31487d30f4b30581aa842ea...  chars=2021
+23:55:33 [INFO    ]   Saved -> [TF-MD-Donk-NG-001].txt  (2,021 chars)
+23:55:35 [INFO    ] ----------------------------------------
+23:55:35 [INFO    ] Tab 46
+23:55:35 [INFO    ]   Window title : 'MultiCharts Study Editor - [TF-MD-Donk-MGC-001]'
+23:55:35 [INFO    ]   Strategy name: '[TF-MD-Donk-MGC-001]'
+23:55:37 [DEBUG   ]   SHA256 : 153625e3b359a13a40f9abf8...  chars=1949
+23:55:37 [INFO    ]   Saved -> [TF-MD-Donk-MGC-001]_001.txt  (1,949 chars)
+23:55:39 [INFO    ] ----------------------------------------
+23:55:39 [INFO    ] Tab 47
+23:55:39 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-MD-Moon-MES-001]'
+23:55:39 [INFO    ]   Strategy name: '[BS-MD-Moon-MES-001]'
+23:55:40 [DEBUG   ]   SHA256 : ce3f1c3af8d4dd208deafd21...  chars=1824
+23:55:40 [INFO    ]   Saved -> [BS-MD-Moon-MES-001]_001.txt  (1,824 chars)
+23:55:42 [INFO    ] ----------------------------------------
+23:55:42 [INFO    ] Tab 48
+23:55:42 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-MGC-001]'
+23:55:42 [INFO    ]   Strategy name: '[BS-ID-MGC-001]'
+23:55:44 [DEBUG   ]   SHA256 : 16fdef8ee0ffe8bc96e7a48c...  chars=1319
+23:55:44 [INFO    ]   Saved -> [BS-ID-MGC-001]_001.txt  (1,319 chars)
+23:55:46 [INFO    ] ----------------------------------------
+23:55:46 [INFO    ] Tab 49
+23:55:46 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-MCL-001]'
+23:55:46 [INFO    ]   Strategy name: '[BS-ID-MCL-001]'
+23:55:47 [DEBUG   ]   SHA256 : 59842eabe0439f41c8467cca...  chars=2217
+23:55:47 [INFO    ]   Saved -> [BS-ID-MCL-001]_001.txt  (2,217 chars)
+23:55:49 [INFO    ] ----------------------------------------
+23:55:49 [INFO    ] Tab 50
+23:55:49 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-GC-001]'
+23:55:49 [INFO    ]   Strategy name: '[BS-ID-GC-001]'
+23:55:51 [DEBUG   ]   SHA256 : ed30b11d5451042f2776b6a7...  chars=1321
+23:55:51 [INFO    ]   Saved -> [BS-ID-GC-001]_001.txt  (1,321 chars)
+23:55:53 [INFO    ] ----------------------------------------
+23:55:53 [INFO    ] Tab 51
+23:55:53 [INFO    ]   Window title : 'MultiCharts Study Editor - [BS-ID-EC-001]'
+23:55:53 [INFO    ]   Strategy name: '[BS-ID-EC-001]'
+23:55:54 [DEBUG   ]   SHA256 : f43f47bc61bda87b1cbc5ad8...  chars=1341
+23:55:54 [INFO    ]   Wrap-around detected -- hash matches tab 1. Done.
+23:55:54 [INFO    ] Index written -> C:\Users\Administrator\Desktop\multicharts Strategies\Strategies scraped\index.csv

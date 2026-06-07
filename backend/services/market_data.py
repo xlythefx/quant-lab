@@ -635,18 +635,19 @@ def import_csv_tradestation(
 
     return results
 
-def tail_parquet(symbol: str, timeframe: str, limit: int) -> List[Dict]:
+def tail_parquet(symbol: str, timeframe: str, limit: int, broker: Optional[str] = None) -> List[Dict]:
     """Last N rows from Parquet, ready for the chart's setData()."""
-    df = load_parquet(symbol, timeframe).tail(limit)
+    df = load_parquet(symbol, timeframe, broker=broker).tail(limit)
     return df.to_dict(orient="records")
 
 
-def time_to_index(symbol: str, timeframe: str, t: int, side: str = "left") -> int:
+def time_to_index(symbol: str, timeframe: str, t: int, side: str = "left",
+                  broker: Optional[str] = None) -> int:
     """Find the row index whose `time` is closest to t.
     side='left'  → first index with time >= t (replay start cursor)
     side='right' → last index with time <= t  (replay end cursor)
     """
-    df = load_parquet(symbol, timeframe)
+    df = load_parquet(symbol, timeframe, broker=broker)
     if df.empty:
         return 0
     times = df["time"].to_numpy()
@@ -657,23 +658,25 @@ def time_to_index(symbol: str, timeframe: str, t: int, side: str = "left") -> in
     return max(0, min(idx, len(times) - 1))
 
 
-def replay_start_index(symbol: str, timeframe: str, pct: float | None = None) -> tuple[int, int]:
+def replay_start_index(symbol: str, timeframe: str, pct: float | None = None,
+                       broker: Optional[str] = None) -> tuple[int, int]:
     """Deterministic replay starting position. Returns (total_rows, start_index).
     Used by BOTH the seed endpoint (for chart history) and BacktestStream
     (for the replay cursor) so timestamps line up perfectly."""
     from config import BACKTEST_REPLAY_START_PCT
     p = BACKTEST_REPLAY_START_PCT if pct is None else pct
-    n = len(load_parquet(symbol, timeframe))
+    n = len(load_parquet(symbol, timeframe, broker=broker))
     if n == 0:
         return 0, 0
     return n, max(0, min(n - 1, int(n * p)))
 
 
-def seed_slice(symbol: str, timeframe: str, end_index: int, limit: int) -> List[Dict]:
+def seed_slice(symbol: str, timeframe: str, end_index: int, limit: int,
+               broker: Optional[str] = None) -> List[Dict]:
     """Rows [end_index - limit + 1 ... end_index] inclusive. The last bar
     in the returned slice is the one BacktestStream will re-emit first
     (as a forming tick) — so update() always appends going forward."""
-    df = load_parquet(symbol, timeframe)
+    df = load_parquet(symbol, timeframe, broker=broker)
     n = len(df)
     if n == 0:
         return []

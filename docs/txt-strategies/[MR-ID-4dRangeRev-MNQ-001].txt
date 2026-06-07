@@ -1,0 +1,87 @@
+{
+instrument: @NQ
+platform: multicharts - tradestation datafeed
+session: default session
+timeframe: 30+1380m
+type: Reversal - Intraday - QTLab Engine
+IS: 01.01.2006 to 19.11.2018
+OS: 19.11.2018 to today
+
+brief description: la strategia calcola i livelli di ingresso aggiungendo/sottraendo alla chiusura del giorno precedente una porzione "mult" del range
+medio delle ultime 4 sedute. Vi sono dei filtri operativi asimmetrici tra long  e short.
+
+Sono applicati stoploss/target sia monetari sia sulla volatilita'. Le operazioni vengono chiuse a fine sessione.
+}
+
+{VARS}
+input: nCon(1);
+var: stp(130), tgt(130);    
+var: mult(0.25),INLev(1.5), INLevT(1), M(1);
+var: LastBar(1600), OneBackLastBar(1530);
+var: N(4);
+
+var: center(0), buffer(0), up(0), down(0), short_stp(0), long_stp(0), short_tgt(0), long_tgt(0), comp(0);
+var: AvgRange4D(0), range1D(0);
+
+{FILTERS}
+var: CloseStrong(false), BelowBBup(true);
+If c of data2 < bollingerband(C of data2,200,1) then BelowBBup=true else BelowBBup=false;
+If C of data2 > H of data2-(H of data2-L of data2)/N then CloseStrong=true else CloseStrong=false;
+
+AvgRange4D=((h[0] of data2 - l[0] of data2)+(h[1] of data2 - l[1] of data2)+(h[2] of data2 - l[2] of data2)+(h[3] of data2 - l[3] of data2))/4;
+range1D=(h[0] of data2 - l[0] of data2);
+
+If range1D < M*AvgRange4D then comp=1 else comp=0;
+
+{LEVELS CALC}
+center=c of data2;
+buffer = mult * AvgRange4D;
+
+up = round((center + buffer), 4);
+down = ROUND((center - buffer), 4);
+
+short_stp = up + buffer * INLev;
+short_tgt = up - buffer * INLevT;
+
+long_tgt = down + buffer * INLevT;
+long_stp = down - buffer * INLev;
+
+
+{ENTRY}
+if  (marketposition=0) AND (H < up) and (comp = 0) And (BelowBBup) And (t < 1200) and (HighS(0) <> LowS(0)) then 
+	Sellshort ("eS") nCon contracts next bar at up limit; 
+
+if  (marketposition=0) AND (L > down) and (comp = 0) and (CloseStrong=false) And (t < 1200) and (dayofweek(date) <> 1) and (HighS(0) <> LowS(0)) then
+	Buy("eL") nCon contracts next bar at down limit;
+
+{USCITA A TEMPO NEL POMERIGGIO} 
+if t >= onebacklastbar-200 and t <= LastBar then begin
+	if marketposition=1 then sell("ora_xL") next bar at c limit;
+	if marketposition=-1 then buytocover("ora_xS") next bar at c limit;
+end;
+
+setexitonclose; //per considerare uscite manuali in semifestivi
+
+{USCITE SU LVL}
+If marketposition = 1 then begin
+	sell ("xL Vola Stop") next bar at long_stp stop; // basato su volatilita
+	sell ("xL Vola Target") next bar at long_tgt limit; // basato su volatilita
+end;
+
+If marketposition =-1 then begin
+	buytocover ("xS Vola Stop") next bar at short_stp stop; // basato su volatilita
+	buytocover ("xS Vola Target") next bar at short_tgt limit; // basato su volatilita
+end;
+
+{BREAKEVEN}
+If marketposition = 1 then begin
+	if maxpositionprofit >= (stp*nCon) then sell ("LX-Breakeven") next bar at entryprice+(10*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= (stp*nCon) then buytocover ("SX-Breakeven") next bar at entryprice-(10*minmove/pricescale) stop;
+end;
+
+if stp > 0 then setstoploss(stp); // $$$
+if tgt > 0 then setprofittarget(tgt); // $$$
+

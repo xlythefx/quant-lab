@@ -1,0 +1,67 @@
+{
+instrument: @GC
+UA strategy reference: GC_TOP_UA_666_GC_5
+platform: multicharts - ASCII datafeed
+session: default timezone: sun-fri 18-17 (ET)
+timeframe: 12+1380m m
+type: Breakout Intraday
+IS: 01.01.2008 to 31.12.2019
+OS: 31.12.2019 to today
+
+brief description: la strategia entra a breakout del massimo/minimo della sessione precedente. Sono applicati filtri speculari long/short ad
+eccezione dei giorni esclusi per l'operativita'. Le uscite sono tramite SL TP BE e a fine sessione. Nel caso in cui la strategia fosse tradata
+con piu di 1 contratto, meta' della posizione verrebbe chiusa dopo 60 barre (scaling out).
+}
+
+input: nCon(1);
+var: CoefEsp(0.5) {da 0 a 2}, CoefDir(0.5) {da 0.1 a 1},nBarExit(60);
+var: kSTP(0.75), kTGT(2.25), stp(1900);
+var: ATR(0), FiltroEspansione(false), FiltroDirezionaleL(false), FiltroDirezionaleS(false);
+
+var: CloseS1(0), CloseS2(0), HighS0(0), HighS1(0), OpenS0(0), OpenS1(0), LowS0(0), LowS1(0);
+
+LowS0 = LowS(0);
+OpenS0 = OpenS(0);
+HighS0 = HighS(0);
+
+CloseS1 = c[0] of data2; //CloseSession(1,1);
+CloseS2 = c[1] of data2; //CloseSession(1,2);
+HighS1 = h[0] of data2; //HighSession(1,1);
+OpenS1 = o[0] of data2; //OpenSession(1,1);
+LowS1 = l[0] of data2; //LowSession(1,1);
+
+FiltroEspansione = ((CloseS1<(CloseS2-CloseS2*CoefEsp/100))) or ((CloseS1>(CloseS2+CloseS2*CoefEsp/100)));
+FiltroDirezionaleL = ((HighS0-OpenS0)>((HighS1-OpenS1)*CoefDir));
+FiltroDirezionaleS = ((OpenS0-LowS0)>((OpenS1-LowS1)*CoefDir));
+
+ATR = (AvgTrueRange(5) of data2);
+
+if (HighS(0) <> LowS(0)) and (Time<800 or Time>=2000) and (EntriesToday(d) < 1) and (FiltroEspansione = false) then begin
+	if (c < HighS1) and (FiltroDirezionaleL = true) then
+		buy ("LE-Breakout-1") nCon contracts next bar at (HighS1-(2*minmove/pricescale)) stop;
+	if (c > LowS1) and (FiltroDirezionaleS = true) and dayofweek(d) <> 3 then
+		sellshort ("SE-Breakout-1") nCon contracts next bar at (LowS1+(2*minmove/pricescale)) stop;
+end;
+
+If marketposition = 1 and time >= 1645 and time < 1800 then sell ("LX - EndOfDay") this bar at close;
+If marketposition = -1 and time >= 1645 and time < 1800 then buytocover ("SX - EndOfDay") this bar at close;
+
+{
+If marketposition<>0 and barssinceentry >= nBarExit and nCon > 1 and openpositionprofit > 0 then begin
+	Sell ("LX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+	Buytocover ("SX-nBarX") (intportion(nCon/2)) contracts next bar at market;
+end;
+}
+	
+If marketposition = 1 then begin
+	if maxpositionprofit >= minlist((ATR*kSTP*bigpointvalue*nCon),(stp*nCon)) then sell ("LX-Breakeven") next bar at entryprice+(5*minmove/pricescale) stop;
+end;
+
+If marketposition =-1 then begin
+	if maxpositionprofit >= minlist((ATR*kSTP*bigpointvalue*nCon),(stp*nCon)) then buytocover ("SX-Breakeven") next bar at entryprice-(5*minmove/pricescale) stop;
+end;
+
+{STOP E TARGET MONETARI}
+setstopcontract;
+setstoploss(minlist((ATR*kSTP*bigpointvalue),stp));
+Setprofittarget(ATR*kTGT*bigpointvalue);

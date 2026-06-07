@@ -46,6 +46,7 @@ class StrategySpec:
     timeframe: str
     params: dict = field(default_factory=dict)
     priority: int = 100   # lower wins same-bar conflicts
+    broker: Optional[str] = None   # which broker namespace to load from (None = first-found)
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +124,9 @@ class _Stream:
         # multiplier so P&L scales to TS dollars ($50/pt). Crypto/commodities stay
         # %-of-equity. Futures use margin not cash, so the cash gate is bypassed
         # below (the collateral/locked_notional accounting still nets out in total_eq).
-        _broker = market_data.broker_for(spec.symbol, spec.timeframe)
+        _broker = spec.broker or market_data.broker_for(spec.symbol, spec.timeframe)
         _meta   = assets.get(spec.symbol, _broker or market_data.BROKER_DEFAULT)
-        self.contract_sizing = (_meta.asset_class == "equity_index_future" and _meta.contract_size > 1.0)
+        self.contract_sizing = (_meta.asset_class in ("equity_index_future", "futures") and _meta.contract_size > 1.0)
         self.n_contracts     = float(strategy.p.get("contracts", 1)) if self.contract_sizing else 0.0
         self.contract_units  = self.n_contracts * float(_meta.contract_size) if self.contract_sizing else 0.0
         # Fee config (set by run_portfolio after rc is read). Futures: flat $/contract;
@@ -272,7 +273,7 @@ def run_portfolio(specs: list[StrategySpec],
         cls = get_strategy_class(spec.strategy_id)
         strategy = cls(spec.params or {})
         injected = df_by_spec.get(orig_idx) if df_by_spec else None
-        df = injected.copy() if injected is not None else market_data.load_parquet(spec.symbol, spec.timeframe)
+        df = injected.copy() if injected is not None else market_data.load_parquet(spec.symbol, spec.timeframe, broker=spec.broker)
         if start_time is not None:
             df = df[df["time"] >= int(start_time)]
         if end_time is not None:
