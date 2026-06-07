@@ -394,9 +394,12 @@ class DepsTab(tk.Frame):
         ).start()
 
     def _install_frontend(self):
+        # npm is a .cmd shim on Windows, so it must run through cmd /c —
+        # a bare ["npm", "install"] raises FileNotFoundError there.
+        cmd = ["cmd", "/c", "npm", "install"] if sys.platform == "win32" else ["npm", "install"]
         threading.Thread(
             target=self._run_install,
-            args=(self._fe, ["npm", "install"], str(FRONTEND_DIR), self._check_frontend),
+            args=(self._fe, cmd, str(FRONTEND_DIR), self._check_frontend),
             daemon=True,
         ).start()
 
@@ -610,6 +613,14 @@ class BuildTab(tk.Frame):
         _flat_btn(g3, "Deploy to VPS", C["yellow"], self._deploy).pack(fill="x", pady=3)
         tk.Label(g3, text="runs vps-deployment/deploy.py", font=("Consolas", 7),
                  bg=C["bg"], fg=C["dim"]).pack(anchor="w", pady=(4, 0))
+
+        g4 = group(" Data ")
+        _flat_btn(g4, "Pull Futures (Databento)", C["blue"],
+                  lambda: self._run("pull databento",
+                                    f'"{sys.executable}" "{ROOT_DIR / "scripts" / "pull_databento.py"}"',
+                                    ROOT_DIR)).pack(fill="x", pady=3)
+        tk.Label(g4, text="ES/NQ/CL/GC 1h — needs DATABENTO_API_KEY in .env",
+                 font=("Consolas", 7), bg=C["bg"], fg=C["dim"]).pack(anchor="w", pady=(4, 0))
 
         tk.Label(self, text="  output", font=("Consolas", 8),
                  bg=C["bg"], fg=C["muted"]).pack(anchor="w", padx=8)
