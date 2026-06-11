@@ -26,7 +26,7 @@ import optuna
 from optuna.samplers import TPESampler
 from sklearn.model_selection import TimeSeriesSplit
 
-from services import backtest_engine, event_bus, market_data, risk_config
+from services import backtest_engine, event_bus, market_data, risk_config, quant_metrics
 from services.monte_carlo import _bars_per_year
 
 _BOOTSTRAP_ITERS = 500
@@ -173,6 +173,7 @@ def _normalize_spec(spec: dict) -> dict:
         # opened on the IS boundary (which would exit inside OOS) can't bias
         # the in-sample optimization. Purges bars, not trades.
         "purge_radius": max(0, int(spec.get("purge_radius") or 0)),
+        "sessions_cfg": spec.get("sessions_cfg") or None,
     }
     if not out["strategy_id"]:
         raise ValueError("strategy_id is required")
@@ -282,8 +283,9 @@ class WalkForwardJob:
         df = df.reset_index(drop=True)
 
         total = len(df)
-        # sklearn TimeSeriesSplit requires n_splits >= 2.
-        # Need extra room for embargo (between IS and OOS) and purge (off IS edge).
+        # sklearn TimeSeriesSplit requires n_splits >= 2 (at least 2 folds).
+        # min_bars: is_bars (for IS window) + embargo (gap) + oos_bars (test fold)
+        # + oos_bars (stride for fold 2) + purge_radius (dropped from IS edge).
         min_bars = s["is_bars"] + 2 * s["oos_bars"] + s["embargo_bars"] + s["purge_radius"]
         if total < min_bars:
             raise ValueError(
@@ -351,8 +353,8 @@ class WalkForwardJob:
             )
 
             # Stitch this window's OOS curve onto the running aggregate.
-            window_start_cap = float(oos_result["stats"]["starting_capital"])
-            multiplier_carry = carry_equity / window_start_cap if window_start_cap > 0 else 1.0
+            sub_run_capital = float(oos_result["stats"]["starting_capital"])  # Always == global starting_capital
+            multiplier_carry = carry_equity / sub_run_capital if sub_run_capital > 0 else 1.0
 
             # Skip the first equity point of every window after the first: it's
             # the pre-trade `starting_capital` of the sub-run, which after rebase
@@ -366,7 +368,7 @@ class WalkForwardJob:
                 if skip_first_pt and i == 0:
                     continue
                 # Rebase this point onto the running equity (preserve % shape).
-                local_mult = pt["equity"] / window_start_cap if window_start_cap > 0 else 1.0
+                local_mult = pt["equity"] / sub_run_capital if sub_run_capital > 0 else 1.0
                 eq = carry_equity * local_mult
                 peak_eq = max(peak_eq, eq)
                 dd_dollars = eq - peak_eq
@@ -382,9 +384,10 @@ class WalkForwardJob:
                 dd_dollars_arr_all.append(float(dd_dollars))
 
             for tr in oos_result["trades"]:
-                # pnl_pct_equity must rescale in lockstep with pnl_dollars so
-                # the per-trade distribution histogram reflects the stitched
-                # portfolio, not the per-window local capital.
+                # pnl_dollars is scaled to the stitched portfolio size. pnl_pct_equity
+                # is defined as pnl_dollars / starting_capital * 100, so it scales in
+                # lockstep: a trade that was 10% of $1000 becomes 10% of $1500 (via
+                # scaled pnl_dollars / same starting_capital constant).
                 stitched_trades.append({
                     **tr,
                     "pnl_dollars":    float(tr["pnl_dollars"]) * multiplier_carry,
@@ -395,7 +398,7 @@ class WalkForwardJob:
             # Carry forward.
             if oos_result["equity"]:
                 last_pt = oos_result["equity"][-1]
-                local_mult_last = (last_pt["equity"] / window_start_cap) if window_start_cap > 0 else 1.0
+                local_mult_last = (last_pt["equity"] / sub_run_capital) if sub_run_capital > 0 else 1.0
                 carry_equity = carry_equity * local_mult_last
 
             # Per-window summary + per-fold extras (B&H, realized vol, Sharpe CI).
@@ -470,8 +473,17 @@ class WalkForwardJob:
                 sessions_cfg_override=s.get("sessions_cfg"),
             )
         else:
-            stats = backtest_engine._empty_result(s["strategy_id"], s["symbol"], s["timeframe"], rc)["stats"]
-            analytics = backtest_engine._empty_result(s["strategy_id"], s["symbol"], s["timeframe"], rc)["analytics"]
+            _empty = backtest_engine._empty_result(s["strategy_id"], s["symbol"], s["timeframe"], rc)
+            stats = _empty["stats"]
+            analytics = _empty["analytics"]
+
+        # Trading-cost attribution over the stitched OOS trades: how much of the
+        # net PnL went to commissions vs slippage. Net comes from the equity
+        # curve (stats); slippage is estimated from the configured bps.
+        costs = quant_metrics.cost_attribution(
+            stitched_trades, stats.get("total_return_dollars", 0.0),
+            rc.get("slippage_bps", 0.0),
+        )
 
         result = {
             "strategy_id": s["strategy_id"],
@@ -500,6 +512,7 @@ class WalkForwardJob:
             "equity": stitched_equity_pts,
             "stats": stats,
             "analytics": analytics,
+            "costs": costs,
         }
 
         global _last_result

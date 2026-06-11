@@ -199,16 +199,15 @@ def _risk_adjusted(trades: list[dict], equity_curve: list[dict],
     else:
         tr = r
     omega = None
-    gain_to_pain = None
     if tr.size:
         gains = tr[tr > 0].sum()
         losses = -tr[tr < 0].sum()
         if losses > 0:
             omega = float(gains / losses)
-            gain_to_pain = float(gains / losses)
         elif gains > 0:
             omega = float("inf")
-            gain_to_pain = float("inf")
+    # Omega ratio (threshold = 0) and Gain-to-Pain are identical at threshold = 0.
+    gain_to_pain = omega  # alias — same formula when threshold = 0
 
     # K-Ratio: slope of log(equity) vs bar index / std-error of that slope.
     # Measures equity-curve smoothness (high = steady grind, low = lumpy).
@@ -420,10 +419,10 @@ def _empty_distribution() -> dict:
 # ---------------------------------------------------------------------------
 
 def _edge(trades: list[dict]) -> Optional[dict]:
-    if not trades or "mae_pct" not in (trades[0] or {}):
+    if not trades or not any("mae_pct" in t for t in trades):
         return None
-    mae = np.array([float(t.get("mae_pct", 0.0)) for t in trades])  # negative excursions
-    mfe = np.array([float(t.get("mfe_pct", 0.0)) for t in trades])  # positive excursions
+    mae = np.array([float(t["mae_pct"]) for t in trades if "mae_pct" in t])
+    mfe = np.array([float(t["mfe_pct"]) for t in trades if "mfe_pct" in t])
     if not (np.isfinite(mae).any() and np.isfinite(mfe).any()):
         return None
     avg_mae = float(np.nanmean(mae)) if mae.size else 0.0
@@ -485,7 +484,9 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
         if N >= 2:
             sr_std = float(vals.std(ddof=1))
             if sr_std > 0:
-                # Expected max Sharpe under the null (Bailey & López de Prado eq. 4):
+                # DSR adapted for WFA: uses best OOS Sharpe (more conservative than
+                # IS-space original). Expected max Sharpe under the null (Bailey &
+                # López de Prado eq. 4):
                 euler = 0.5772156649
                 # Φ⁻¹ approximation: scipy.stats.norm.ppf
                 z1 = stats.norm.ppf(1.0 - 1.0 / N) if N > 1 else 0.0
@@ -502,17 +503,17 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
     pct_positive = None
     if window_pairs:
         ratios = []
-        positives = 0
+        valid_windows = [w for w in window_pairs if w.get("oos_sharpe") is not None]
+        if valid_windows:
+            positives = sum(1 for w in valid_windows if w["oos_sharpe"] > 0)
+            pct_positive = float(positives) / len(valid_windows) * 100.0
         for w in window_pairs:
             is_s = w.get("is_score")
             oos_s = w.get("oos_sharpe")
-            if oos_s is not None and oos_s > 0:
-                positives += 1
             if is_s is not None and oos_s is not None and is_s > 0:
                 ratios.append(oos_s / is_s)
         if ratios:
             wfe_median = float(np.median(ratios))
-        pct_positive = float(positives) / len(window_pairs)
 
     return {
         "parameter_stability_score": _safe(stability),
@@ -551,3 +552,54 @@ def infer_bars_per_year(time_a) -> float:
     if dt <= 0:
         return 0.0
     return 365.25 * 24.0 * 3600.0 / dt
+
+
+def cost_attribution(trades, total_return_dollars, slippage_bps) -> dict:
+    """How much of the PnL was eaten by commissions vs slippage.
+
+    Fees are EXACT: each trade carries `fees` = entry + exit commission (the
+    engine subtracts them as they happen). Slippage is ESTIMATED: the engine
+    bakes it into fill prices and never records it separately, so we
+    reconstruct it as the configured rate applied to each side's notional —
+    `(entry_notional + exit_notional) * slippage_bps/1e4`. For 1-tick-scale
+    slippage the approximation error is < 0.01% of the slippage itself.
+
+    `units` already embeds the futures contract multiplier, so the same
+    formula gives correct dollar slippage for crypto and futures alike.
+
+    Net PnL is the truth from the equity curve (passed in); gross is the
+    frictionless counterfactual `net + total_cost` — i.e. what the book would
+    have made with zero fees and zero slippage.
+    """
+    n = len(trades)
+    fee_dollars = float(sum(t.get("fees", 0.0) for t in trades))
+    slip_rate = float(slippage_bps) / 10000.0
+    traded_notional = 0.0
+    slippage_dollars = 0.0
+    for t in trades:
+        u = abs(float(t.get("units", 0.0)))
+        entry_notional = abs(float(t.get("entry_price", 0.0))) * u
+        exit_notional  = abs(float(t.get("exit_price", 0.0))) * u
+        traded_notional += entry_notional + exit_notional
+        slippage_dollars += (entry_notional + exit_notional) * slip_rate
+
+    total_cost = fee_dollars + slippage_dollars
+    net = float(total_return_dollars)
+    gross = net + total_cost
+    return {
+        "n_trades": n,
+        "fee_dollars": fee_dollars,
+        "slippage_dollars": slippage_dollars,
+        "total_cost_dollars": total_cost,
+        "net_pnl_dollars": net,
+        "gross_pnl_dollars": gross,
+        # how big a bite costs took out of the frictionless edge
+        "cost_pct_of_gross": (total_cost / abs(gross) * 100.0) if abs(gross) > 1e-9 else 0.0,
+        "cost_per_trade_dollars": (total_cost / n) if n else 0.0,
+        "traded_notional_dollars": traded_notional,
+        "cost_bps_of_notional": (total_cost / traded_notional * 10000.0) if traded_notional > 1e-9 else 0.0,
+        "fee_share_pct": (fee_dollars / total_cost * 100.0) if total_cost > 1e-9 else 0.0,
+        "slippage_share_pct": (slippage_dollars / total_cost * 100.0) if total_cost > 1e-9 else 0.0,
+        # echo the assumptions used, for display
+        "slippage_bps": float(slippage_bps),
+    }

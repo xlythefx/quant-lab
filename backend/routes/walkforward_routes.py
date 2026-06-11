@@ -36,6 +36,7 @@ def start_job():
             "metric":      body.get("metric"),
             "embargo_bars": body.get("embargo_bars"),
             "purge_radius": body.get("purge_radius"),
+            "sessions_cfg": body.get("sessions_cfg"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")

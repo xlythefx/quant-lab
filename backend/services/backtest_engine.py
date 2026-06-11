@@ -1,8 +1,8 @@
 """
 Hindsight backtest engine.
 
-Single REST round-trip: load parquet → strategy.vectorized() → walk-forward
-sim → return everything (candles, overlays, trades, equity, stats, analytics).
+Single REST round-trip: load parquet → strategy.vectorized() → bar simulation
+→ return everything (candles, overlays, trades, equity, stats, analytics).
 
 GLOBAL risk_config (services.risk_config) drives starting capital, fees,
 and slippage. risk_pct is per-strategy (in each PARAM_SCHEMA).
@@ -528,6 +528,8 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
         "sharpe": float(sharpe),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
+        # max_drawdown_pct: DD relative to starting capital (initial equity).
+        # max_drawdown_pct_peak: DD relative to running peak (industry standard).
         "max_drawdown_pct": float(max_dd_dollars) / float(starting_capital) * 100.0,
         "max_drawdown_pct_peak": float(max_dd_pct_peak),
         "max_drawdown_dollars": float(max_dd_dollars),
