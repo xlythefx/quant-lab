@@ -318,6 +318,8 @@ class WalkForwardJob:
         dd_dollars_arr_all: list[float] = []
 
         time_col = df["time"].to_numpy()
+        if len(time_col) >= 2 and not np.all(np.diff(time_col) > 0):
+            raise ValueError("time column is not monotonically increasing — data may be corrupt or unsorted")
         bars_per_year = _bars_per_year(time_col)
         rng = np.random.default_rng(s["seed"])
         # Use a dummy X with same length as df — TimeSeriesSplit only needs len.
@@ -367,9 +369,17 @@ class WalkForwardJob:
             for i, pt in enumerate(oos_result["equity"]):
                 if skip_first_pt and i == 0:
                     continue
+                # Validate equity point schema; skip malformed points with warning.
+                if not isinstance(pt.get("equity"), (int, float)) or not isinstance(pt.get("time"), (int, float)):
+                    log.warning(f"window {w_idx+1}: malformed equity point skipped: {pt}")
+                    continue
                 # Rebase this point onto the running equity (preserve % shape).
                 local_mult = pt["equity"] / sub_run_capital if sub_run_capital > 0 else 1.0
                 eq = carry_equity * local_mult
+                # Guard against window ruin: if equity hit ≤ 0, clip to 0 and log.
+                if eq <= 0:
+                    log.warning(f"window {w_idx+1}: equity hit zero at time {pt['time']} — clipping")
+                    eq = 0.0
                 peak_eq = max(peak_eq, eq)
                 dd_dollars = eq - peak_eq
                 stitched_equity_pts.append({

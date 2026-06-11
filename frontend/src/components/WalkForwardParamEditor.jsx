@@ -33,7 +33,11 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
     return g;
   }, [schema]);
 
-  // Seed base params for schema entries that aren't yet in baseParams.
+  // Seed base params for schema entries that aren't yet in baseParams, and
+  // auto-enable Search on every tunable numeric param when the search space is
+  // empty — so a freshly-picked strategy lands with its parameters already
+  // checked instead of all-fixed. Runs per-strategy (keyed on schema); a saved
+  // non-empty search space is left untouched.
   useEffect(() => {
     if (!schema) return;
     let touched = false;
@@ -45,7 +49,33 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
         touched = true;
       }
     }
-    if (touched) onChange({ baseParams: next, searchSpace: searchSpace || [] });
+
+    let nextSearch = searchSpace || [];
+    if (nextSearch.length === 0) {
+      const auto = [];
+      for (const s of schema) {
+        if (s.name === "risk_pct") continue;
+        const numeric = s.type === "int" || s.type === "float";
+        // Only params with a real [min, max] range are worth searching — a
+        // missing/zero-width range would add a useless single-value "search".
+        const hasRange = s.min != null && s.max != null && s.max > s.min;
+        if (numeric && hasRange) {
+          auto.push({
+            name: s.name,
+            type: s.type,
+            low: s.min,
+            high: s.max,
+            step: s.step ?? (s.type === "int" ? 1 : null),
+          });
+        }
+      }
+      if (auto.length) {
+        nextSearch = auto;
+        touched = true;
+      }
+    }
+
+    if (touched) onChange({ baseParams: next, searchSpace: nextSearch });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema]);
 
@@ -183,7 +213,10 @@ function ParamRow({ spec, baseValue, searchEntry, onSetBase, onToggleSearch, onS
           <div className="grid grid-cols-3 gap-2 text-xs font-mono">
             <NumField label="low"  value={searchEntry.low}  onChange={(v) => onSearchField("low", v)} />
             <NumField label="high" value={searchEntry.high} onChange={(v) => onSearchField("high", v)} />
-            <NumField label="step" value={searchEntry.step ?? ""} onChange={(v) => onSearchField("step", v)} placeholder="auto"
+            <NumField label="step" value={searchEntry.step ?? ""} onChange={(v) => {
+              if (v !== null && v <= 0) return;  // block step <= 0; Optuna requires step > 0
+              onSearchField("step", v);
+            }} placeholder="auto"
               title="Granularity: Optuna picks values from {low, low+step, low+2·step, …, high}. Smaller step = finer resolution but slower convergence." />
           </div>
           <div className="text-[10px] text-muted/70">

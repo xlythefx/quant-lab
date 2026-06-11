@@ -8,7 +8,7 @@ import WalkForwardParamEditor from "../components/WalkForwardParamEditor.jsx";
 import WalkForwardPresetPicker from "../components/WalkForwardPresetPicker.jsx";
 import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
 import {
-  getSymbols, getStrategies,
+  getSymbols, getStrategies, getRiskConfig,
   startWalkForward, cancelWalkForward, getWalkForwardStatus, getWalkForwardLastResult,
   aiSuggestWalkForward, aiAnalyzeWalkForwardSection, aiChatWalkForward,
 } from "../services/api.js";
@@ -571,9 +571,15 @@ function SetupTab({
       <div className="text-[11px] uppercase tracking-wider text-muted">Setup</div>
 
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <SymbolSelector value={symbol} options={symbols} datasets={datasets} onChange={setSymbol} />
-        <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
-        <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
+        <div className={running ? "opacity-50 pointer-events-none" : ""}>
+          <SymbolSelector value={symbol} options={symbols} datasets={datasets} onChange={setSymbol} />
+        </div>
+        <div className={running ? "opacity-50 pointer-events-none" : ""}>
+          <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
+        </div>
+        <div className={running ? "opacity-50 pointer-events-none" : ""}>
+          <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
+        </div>
       </div>
 
       <WalkForwardPresetPicker
@@ -625,19 +631,20 @@ function SetupTab({
         </Field>
 
         <Field label="IS bars">
-          <NumInput value={isBars} onChange={setIsBars} min={10} />
+          <NumInput value={isBars} onChange={setIsBars} min={10} disabled={running} />
         </Field>
         <Field label="OOS bars">
-          <NumInput value={oosBars} onChange={setOosBars} min={1} />
+          <NumInput value={oosBars} onChange={setOosBars} min={1} disabled={running} />
         </Field>
         <Field label="Trials / window">
-          <NumInput value={nTrials} onChange={setNTrials} min={1} />
+          <NumInput value={nTrials} onChange={setNTrials} min={1} disabled={running} />
         </Field>
         <Field label="Metric">
           <select
             value={metric}
             onChange={(e) => setMetric(e.target.value)}
-            className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+            disabled={running}
+            className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue disabled:opacity-50"
           >
             {METRICS.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
@@ -691,6 +698,18 @@ function SetupTab({
           Purge = bars trimmed off the right edge of IS (purged CV).
         </span>
       </div>
+      {embargoBars >= oosBars && (
+        <div className="text-loss text-[11px] bg-loss/10 border border-loss/30 rounded px-2 py-1">
+          ⚠ Embargo bars must be less than OOS bars ({oosBars}).
+        </div>
+      )}
+      {purgeRadius >= isBars && (
+        <div className="text-loss text-[11px] bg-loss/10 border border-loss/30 rounded px-2 py-1">
+          ⚠ Purge radius must be less than IS bars ({isBars}).
+        </div>
+      )}
+
+      <CostAssumptions />
 
       <BudgetHint searchSpaceLen={searchSpace.length} nTrials={nTrials} isBars={isBars} oosBars={oosBars} />
 
@@ -723,7 +742,7 @@ function SetupTab({
         ) : (
           <button
             onClick={onStart}
-            disabled={!symbol || !strategyId}
+            disabled={!symbol || !strategyId || embargoBars >= oosBars || purgeRadius >= isBars}
             className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-40"
           >
             Start Walk-Forward
@@ -737,6 +756,85 @@ function SetupTab({
 // ---------------------------------------------------------------------------
 // OVERVIEW — headline KPIs + stitched OOS equity (B&H overlay in C.1)
 // ---------------------------------------------------------------------------
+
+// Read-only cost assumptions, shown on the Setup tab so you always know what
+// fees/slippage the OOS result will be charged. Editable on Risk Settings.
+function CostStat({ label, value, warn }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      <div className={`font-mono text-sm ${warn ? "text-amber-400" : "text-text"}`}>{value}</div>
+    </div>
+  );
+}
+
+function CostAssumptions() {
+  const [rc, setRc] = useState(null);
+  useEffect(() => { getRiskConfig().then(setRc).catch(() => {}); }, []);
+  if (!rc) return null;
+  const feePct = Number(rc.fee_pct) || 0;
+  const feeFlat = Number(rc.fee_flat) || 0;
+  const slipBps = Number(rc.slippage_bps) || 0;
+  const futCom = Number(rc.futures_commission) || 0;
+  const allZero = feePct === 0 && feeFlat === 0 && slipBps === 0 && futCom === 0;
+  return (
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-2 border-t border-line/40">
+      <div className="text-[11px] uppercase tracking-wider text-muted">Cost assumptions</div>
+      <CostStat label="Fee / side" value={`${feePct}%`} warn={allZero} />
+      <CostStat label="Flat fee / side" value={`$${feeFlat}`} />
+      <CostStat label="Slippage" value={`${slipBps} bps`} warn={allZero} />
+      <CostStat label="Futures comm. / contract" value={`$${futCom}`} />
+      <a href="#settings" className="text-[11px] text-accent-blue hover:underline">Edit in Risk Settings →</a>
+      {allZero && (
+        <span className="text-[11px] text-amber-400 w-full">
+          ⚠ All costs are zero — the OOS result will be frictionless (too optimistic). Set a realistic fee % and slippage, then run.
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Trading-cost attribution over the stitched OOS trades — how much of the edge
+// went to commissions vs slippage. Renders `result.costs` from the backend.
+function TradingCostsCard({ costs }) {
+  if (!costs || !costs.n_trades) return null;
+  const noCost = (costs.total_cost_dollars || 0) === 0;
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Trading Costs (OOS)</div>
+        <a href="#settings" className="text-[11px] text-accent-blue hover:underline">Cost settings →</a>
+      </div>
+      {noCost ? (
+        <div className="text-xs text-amber-400">
+          Costs are zero in your Risk Settings, so this OOS result is frictionless. Set a realistic
+          fee % and slippage (bps) on Risk Settings, then re-run to see how much of the edge they eat.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <Kpi title="Total Cost" value={fmtUsd(costs.total_cost_dollars)} positive={false}
+                 sub={`${fmtUsd(costs.cost_per_trade_dollars)}/trade · ${fmtNum(costs.cost_bps_of_notional)} bps`} />
+            <Kpi title="Commissions" value={fmtUsd(costs.fee_dollars)} positive={false}
+                 sub={`${fmtNum(costs.fee_share_pct)}% of cost`} />
+            <Kpi title={`Slippage · ${fmtNum(costs.slippage_bps)} bps`} value={fmtUsd(costs.slippage_dollars)} positive={false}
+                 sub={`${fmtNum(costs.slippage_share_pct)}% of cost`} />
+            <Kpi title="Cost % of Gross Edge" value={`${fmtNum(costs.cost_pct_of_gross)}%`}
+                 positive={costs.cost_pct_of_gross < 30 ? true : costs.cost_pct_of_gross > 70 ? false : null} />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Kpi title="Gross PnL · frictionless" value={fmtUsd(costs.gross_pnl_dollars)} positive={costs.gross_pnl_dollars >= 0} />
+            <Kpi title="Net PnL · after costs" value={fmtUsd(costs.net_pnl_dollars)} positive={costs.net_pnl_dollars >= 0} />
+          </div>
+          <div className="text-[11px] text-muted">
+            Commissions are exact; slippage is estimated from {fmtNum(costs.slippage_bps)} bps applied to each side's
+            traded notional. Gross = what the book would have made with zero fees and zero slippage — the gap to Net is the cost drag.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 function OverviewTab({ result }) {
   const s = result.stats || {};
@@ -817,6 +915,9 @@ function OverviewTab({ result }) {
         <Kpi title="OOS Max Drawdown"   value={fmtPct(s.max_drawdown_pct, false)} positive={false} sub={fmtUsd(s.max_drawdown_dollars)} />
         <Kpi title="OOS Avg Trade"      value={fmtUsd(s.avg_pnl_dollars)} />
       </div>
+
+      {/* ── Trading costs (commissions vs slippage) ───────────────────── */}
+      <TradingCostsCard costs={result.costs} />
 
       {/* ── Long vs Short ─────────────────────────────────────────────── */}
       {(lng.trades > 0 || sht.trades > 0) && (
