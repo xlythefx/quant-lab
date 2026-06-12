@@ -97,7 +97,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         end_time: Optional[int] = None,
         df: Optional[pd.DataFrame] = None,
         risk_overrides: Optional[dict] = None,
-        broker: Optional[str] = None) -> dict:
+        broker: Optional[str] = None,
+        trade_start_time: Optional[int] = None) -> dict:
     """Run a backtest.
 
     `df`: if provided, use it directly (and copy it) instead of loading from
@@ -108,7 +109,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     starting_capital, pyramiding) — or `risk_pct` to override the strategy's
     per-trade sizing — for this single call. Local-only, does not mutate the
     global config. Used by Cost Sweep to test how the strategy's edge holds up
-    under elevated execution costs."""
+    under elevated execution costs.
+
+    `trade_start_time`: entry signals observed before this epoch are masked off,
+    but indicators are computed over the FULL [start_time, end_time] slice.
+    Walk-forward uses this to give each IS/OOS window warm-up bars (so rolling
+    indicators are valid at the window start) without letting warm-up bars
+    generate trades. Equity stays flat at starting_capital before the first
+    in-window entry."""
 
     rc = risk_config.get()
     if risk_overrides:
@@ -185,6 +193,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     bxl_a        = sig_df[el_col].fillna(False).astype(bool).to_numpy()
     bxs_a        = sig_df[es_col].fillna(False).astype(bool).to_numpy()
 
+    # Warm-up masking: indicators above were computed on the full slice, but
+    # entry signals observed before trade_start_time must not open positions.
+    # Exits are left untouched — no position can exist before the first entry.
+    if trade_start_time is not None:
+        _warm = time_a.astype(np.int64) < int(trade_start_time)
+        cond_long_a  = cond_long_a  & ~_warm
+        cond_short_a = cond_short_a & ~_warm
+
     # Per-tranche ATR stop (optional — only if strategy exposes `atr` + `atr_mult`).
     has_atr_stop = "atr" in sig_df.columns and "atr_mult" in getattr(strategy, "p", {})
     atr_a    = sig_df["atr"].to_numpy(dtype=float) if has_atr_stop else None
@@ -256,9 +272,11 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                     fee_close = _fee(notional_close)
                     pnl = (fill - tr["entry_price"]) * tr["units"] - fee_close
                     realized_cum += pnl
+                    # Trade record is net of BOTH fees (fee_open was charged to
+                    # realized_cum at entry, so equity math is unchanged).
                     trades_list.append(_trade(
                         "long", tr["entry_price"], fill, tr["entry_time"], ts,
-                        pnl, tr["units"], tr["fee_open"] + fee_close,
+                        pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                         starting_capital=starting_capital,
                         mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
                     ))
@@ -284,7 +302,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                     realized_cum += pnl
                     trades_list.append(_trade(
                         "short", tr["entry_price"], fill, tr["entry_time"], ts,
-                        pnl, tr["units"], tr["fee_open"] + fee_close,
+                        pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                         starting_capital=starting_capital,
                         mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
                     ))
@@ -353,8 +371,10 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         dd_dollars_arr[t] = equity_t - peak_eq   # ≤ 0
 
     # Force-close any tranches still open at the last bar's close so trades_list
-    # and final realized_cum are consistent. equity_arr already reflects their
-    # MTM at close[n-1], so realizing them now doesn't change the equity curve.
+    # and final realized_cum are consistent. The last equity point is refreshed
+    # below so the curve's final value includes the force-close exit fees and
+    # matches stats.final_equity exactly.
+    _had_open = bool(tranches_long or tranches_short)
     if n > 0 and (tranches_long or tranches_short):
         final_close = close_a[-1]
         final_ts = int(time_a[-1])
@@ -365,7 +385,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             realized_cum += pnl
             trades_list.append(_trade(
                 "long", tr["entry_price"], final_close, tr["entry_time"], final_ts,
-                pnl, tr["units"], tr["fee_open"] + fee_close,
+                pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                 starting_capital=starting_capital,
                 mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
             ))
@@ -376,7 +396,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             realized_cum += pnl
             trades_list.append(_trade(
                 "short", tr["entry_price"], final_close, tr["entry_time"], final_ts,
-                pnl, tr["units"], tr["fee_open"] + fee_close,
+                pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                 starting_capital=starting_capital,
                 mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
             ))
@@ -384,6 +404,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         tranches_short = []
 
     equity = float(starting_capital + realized_cum)
+
+    # Refresh the final equity point after force-closes: everything is realized
+    # now, so the last bar's equity is exactly starting + realized (which
+    # includes the force-close exit fees the MTM snapshot couldn't know about).
+    if n > 0 and _had_open:
+        peak_eq = max(peak_eq, equity)
+        equity_arr[n - 1] = equity
+        dd_dollars_arr[n - 1] = equity - peak_eq
 
     equity_curve = []
     for t in range(n):
@@ -471,7 +499,10 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
                     starting_capital, equity_arr=None) -> dict:
     n_trades = len(trades)
     wins = sum(1 for t in trades if t["win"])
-    losses = n_trades - wins
+    # Strict pnl<0 (matching quant_metrics n_losers); break-even trades
+    # (pnl == 0, rare post-fee) are counted separately, not as losses.
+    losses = sum(1 for t in trades if t["pnl_dollars"] < 0)
+    breakeven = n_trades - wins - losses
     win_rate = (wins / n_trades) if n_trades else 0.0
 
     pnl_arr = np.array([t["pnl_dollars"] for t in trades]) if trades else np.array([])
@@ -485,7 +516,9 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
     # (inferred from time_a). This reflects intra-trade drawdowns — the per-trade
     # Sharpe was misleading because pyramiding-stacked trades each report just
     # the price-move %, hiding leveraged risk.
-    sharpe = 0.0
+    # None (not 0.0) when not computable — zero vol, <3 bars — so the UI can
+    # distinguish "no risk-adjusted edge" from "couldn't be measured".
+    sharpe = None
     if equity_arr is not None and len(equity_arr) >= 3 and len(time_a) >= 3:
         eq = np.asarray(equity_arr, dtype=float)
         # simple per-bar returns of equity (clip denom to avoid /0 if equity hits 0)
@@ -523,9 +556,10 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
         "trades": int(n_trades),
         "wins": int(wins),
         "losses": int(losses),
+        "breakeven": int(breakeven),
         "win_rate": float(win_rate),
         "profit_factor": profit_factor,
-        "sharpe": float(sharpe),
+        "sharpe": (float(sharpe) if sharpe is not None else None),
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
         # max_drawdown_pct: DD relative to starting capital (initial equity).
@@ -545,11 +579,12 @@ def _compute_stats(trades, final_equity, dd_dollars_arr, time_a,
 def _side_block(trades) -> dict:
     n = len(trades)
     wins = sum(1 for t in trades if t["win"])
+    losses = sum(1 for t in trades if t["pnl_dollars"] < 0)
     pnl = sum(t["pnl_dollars"] for t in trades)
     return {
         "trades": int(n),
         "wins": int(wins),
-        "losses": int(n - wins),
+        "losses": int(losses),
         "pnl_dollars": float(pnl),
         "win_rate": (wins / n) if n else 0.0,
         "avg_pnl_dollars": (pnl / n) if n else 0.0,
@@ -748,8 +783,8 @@ def _empty_result(strategy_id, symbol, timeframe, rc):
             "starting_capital": float(rc["starting_capital"]),
             "final_equity": float(rc["starting_capital"]),
             "total_return_dollars": 0.0, "total_return_pct": 0.0,
-            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
-            "profit_factor": 0.0, "sharpe": 0.0,
+            "trades": 0, "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0.0,
+            "profit_factor": 0.0, "sharpe": None,
             "gross_profit": 0.0, "gross_loss": 0.0,
             "max_drawdown_pct": 0.0, "max_drawdown_pct_peak": 0.0, "max_drawdown_dollars": 0.0,
             "avg_pnl_dollars": 0.0, "avg_pnl_pct": 0.0,
@@ -758,7 +793,9 @@ def _empty_result(strategy_id, symbol, timeframe, rc):
             "first_time": None, "last_time": None,
         },
         "analytics": {
-            "by_session": [], "heatmap": {"pnl": [[0]*24]*7, "count": [[0]*24]*7},
+            "by_session": [],
+            "heatmap": {"pnl": [[0.0] * 24 for _ in range(7)],
+                        "count": [[0] * 24 for _ in range(7)]},
             "monthly_returns": [], "streaks": {"max_win_streak": 0, "max_loss_streak": 0},
             "drawdown_curve": [], "max_drawdown_duration_bars": 0,
             "distribution_pnl_pct": [], "distribution_duration_min": [],

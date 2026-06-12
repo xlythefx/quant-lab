@@ -8,10 +8,36 @@ from __future__ import annotations
 
 import re
 from datetime import time as dt_time
+from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 _HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})$")
+
+# US equity-index futures trade on the CME Globex session, which is defined in
+# US-Eastern wall-clock (default session 17:00–16:00 ET). TradeStation's `Date`
+# reserved word is the ET session date, NOT a UTC date. Our parquet timestamps
+# are epoch-UTC, so any date-based feature (e.g. the lunar moon phase) must be
+# rebased to ET to line up with the platform the strategy was authored on.
+_ET_ZONE = ZoneInfo("America/New_York")
+
+
+def et_ordinal_days(times_s) -> np.ndarray:
+    """Map epoch-seconds to the US-Eastern (America/New_York, DST-aware) CALENDAR
+    date, expressed as an ordinal day count (days since 1970-01-01). Vectorized.
+
+    Why ET, not UTC: ES sessions open 17:00 ET = 22:00/23:00 UTC and run across
+    UTC midnight, so ~19% of bars (the 00:00–04:59 UTC evening bars) carry a UTC
+    date one day ahead of their ET date. A per-bar date-based feature read off
+    UTC therefore disagrees with TradeStation, whose `Date` is the ET date.
+    Returns float64 so callers can fold it straight into JD arithmetic.
+    """
+    arr = np.asarray(times_s, dtype="int64")
+    idx = pd.to_datetime(arr, unit="s", utc=True).tz_convert(_ET_ZONE)
+    # Midnight of the ET wall-clock day, as whole days since the unix epoch.
+    days = (idx.normalize().tz_localize(None) - pd.Timestamp("1970-01-01")).days
+    return np.asarray(days, dtype="float64")
 
 
 def parse_hhmm(s: str) -> dt_time:

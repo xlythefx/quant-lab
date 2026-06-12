@@ -6,6 +6,7 @@ import { downloadTradesCsv } from "../services/exportTrades.js";
 import { exportAnalyticsPdf } from "../services/exportAnalyticsPdf.js";
 import { aiAnalyzeBacktestSection } from "../services/api.js";
 import { KpiCard, KV, Section, InsightCard, TabBar } from "../components/analytics/primitives.jsx";
+import CorrelationMatrix from "../components/analytics/CorrelationMatrix.jsx";
 
 const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -30,6 +31,7 @@ const TABS = [
 ];
 
 const PORTFOLIO_TAB = { id: "skipped", label: "Skipped Signals" };
+const CORRELATION_TAB = { id: "correlation", label: "Correlation" };
 
 export default function Analytics() {
   const [tab, setTab] = useState("overview");
@@ -147,21 +149,28 @@ export default function Analytics() {
 
   // Skipped Signals tab is portfolio-only. It's available in all/subset views
   // (we filter the skipped list by selection). Hidden in single-strategy view.
+  const hasCorrelation = isPortfolio && !!rawResult?.correlation;
   const visibleTabs = useMemo(() => {
+    const out = [...TABS];
+    // Correlation is portfolio-global (it analyses strategy relationships, not
+    // the filtered subset) — show it whenever the backend returned a block.
+    if (hasCorrelation) out.splice(out.length - 1, 0, CORRELATION_TAB);
+    // Skipped Signals is available in all/subset views (we filter the list).
     if (isPortfolio && (viewMode === "all" || viewMode === "subset")) {
-      const out = [...TABS];
       out.splice(out.length - 1, 0, PORTFOLIO_TAB);
-      return out;
     }
-    return TABS;
-  }, [isPortfolio, viewMode]);
+    return out;
+  }, [isPortfolio, viewMode, hasCorrelation]);
 
   // If user changes selection away from a tab that no longer exists, fall back.
   useEffect(() => {
     if (tab === "skipped" && !(isPortfolio && (viewMode === "all" || viewMode === "subset"))) {
       setTab("overview");
     }
-  }, [tab, isPortfolio, viewMode]);
+    if (tab === "correlation" && !hasCorrelation) {
+      setTab("overview");
+    }
+  }, [tab, isPortfolio, viewMode, hasCorrelation]);
 
   // Helper actions for the selector. The view must always have at least one
   // strategy selected — otherwise the page goes blank. Unchecking the LAST
@@ -270,6 +279,12 @@ export default function Analytics() {
             {tab === "skipped"      && (
               <SkippedSignalsTab
                 result={{ skipped_signals: filteredSkipped }}
+              />
+            )}
+            {tab === "correlation"  && (
+              <CorrelationMatrix
+                data={rawResult.correlation}
+                strategies={rawResult.strategies}
               />
             )}
             {tab === "ai"           && <AITab            result={result} />}
@@ -687,11 +702,13 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
                positive={s.total_return_dollars >= 0} />
       <KpiCard title="Profit Factor"     value={s.profit_factor == null ? "∞" : fmtNum(s.profit_factor)} sub="gross profit / gross loss" />
       <KpiCard title="Sharpe (annualized)" value={fmtNum(s.sharpe)} sub="per-bar MTM equity returns" />
-      <KpiCard title="Win Rate"          value={`${fmtNum(s.win_rate * 100)}%`} sub={`${fmtInt(s.wins)} W / ${fmtInt(s.losses)} L`} />
+      <KpiCard title="Win Rate"          value={`${fmtNum(s.win_rate * 100)}%`}
+               sub={`${fmtInt(s.wins)} W / ${fmtInt(s.losses)} L${s.breakeven > 0 ? ` / ${fmtInt(s.breakeven)} BE` : ""}`} />
       <KpiCard title="Trades"            value={fmtInt(s.trades)} sub={`avg ${fmtUsd(s.avg_pnl_dollars)}`} />
 
       {/* ── Risk cards ────────────────────────────────────────────────── */}
-      <KpiCard title="Max Drawdown"      value={fmtPct(s.max_drawdown_pct, false)} sub={fmtUsd(s.max_drawdown_dollars)}
+      <KpiCard title="Max Drawdown"      value={fmtPct(s.max_drawdown_pct, false)}
+               sub={`${fmtUsd(s.max_drawdown_dollars)} · % of starting capital${s.max_drawdown_pct_peak != null ? ` · peak-rel ${fmtNum(Math.abs(s.max_drawdown_pct_peak))}%` : ""}`}
                positive={false} />
       <KpiCard title="Max DD Duration"   value={fmtBarsDuration(a.max_drawdown_duration_bars, result.timeframe)} sub="time underwater" />
       <KpiCard title="Exposure"          value={`${fmtNum(a.exposure_pct)}%`} sub="bars in position" />
@@ -1170,7 +1187,9 @@ function MonthlyTab({ result }) {
               <tr className="text-muted text-[10px] border-b border-line">
                 <th className="px-4 py-2 text-left font-normal">Year</th>
                 <th className="px-4 py-2 text-right font-normal">Net P&amp;L</th>
-                <th className="px-4 py-2 text-right font-normal">Return %</th>
+                <th className="px-4 py-2 text-right font-normal"
+                    title="Each year's P&L ÷ original starting capital. For compounding (crypto %-of-equity) runs, return on that year's opening equity would be lower in later profitable years.">
+                  Return % (of starting capital)</th>
                 <th className="px-4 py-2 text-right font-normal">Trades</th>
                 <th className="px-4 py-2 text-right font-normal">Green Months</th>
               </tr>
@@ -1310,7 +1329,8 @@ function DrawdownTab({ result }) {
 
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4 w-full overflow-hidden">
         <div className="text-[10px] uppercase tracking-wider text-muted mb-2">
-          Drawdown (%) · max {fmtNum(dMin)}% ({fmtUsd(dMin / 100 * startingCapital)}) · {sampled.length} pts
+          Drawdown (% of starting capital) · max {fmtNum(dMin)}% ({fmtUsd(dMin / 100 * startingCapital)}) · {sampled.length} pts
+          — KPI above is peak-relative, so the two can differ
         </div>
         <div ref={innerRef} className="relative w-full">
         <svg width={size.w} height={size.h} className="block"
@@ -1945,10 +1965,11 @@ function AdvancedTab({ result }) {
                      value={rob.walk_forward_efficiency != null ? `${fmtNum(rob.walk_forward_efficiency)}×` : "—"}
                      sub="median OOS / IS"
                      positive={(rob.walk_forward_efficiency ?? 0) >= 0.5} />
+            {/* pct_windows_positive_oos arrives already as a 0–100 percentage */}
             <KpiCard title="OOS positive windows"
-                     value={rob.pct_windows_positive_oos != null ? `${fmtNum(rob.pct_windows_positive_oos * 100)}%` : "—"}
+                     value={rob.pct_windows_positive_oos != null ? `${fmtNum(rob.pct_windows_positive_oos)}%` : "—"}
                      sub={`${fmtInt(rob.n_windows)} windows`}
-                     positive={(rob.pct_windows_positive_oos ?? 0) >= 0.5} />
+                     positive={(rob.pct_windows_positive_oos ?? 0) >= 50} />
             <KpiCard title="Trials evaluated" value={fmtInt(rob.n_trials)}
                      sub="across all windows" />
           </div>
@@ -1960,7 +1981,7 @@ function AdvancedTab({ result }) {
         <Section title="Rolling Stability (20-trade window)"
                  hint="Is the edge consistent over time, or concentrated in a few periods? Flat/rising lines suggest stable performance; large swings indicate regime sensitivity.">
           <RollingMiniChart
-            label="Rolling Sharpe (per-trade)"
+            label="Rolling Sharpe (per-trade, non-annualized)"
             points={rolledMetrics.sharpePoints}
             refLine={0}
             colorPos="rgba(52,211,153,0.8)"

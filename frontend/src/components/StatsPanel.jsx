@@ -58,7 +58,10 @@ export default function StatsPanel({ strategies, statsById }) {
                   <td className={`px-3 py-2 text-right ${pnlClass}`}>{fmtPct(st.total_return_pct)}</td>
                   <td className="px-3 py-2 text-right">{fmtInt(st.trades)}</td>
                   <td className="px-3 py-2 text-right">{st.win_rate != null ? `${fmtNum(st.win_rate * 100)}%` : "—"}</td>
-                  <td className="px-3 py-2 text-right">{st.profit_factor != null ? fmtNum(st.profit_factor) : "∞"}</td>
+                  {/* null is the backend sentinel for "no losing trades" (∞);
+                      undefined means the field wasn't supplied (e.g. streaming
+                      payloads) and must render as missing, not as ∞. */}
+                  <td className="px-3 py-2 text-right">{st.profit_factor === undefined ? "—" : st.profit_factor === null ? "∞" : fmtNum(st.profit_factor)}</td>
                   <td className="px-3 py-2 text-right">{fmtNum(st.sharpe)}</td>
                   <td className="px-3 py-2 text-right text-loss" title="Top line: % of starting capital. Bottom line: % of running peak equity (TradingView convention).">
                     {st.max_drawdown_pct != null ? `${fmtNum(Math.abs(st.max_drawdown_pct))}%` : "—"}

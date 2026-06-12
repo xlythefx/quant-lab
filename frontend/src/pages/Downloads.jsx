@@ -7,7 +7,7 @@ import { getState as getDlState, subscribe as subscribeDl,
          startDownload, cancelCurrent as cancelCurrentDl,
          hydrate as hydrateDl } from "../services/downloadStore.js";
 
-const TFS = ["1m", "5m", "15m", "1h"];
+const TFS = ["1m", "3m", "5m", "6m", "10m", "12m", "15m", "23m", "30m", "46m", "1h", "2h", "4h", "1d"];
 
 /**
  * Asset-class tab definitions. Each declares its broker, default symbol,

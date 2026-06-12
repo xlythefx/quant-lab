@@ -11,6 +11,26 @@ export const REGIME_COLORS = {
   "Choppy-Range":    "#94a3b8",
 };
 
+// Palette for HMM regimes (dynamic auto-named states). Ordered bear→bull to match
+// the backend's canonical state order (ascending mean trend).
+export const HMM_PALETTE = ["#ef4444", "#f59e0b", "#a78bfa", "#38bdf8", "#22c55e", "#14b8a6"];
+
+/**
+ * Build a {label -> color} map for a regime label set. Known deterministic labels
+ * keep their semantic color; unknown (HMM) labels are assigned from HMM_PALETTE in
+ * order; "Warmup" is always slate grey. Pass the result as RegimeRibbon's `colors`.
+ */
+export function buildRegimeColors(labels = []) {
+  const map = {};
+  let pi = 0;
+  for (const lab of labels) {
+    if (REGIME_COLORS[lab]) map[lab] = REGIME_COLORS[lab];
+    else map[lab] = HMM_PALETTE[pi++ % HMM_PALETTE.length];
+  }
+  map["Warmup"] = "#475569";
+  return map;
+}
+
 const AXIS = "#9ca3af";
 const GRID = "rgba(148,163,184,0.15)";
 
@@ -29,7 +49,7 @@ function niceNum(v) {
  * Sub-pixel segments are merged into their neighbor so a multi-year 15m
  * series doesn't emit tens of thousands of invisible <rect>s.
  */
-export function RegimeRibbon({ segments = [], price = [], height = 200 }) {
+export function RegimeRibbon({ segments = [], price = [], height = 200, colors = REGIME_COLORS }) {
   const W = 1000;
   const H = height;
   const pad = { l: 8, r: 8, t: 8, b: 8 };
@@ -77,7 +97,7 @@ export function RegimeRibbon({ segments = [], price = [], height = 200 }) {
       <g>
         {rects.map((r, i) => (
           <rect key={i} x={r.x0} y={H - pad.b - ribbonH} width={Math.max(0.5, r.x1 - r.x0)}
-                height={ribbonH} fill={REGIME_COLORS[r.regime] || "#64748b"} shapeRendering="crispEdges">
+                height={ribbonH} fill={colors[r.regime] || REGIME_COLORS[r.regime] || "#64748b"} shapeRendering="crispEdges">
             <title>{r.regime}</title>
           </rect>
         ))}

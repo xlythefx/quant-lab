@@ -56,6 +56,9 @@ class StrategyMeta:
     name: str
     description: str
     schema: list[ParamSpec] = field(default_factory=list)
+    # Price basis for the strategy's indicators: "ohlc" (close-based, the default)
+    # or "hlc" (typical price (H+L+C)/3). Used to filter/group strategies in the UI.
+    kind: str = "ohlc"
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +66,7 @@ class StrategyMeta:
             "name": self.name,
             "description": self.description,
             "schema": [s.to_dict() for s in self.schema],
+            "kind": self.kind,
         }
 
 

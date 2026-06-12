@@ -26,18 +26,20 @@ import optuna
 from optuna.samplers import TPESampler
 from sklearn.model_selection import TimeSeriesSplit
 
-from services import backtest_engine, event_bus, market_data, risk_config, quant_metrics
+from services import assets, backtest_engine, event_bus, market_data, risk_config, quant_metrics
 from services.monte_carlo import _bars_per_year
 
 _BOOTSTRAP_ITERS = 500
 _BOOTSTRAP_PCTILES = (2.5, 97.5)
 
 
-def _fold_extras(df, oos_idx, oos_result, rng, bars_per_year):
+def _fold_extras(df, oos_idx, oos_result, rng, bars_per_year, oos_start_ts=None):
     """Per-fold benchmark + realized vol + bootstrap CI on OOS Sharpe.
 
     Computed on underlying close (vol, B&H) and strategy equity (Sharpe CI).
     Returns a dict of optional fields to merge into the per-window summary.
+    `oos_start_ts`: drop warm-up equity points (flat at starting capital)
+    before this epoch so the bootstrap isn't diluted with zero returns.
     """
     out: dict[str, Any] = {}
     if len(oos_idx) >= 2:
@@ -55,6 +57,8 @@ def _fold_extras(df, oos_idx, oos_result, rng, bars_per_year):
 
     # Nonparametric bootstrap CI on the OOS Sharpe of the *strategy* equity.
     eq_pts = oos_result.get("equity") or []
+    if oos_start_ts is not None:
+        eq_pts = [p for p in eq_pts if int(p.get("time") or 0) >= int(oos_start_ts)]
     if len(eq_pts) >= 3 and bars_per_year > 0:
         eq = np.asarray([float(p.get("equity") or 0.0) for p in eq_pts], dtype=float)
         if (eq > 0).all():
@@ -78,6 +82,29 @@ log = logging.getLogger(__name__)
 
 # Quiet Optuna's per-trial INFO chatter.
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def _window_stats(result: dict, window_start_ts: int) -> dict:
+    """Recompute engine stats over only the in-window slice of a warm-started run.
+
+    Warm-up bars are flat at starting capital (entries are masked), but leaving
+    them in the equity series dilutes per-bar Sharpe by roughly
+    sqrt(window / (window + warmup)). The flat prefix also means the engine's
+    running peak at window start equals starting capital, so slicing here is
+    exactly equivalent to a window-only run with valid indicators.
+    """
+    pts = [p for p in (result.get("equity") or [])
+           if int(p.get("time") or 0) >= int(window_start_ts)]
+    if len(pts) < 2:
+        return result["stats"]
+    eq = np.asarray([p["equity"] for p in pts], dtype=float)
+    dd = np.asarray([p["drawdown_dollars"] for p in pts], dtype=float)
+    ts = np.asarray([p["time"] for p in pts], dtype=np.int64)
+    sc = float(result["stats"]["starting_capital"])
+    return backtest_engine._compute_stats(
+        result.get("trades") or [], float(result["stats"]["final_equity"]),
+        dd, ts, sc, eq,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +164,12 @@ _METRIC_KEYS = {
 }
 
 
+# Profit factor is capped so a "no losing trades" window (PF undefined → was
+# +inf) can't dominate Optuna: a single lucky IS trade used to beat every
+# finite-PF configuration. 10 is comfortably above any robust real PF.
+_PF_SCORE_CAP = 10.0
+
+
 def _score_from_stats(stats: dict, metric: str) -> float:
     key = _METRIC_KEYS[metric]
     v = stats.get(key)
@@ -144,10 +177,12 @@ def _score_from_stats(stats: dict, metric: str) -> float:
         # profit_factor is None when there are no losses (and >0 profit) or no trades.
         if metric == "profit_factor":
             gp = float(stats.get("gross_profit") or 0.0)
-            return float("inf") if gp > 0 else 0.0
+            return _PF_SCORE_CAP if gp > 0 else 0.0
         return 0.0
     if not math.isfinite(float(v)):
         return 0.0
+    if metric == "profit_factor":
+        return min(float(v), _PF_SCORE_CAP)
     return float(v)
 
 
@@ -173,6 +208,12 @@ def _normalize_spec(spec: dict) -> dict:
         # opened on the IS boundary (which would exit inside OOS) can't bias
         # the in-sample optimization. Purges bars, not trades.
         "purge_radius": max(0, int(spec.get("purge_radius") or 0)),
+        # Indicator warm-up: each IS/OOS window's engine run is fed this many
+        # extra bars BEFORE the window (signals there are masked off via
+        # trade_start_time) so rolling indicators are valid from the window's
+        # first bar instead of NaN. Without it, every window started cold and
+        # strategies with lookback >= oos_bars produced no OOS signals at all.
+        "warmup_bars": max(0, int(spec.get("warmup_bars") or 200)),
         "sessions_cfg": spec.get("sessions_cfg") or None,
     }
     if not out["strategy_id"]:
@@ -308,6 +349,18 @@ class WalkForwardJob:
         rc = risk_config.get()
         starting_capital = float(rc["starting_capital"])
 
+        # Fixed-contract futures (same detection as backtest_engine ~L220) do
+        # NOT compound — `contracts` is constant regardless of equity, so each
+        # window's P&L is an absolute dollar amount. Stitch those additively;
+        # multiplicative rebasing would invent compounding the sizing model
+        # can't deliver. Crypto %-of-equity sizing keeps the multiplicative
+        # stitch (a window's return really would have applied to the carried
+        # equity).
+        _wf_broker = market_data.broker_for(s["symbol"], s["timeframe"]) or market_data.BROKER_DEFAULT
+        _wf_meta = assets.get(s["symbol"], _wf_broker)
+        contract_sized = (_wf_meta.asset_class in ("equity_index_future", "futures")
+                          and _wf_meta.contract_size > 1.0)
+
         # Aggregation state — chained OOS equity / trades / dd
         stitched_equity_pts: list[dict] = []     # {time, equity, value, drawdown, drawdown_dollars}
         stitched_trades: list[dict] = []
@@ -340,42 +393,60 @@ class WalkForwardJob:
             is_end = int(time_col[is_idx[-1]])
             oos_start = int(time_col[oos_idx[0]])
             oos_end = int(time_col[oos_idx[-1]])
+            # Warm-up: feed the engine extra history before each window so
+            # rolling indicators are valid at the window start; entries before
+            # the window are masked via trade_start_time.
+            warm = s["warmup_bars"]
+            is_warm_start = int(time_col[max(0, int(is_idx[0]) - warm)])
+            oos_warm_start = int(time_col[max(0, int(oos_idx[0]) - warm)])
 
             best_params, is_score, optuna_trials = self._optimize_window(
-                is_start, is_end
+                is_warm_start, is_start, is_end
             )
 
             if self.cancel_flag:
                 break
 
-            # Evaluate best params on OOS window.
+            # Evaluate best params on OOS window (warm-started, trade-gated).
             oos_result = backtest_engine.run(
                 s["strategy_id"], s["symbol"], s["timeframe"],
-                best_params, start_time=oos_start, end_time=oos_end,
+                best_params, start_time=oos_warm_start, end_time=oos_end,
+                trade_start_time=oos_start,
             )
 
             # Stitch this window's OOS curve onto the running aggregate.
             sub_run_capital = float(oos_result["stats"]["starting_capital"])  # Always == global starting_capital
-            multiplier_carry = carry_equity / sub_run_capital if sub_run_capital > 0 else 1.0
+            # Futures fixed-contract trades are absolute dollars — never scale.
+            multiplier_carry = (1.0 if contract_sized
+                                else carry_equity / sub_run_capital if sub_run_capital > 0 else 1.0)
 
-            # Skip the first equity point of every window after the first: it's
-            # the pre-trade `starting_capital` of the sub-run, which after rebase
-            # equals the *previous* window's last point exactly. Keeping it
-            # produces a duplicate bar at the boundary and injects a 0% return
-            # into the per-bar return series — that depresses the stitched
-            # equity-return std and inflates the aggregate Sharpe by ~1-2%.
-            skip_first_pt = w_idx > 0
-
-            for i, pt in enumerate(oos_result["equity"]):
-                if skip_first_pt and i == 0:
-                    continue
+            # Skip the first IN-WINDOW equity point of every window after the
+            # first: it's the pre-trade `starting_capital` of the sub-run, which
+            # after rebase equals the *previous* window's last point exactly.
+            # Keeping it produces a duplicate bar at the boundary and injects a
+            # 0% return into the per-bar return series — that depresses the
+            # stitched equity-return std and inflates the aggregate Sharpe by
+            # ~1-2%. Warm-up points (time < oos_start, flat at starting capital
+            # by construction) are dropped entirely.
+            first_kept = True
+            for pt in oos_result["equity"]:
+                if int(pt.get("time") or 0) < oos_start:
+                    continue  # warm-up bar — not part of this OOS window
+                if first_kept:
+                    first_kept = False
+                    if w_idx > 0:
+                        continue
                 # Validate equity point schema; skip malformed points with warning.
                 if not isinstance(pt.get("equity"), (int, float)) or not isinstance(pt.get("time"), (int, float)):
                     log.warning(f"window {w_idx+1}: malformed equity point skipped: {pt}")
                     continue
-                # Rebase this point onto the running equity (preserve % shape).
-                local_mult = pt["equity"] / sub_run_capital if sub_run_capital > 0 else 1.0
-                eq = carry_equity * local_mult
+                if contract_sized:
+                    # Rebase additively: carry + window's dollar P&L so far.
+                    eq = carry_equity + (float(pt["equity"]) - sub_run_capital)
+                else:
+                    # Rebase this point onto the running equity (preserve % shape).
+                    local_mult = pt["equity"] / sub_run_capital if sub_run_capital > 0 else 1.0
+                    eq = carry_equity * local_mult
                 # Guard against window ruin: if equity hit ≤ 0, clip to 0 and log.
                 if eq <= 0:
                     log.warning(f"window {w_idx+1}: equity hit zero at time {pt['time']} — clipping")
@@ -398,6 +469,8 @@ class WalkForwardJob:
                 # is defined as pnl_dollars / starting_capital * 100, so it scales in
                 # lockstep: a trade that was 10% of $1000 becomes 10% of $1500 (via
                 # scaled pnl_dollars / same starting_capital constant).
+                # Futures: multiplier_carry is pinned to 1.0 — fixed-contract
+                # dollars (and their fees) pass through unscaled.
                 stitched_trades.append({
                     **tr,
                     "pnl_dollars":    float(tr["pnl_dollars"]) * multiplier_carry,
@@ -408,11 +481,15 @@ class WalkForwardJob:
             # Carry forward.
             if oos_result["equity"]:
                 last_pt = oos_result["equity"][-1]
-                local_mult_last = (last_pt["equity"] / sub_run_capital) if sub_run_capital > 0 else 1.0
-                carry_equity = carry_equity * local_mult_last
+                if contract_sized:
+                    carry_equity = carry_equity + (float(last_pt["equity"]) - sub_run_capital)
+                else:
+                    local_mult_last = (last_pt["equity"] / sub_run_capital) if sub_run_capital > 0 else 1.0
+                    carry_equity = carry_equity * local_mult_last
 
             # Per-window summary + per-fold extras (B&H, realized vol, Sharpe CI).
-            extras = _fold_extras(df, oos_idx, oos_result, rng, bars_per_year)
+            extras = _fold_extras(df, oos_idx, oos_result, rng, bars_per_year,
+                                  oos_start_ts=oos_start)
             summary = {
                 "window_idx": w_idx + 1,
                 "is_start": is_start,
@@ -421,7 +498,8 @@ class WalkForwardJob:
                 "oos_end": oos_end,
                 "best_params": best_params,
                 "is_score": float(is_score) if is_score is not None and math.isfinite(is_score) else None,
-                "oos_stats": oos_result["stats"],
+                # In-window stats only (warm-up bars excluded — see _window_stats).
+                "oos_stats": _window_stats(oos_result, oos_start),
                 "optuna_trials": optuna_trials,
                 **extras,
             }
@@ -458,18 +536,24 @@ class WalkForwardJob:
             for tr in (w.get("optuna_trials") or []):
                 all_trials.append(tr)
             oos_stats = w.get("oos_stats") or {}
-            oos_sharpe = float(oos_stats.get("sharpe") or 0.0)
+            # Preserve None (window Sharpe not computable) — coercing to 0.0
+            # would count the window as "flat" in robustness denominators.
+            _s = oos_stats.get("sharpe")
+            oos_sharpe = float(_s) if _s is not None and math.isfinite(float(_s)) else None
             window_pairs.append({
                 "is_score": w.get("is_score"),
                 "oos_sharpe": oos_sharpe,
                 "oos_return_pct": float(oos_stats.get("total_return_pct") or 0.0),
             })
-            if best_oos_sharpe is None or oos_sharpe > best_oos_sharpe:
+            if oos_sharpe is not None and (best_oos_sharpe is None or oos_sharpe > best_oos_sharpe):
                 best_oos_sharpe = oos_sharpe
         wf_trials = {
             "optuna_trials": all_trials,
             "window_pairs": window_pairs,
             "best_sharpe_oos": best_oos_sharpe,
+            # The IS optimization metric — deflated Sharpe / WFE are only
+            # computed downstream when this is "sharpe" (unit-commensurable).
+            "metric": s["metric"],
         }
 
         if len(equity_arr) > 0:
@@ -531,7 +615,7 @@ class WalkForwardJob:
 
     # ---- per-window optimization ------------------------------------------
 
-    def _optimize_window(self, is_start: int, is_end: int):
+    def _optimize_window(self, is_warm_start: int, is_start: int, is_end: int):
         s = self.spec
         self.trial_idx = 0  # reset per window so progress bar resets
 
@@ -560,9 +644,11 @@ class WalkForwardJob:
                         params[name] = trial.suggest_float(name, low, high, log=log_scale)
             result = backtest_engine.run(
                 s["strategy_id"], s["symbol"], s["timeframe"],
-                params, start_time=is_start, end_time=is_end,
+                params, start_time=is_warm_start, end_time=is_end,
+                trade_start_time=is_start,
             )
-            score = _score_from_stats(result["stats"], s["metric"])
+            # Score on the in-window slice only (warm-up bars would dilute it).
+            score = _score_from_stats(_window_stats(result, is_start), s["metric"])
             self.trial_idx += 1
             # Throttle progress events: every trial is fine, payload is tiny.
             self._emit("wf_progress", {

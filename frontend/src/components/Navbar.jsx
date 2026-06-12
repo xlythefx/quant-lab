@@ -34,6 +34,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
           <NavLink href="#montecarlo"  active={view === "montecarlo"}>Monte Carlo</NavLink>
           <NavLink href="#costsweep"   active={view === "costsweep"}>Cost Sweep</NavLink>
           <NavLink href="#marketlab"   active={view === "marketlab"}>Market Lab</NavLink>
+          <NavLink href="#skills"      active={view === "skills"}>Skills</NavLink>
           <NavLink href="#strategies"  active={view === "strategies"}>Strategies</NavLink>
           <NavLink href="#livealerts"  active={view === "livealerts"}>Live Alerts</NavLink>
           <NavLink href="#settings"   active={view === "settings"}>Risk</NavLink>

@@ -12,7 +12,7 @@ const SESSION_LABELS = {
 
 export default function StrategyEditor({
   open, schema, params, onChange, onClose, onApply, onResetDefaults, onSaveAsDefault, color,
-  strategyId, builtinPresets = {},
+  strategyId, builtinPresets = {}, hiddenParams = [],
 }) {
   const [draft, setDraft] = useState(params || {});
   const [saved, setSaved] = useState(false);
@@ -38,13 +38,19 @@ export default function StrategyEditor({
     apiSavePresets(strategyId, obj).catch(() => {});
   };
 
+  // Hide sizing params that don't apply to the selected instrument: futures
+  // size by `contracts` (risk_pct is inert in the engine), crypto/spot sizes by
+  // `risk_pct` (contracts is inert). The backtest engine ignores the inert one
+  // either way — this just stops the panel from showing a dead control.
   const groups = useMemo(() => {
+    const hide = new Set(hiddenParams || []);
     const g = {};
     for (const spec of schema || []) {
+      if (hide.has(spec.name)) continue;
       (g[spec.group] ||= []).push(spec);
     }
     return g;
-  }, [schema]);
+  }, [schema, hiddenParams]);
 
   if (!open) return null;
 

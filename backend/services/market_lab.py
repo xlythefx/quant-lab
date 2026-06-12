@@ -30,6 +30,7 @@ import pandas as pd
 from scipy import stats
 
 from services import market_data
+from services import black_scholes
 from services.quant_metrics import infer_bars_per_year, _safe
 # Five-regime classifier lives in strategies/regime.py (neutral home) so both
 # Market Lab and tradeable strategies share one causal implementation.
@@ -135,6 +136,14 @@ def classify_regimes(symbol, timeframe, start, end, params=None) -> dict:
     c = df["close"].to_numpy(dtype=float)
     n = len(df)
     labels = _regime_labels(df, rp)
+    # Smoothing (smooth_bars > 1) merges short runs into their longer neighbor —
+    # including the NEXT one — so smoothed labels are NOT causal. They're fine
+    # for the display ribbon, but forward-return / transition stats must use the
+    # raw causal labels or the honesty guarantee is broken.
+    if int(rp.get("smooth_bars") or 0) > 1:
+        labels_stats = _regime_labels(df, {**rp, "smooth_bars": 0})
+    else:
+        labels_stats = labels
 
     # --- Run-length-encode into ribbon segments ---
     segments = []
@@ -159,12 +168,12 @@ def classify_regimes(symbol, timeframe, start, end, params=None) -> dict:
             "pct_time": _safe(100.0 * cnt / n) if n else 0.0,
         })
 
-    # --- Forward returns conditioned on current regime ---
+    # --- Forward returns conditioned on current regime (CAUSAL labels) ---
     # fwd[i] = close[i+h]/close[i] - 1, defined for i < n-h (drop last h: no look-ahead).
     forward_returns = []
     if n > fwd_horizon:
         fwd = c[fwd_horizon:] / c[:-fwd_horizon] - 1.0  # length n-h, aligned to bar i
-        lab_valid = labels[: n - fwd_horizon]
+        lab_valid = labels_stats[: n - fwd_horizon]
         for lab in REGIME_LABELS:
             mask = lab_valid == lab
             vals = fwd[mask]
@@ -182,11 +191,11 @@ def classify_regimes(symbol, timeframe, start, end, params=None) -> dict:
                     "avg_fwd_return_pct": None, "median_fwd_return_pct": None, "win_rate": None,
                 })
 
-    # --- Transition matrix + average run duration per regime ---
+    # --- Transition matrix + average run duration per regime (causal labels) ---
     transitions = {lab: {l2: 0 for l2 in REGIME_LABELS} for lab in REGIME_LABELS}
     n_transitions = 0
     for i in range(1, n):
-        a, b = labels[i - 1], labels[i]
+        a, b = labels_stats[i - 1], labels_stats[i]
         if a != b:
             transitions[a][b] += 1
             n_transitions += 1
@@ -220,6 +229,200 @@ def classify_regimes(symbol, timeframe, start, end, params=None) -> dict:
             "labels": REGIME_LABELS,
         }),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Module 1b — Causal HMM Regime Classifier (data-driven alternative)
+# --------------------------------------------------------------------------- #
+_HMM_CACHE = {}          # bounded LRU-ish cache: fitting the HMM is slow (~10-30s)
+_HMM_CACHE_MAX = 8
+
+
+def classify_regimes_hmm(symbol, timeframe, start, end, params=None) -> dict:
+    """Same response shape as classify_regimes(), but regimes come from a causal
+    Gaussian HMM (rolling refit + online filtering) instead of the rule tree.
+
+    Labels are the HMM's auto-named states (e.g. "Bull/Calm (trending)"). The first
+    ~warmup bars are unlabeled ("Warmup"). The fit is causal, so forward-return stats
+    are honest (no look-ahead). Results are cached because the fit is slow.
+    See services/strategies/regime_hmm.py.
+    """
+    import json
+    from services.strategies.regime_hmm import causal_hmm_labels
+
+    params = params or {}
+    fwd_horizon = max(1, _p(params, "fwd_horizon", 1))
+    edge_horizon = max(1, _p(params, "edge_horizon", 10))
+
+    key = json.dumps([symbol, timeframe, start, end, params], sort_keys=True, default=str)
+    if key in _HMM_CACHE:
+        return _HMM_CACHE[key]
+
+    df = _load_window(symbol, timeframe, start, end)
+    # Bound the work: the causal rolling-refit HMM is O(bars × refits), so a 250k-bar
+    # 15m range would take many minutes and time out. Cap to the most-recent N bars
+    # (the rolling refit means recent structure dominates anyway). Configurable.
+    available_bars = len(df)
+    max_bars = max(2000, _p(params, "max_bars", 15000))
+    capped = available_bars > max_bars
+    if capped:
+        df = df.tail(max_bars).reset_index(drop=True)
+    res = causal_hmm_labels(df, params)
+    time_a = res["times"]
+    c = res["close"].astype(float)
+    labels = res["labels"]                 # per-bar str ("Warmup" before first fit)
+    state_labels = res["state_labels"]     # ordered real-regime labels
+    n = len(labels)
+
+    # --- RLE into ribbon segments (Warmup included so the ribbon spans all bars) ---
+    segments = []
+    seg_start = 0
+    for i in range(1, n + 1):
+        if i == n or labels[i] != labels[seg_start]:
+            segments.append({
+                "regime": str(labels[seg_start]),
+                "start_time": int(time_a[seg_start]),
+                "end_time": int(time_a[i - 1]),
+                "bars": int(i - seg_start),
+            })
+            seg_start = i
+
+    # --- Distribution over the real (non-warmup) regimes ---
+    labeled = labels != "Warmup"
+    n_labeled = int(labeled.sum())
+    distribution = []
+    for lab in state_labels:
+        cnt = int(np.sum(labels == lab))
+        distribution.append({
+            "regime": lab, "bars": cnt,
+            "pct_time": _safe(100.0 * cnt / n_labeled) if n_labeled else 0.0,
+        })
+
+    # --- Forward returns conditioned on the (causal) regime ---
+    forward_returns = []
+    if n > fwd_horizon:
+        fwd = c[fwd_horizon:] / c[:-fwd_horizon] - 1.0
+        lab_valid = labels[: n - fwd_horizon]
+        for lab in state_labels:
+            vals = fwd[lab_valid == lab]
+            if vals.size:
+                forward_returns.append({
+                    "regime": lab, "n": int(vals.size),
+                    "avg_fwd_return_pct": _safe(100.0 * float(vals.mean())),
+                    "median_fwd_return_pct": _safe(100.0 * float(np.median(vals))),
+                    "win_rate": _safe(100.0 * float(np.mean(vals > 0))),
+                })
+            else:
+                forward_returns.append({
+                    "regime": lab, "n": 0, "avg_fwd_return_pct": None,
+                    "median_fwd_return_pct": None, "win_rate": None})
+
+    # --- Per-regime LONG vs SHORT directional edge over `edge_horizon` bars ---
+    # Honest "which side works in which regime": the return to going long (or short)
+    # in a regime, measured vs the symbol's unconditional drift (so a trending
+    # symbol's drift can't masquerade as a regime edge), with a one-sided t-test.
+    # Causal labels -> these stats are not look-ahead-biased. In-sample though:
+    # use them to NARROW what you then confirm in Walk-Forward.
+    side_edge = []
+    if n > edge_horizon:
+        efwd = c[edge_horizon:] / c[:-edge_horizon] - 1.0      # aligned to bar i
+        elab = labels[: n - edge_horizon]
+        emask = elab != "Warmup"
+        drift = float(np.mean(efwd[emask])) if emask.any() else 0.0
+        for lab in state_labels:
+            f = efwd[elab == lab]
+            side_edge.append({
+                "regime": lab,
+                "n": int(f.size),
+                "long": _edge_stats(f, drift),      # go long in this regime
+                "short": _edge_stats(-f, -drift),   # go short in this regime
+            })
+
+    # --- Transition matrix + durations over real regimes (skip Warmup edges) ---
+    transitions = {a: {b: 0 for b in state_labels} for a in state_labels}
+    n_transitions = 0
+    for i in range(1, n):
+        a, b = labels[i - 1], labels[i]
+        if a in transitions and b in transitions[a] and a != b:
+            transitions[a][b] += 1
+            n_transitions += 1
+    durations = {lab: [] for lab in state_labels}
+    for seg in segments:
+        if seg["regime"] in durations:
+            durations[seg["regime"]].append(seg["bars"])
+    avg_duration_bars = {
+        lab: _safe(float(np.mean(d))) if d else None for lab, d in durations.items()}
+
+    # --- OHLC candles (for the lightweight-charts candle view), capped for payload.
+    # Aligned to the feature-valid bars; regime label attached for band coloring.
+    candle_limit = max(500, _p(params, "candle_limit", 4000))
+    csub = df.set_index("time").reindex(time_a)
+    o = csub["open"].to_numpy(dtype=float)
+    h = csub["high"].to_numpy(dtype=float)
+    lo_ = csub["low"].to_numpy(dtype=float)
+    cl = csub["close"].to_numpy(dtype=float)
+    cstart = max(0, n - candle_limit)
+    candles = [
+        {"time": int(time_a[i]), "open": _safe(float(o[i])), "high": _safe(float(h[i])),
+         "low": _safe(float(lo_[i])), "close": _safe(float(cl[i])), "regime": str(labels[i])}
+        for i in range(cstart, n)
+    ]
+
+    # --- Per-state signature (trend / vol / Hurst means) for the HMM tab ---
+    state_means = res["state_means"]
+    states_info = []
+    for s, lab in enumerate(state_labels):
+        m = state_means[s]
+        states_info.append({
+            "regime": lab,
+            "pct_time": _safe(100.0 * float(res["pct_time"][s])),
+            "trend": _safe(float(m[0])),
+            "rv20": _safe(float(m[1])),
+            "hurst": _safe(float(m[2])),
+            "avg_duration_bars": avg_duration_bars.get(lab),
+        })
+
+    result = {
+        "segments": segments,
+        "last_regime": str(labels[-1]),
+        "price": _downsample(time_a, c),
+        "confidence_series": _downsample(time_a, res["confidence"]),
+        "candles": candles,
+        "states": states_info,
+        "distribution": distribution,
+        "forward_returns": forward_returns,
+        "side_edge": side_edge,
+        "edge_horizon": edge_horizon,
+        "transitions": {
+            "matrix": transitions, "n_transitions": int(n_transitions),
+            "avg_duration_bars": avg_duration_bars,
+        },
+        "meta": _meta(symbol, timeframe, df, {
+            "method": {
+                **{k: v for k, v in res["params"].items()},
+                "fwd_horizon": fwd_horizon,
+                "edge_horizon": edge_horizon,
+                "n_refits": res["n_refits"],
+                "warmup_bars": int(n - n_labeled),
+                "analyzed_bars": int(len(df)),
+                "available_bars": int(available_bars),
+                "capped": bool(capped),
+                "max_bars": int(max_bars),
+                "avg_confidence": _safe(float(np.nanmean(res["confidence"]))),
+                "engine": "causal Gaussian HMM (rolling refit + online filtering)",
+                "note": "Data-driven regimes from a causal Gaussian HMM: re-fit on a "
+                        "trailing window and labeled by the FILTERED posterior (no "
+                        "look-ahead), so forward-return stats are honest. State names are "
+                        "auto-derived from each state's trend/vol/Hurst signature. The first "
+                        "~warmup bars are unlabeled while the first model trains.",
+            },
+            "labels": state_labels,
+        }),
+    }
+    if len(_HMM_CACHE) >= _HMM_CACHE_MAX:
+        _HMM_CACHE.pop(next(iter(_HMM_CACHE)))
+    _HMM_CACHE[key] = result
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -267,20 +470,25 @@ def forecast_volatility(symbol, timeframe, start, end, params=None) -> dict:
     low = [d["acf"] for d in acf_sq if d["lag"] <= 5 and d["acf"] is not None]
     clustering_score = _safe(float(np.mean(low))) if low else None
 
-    # --- Forecast skill: causal next-period prediction vs realized next-period vol ---
-    # Predict rv[i+1] from info up to i; compare EWMA estimate and persistence baseline.
+    # --- Forecast skill: causal predictors vs NON-overlapping FORWARD vol ---
+    # Target = realized vol of the NEXT `horizon` returns (r[i+1 .. i+horizon]),
+    # which shares no bars with the predictors. The old target (the trailing
+    # 20-bar rv shifted by one) overlapped its own input on 19 of 20 bars, so
+    # "skill" was mechanically ~1 for any series — it measured the
+    # autocorrelation of a rolling window, not forecasting ability.
     ewma_skill = persistence_skill = None
-    if rv.size > rv_window + 2:
-        idx = np.arange(rv_window, rv.size - 1)
-        idx = idx[np.isfinite(rv[idx]) & np.isfinite(rv[idx + 1]) & np.isfinite(ewma_vol[idx])]
+    fwd_vol = pd.Series(r).rolling(horizon).std(ddof=1).shift(-horizon).to_numpy() * ann
+    if rv.size > rv_window + horizon + 2:
+        idx = np.arange(rv_window, rv.size)
+        idx = idx[np.isfinite(rv[idx]) & np.isfinite(fwd_vol[idx]) & np.isfinite(ewma_vol[idx])]
         if idx.size >= 5:
-            realized_next = rv[idx + 1]
+            realized_fwd = fwd_vol[idx]
             try:
-                ewma_skill = _safe(float(stats.pearsonr(ewma_vol[idx], realized_next)[0]))
+                ewma_skill = _safe(float(stats.pearsonr(ewma_vol[idx], realized_fwd)[0]))
             except Exception:
                 ewma_skill = None
             try:
-                persistence_skill = _safe(float(stats.pearsonr(rv[idx], realized_next)[0]))
+                persistence_skill = _safe(float(stats.pearsonr(rv[idx], realized_fwd)[0]))
             except Exception:
                 persistence_skill = None
 
@@ -541,7 +749,10 @@ def scan_mean_reversion(symbol, timeframe, start, end, params=None) -> dict:
     std = close.rolling(vwma_length).std(ddof=0).replace(0, 1e-9)  # ddof=0 matches the strategy
     zscore = ((close - mean) / std).to_numpy()
     rsi = _rsi(close, rsi_length).to_numpy()
-    regimes = _regime_labels(df, _regime_params(params))
+    # smooth_bars forced off: smoothed labels are future-dependent (a short run
+    # is merged into its longer NEXT neighbor) and would bias the by-regime
+    # edge stats. The smoothing knob remains a display-only concern.
+    regimes = _regime_labels(df, {**_regime_params(params), "smooth_bars": 0})
 
     # Forward return over the next `fwd_horizon` bars, aligned to bar i.
     fwd = np.full(n, np.nan)
@@ -621,6 +832,164 @@ def scan_mean_reversion(symbol, timeframe, start, end, params=None) -> dict:
                       "out-of-sample. 'Edge vs baseline' isolates the setup from the market's "
                       "drift; significance is a one-sided t-test of trade return vs that baseline. "
                       "Use it to NARROW what you then validate in Walk-Forward.",
+        }),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Module — Black-Scholes fade safety
+# --------------------------------------------------------------------------- #
+# Question this answers (straight from docs/black-scholes.md): do VWMA-reversion
+# setups that fire INSIDE the Black-Scholes "normal move" (low stretch) actually
+# carry the edge, while high-stretch / tail setups bleed? If yes, gating entries
+# on `fade_safe` has a real reason to exist; if not, it's just curve-fitting.
+#
+# It reuses the EXACT setup definition from scan_mean_reversion (same VWMA z-score
+# + RSI gate) and slices those setups by stretch instead of by regime. Causal:
+# every feature at bar i uses only bars <= i (rolling realized vol, rolling VWMA).
+#
+# `stretch` = |close - VWMA| / (close * realized_vol_per_bar * sqrt(1) * n_sigma).
+# Buckets mirror the doc's table: <=0.5 calm, <=1 normal, 1-2 stretched, >2 tail.
+_STRETCH_BUCKETS = [
+    ("Calm (<=0.5)",      0.0,        0.5),
+    ("Normal (0.5-1)",    0.5,        1.0),
+    ("Stretched (1-2)",   1.0,        2.0),
+    ("Tail (>2)",         2.0,        float("inf")),
+]
+
+
+def fade_safety_scan(symbol, timeframe, start, end, params=None) -> dict:
+    params = params or {}
+    vwma_length = _p(params, "vwma_length", 30)
+    rsi_length = _p(params, "rsi_length", 14)
+    z_threshold = _p(params, "z_threshold", 1.5)
+    rsi_long_max = _p(params, "rsi_long_max", 35)
+    rsi_short_min = _p(params, "rsi_short_min", 65)
+    fwd_horizon = max(1, _p(params, "fwd_horizon", 10))
+    vol_window = _p(params, "vol_window", 20)
+    n_sigma = _p(params, "n_sigma", 1.0)
+    # Timescale of the "normal" BS move. A deviation from a `vwma_length`-bar VWMA
+    # builds up over ~vwma_length bars, so the expected move must be measured over
+    # that same horizon (move ∝ √T) or every setup looks like a tail event. Default
+    # to vwma_length; expose as a knob so the user can probe the sensitivity.
+    bs_horizon = max(1, _p(params, "bs_horizon", vwma_length))
+
+    df = _load_window(symbol, timeframe, start, end)
+    close = df["close"].astype(float)
+    vol = df["volume"].astype(float) if "volume" in df.columns else pd.Series(1.0, index=df.index)
+    n = len(df)
+    c = close.to_numpy()
+
+    mean = _vwma(close, vol, vwma_length)
+    std = close.rolling(vwma_length).std(ddof=0).replace(0, 1e-9)  # ddof=0 matches the strategy
+    zscore = ((close - mean) / std).to_numpy()
+    rsi = _rsi(close, rsi_length).to_numpy()
+
+    # Black-Scholes expected move + stretch, anchored to the SAME VWMA the z-score
+    # uses. fade_safety() reads a "vwma" column if present, else a rolling mean —
+    # pass mean explicitly so the reference level matches the setup exactly.
+    fs = black_scholes.fade_safety(
+        df.assign(vwma=mean), vol_window=vol_window, n_sigma=n_sigma,
+        ref_col="vwma", horizon_bars=bs_horizon,
+    )
+    stretch = fs["stretch"].to_numpy()
+    bs_move = fs["bs_move"].to_numpy()
+
+    # Forward return over the next `fwd_horizon` bars, aligned to bar i.
+    fwd = np.full(n, np.nan)
+    if n > fwd_horizon:
+        fwd[: n - fwd_horizon] = c[fwd_horizon:] / c[: n - fwd_horizon] - 1.0
+    valid = np.isfinite(fwd) & np.isfinite(zscore) & np.isfinite(rsi) & np.isfinite(stretch)
+
+    drift = float(np.nanmean(fwd[valid])) if valid.any() else 0.0
+
+    long_setup = (zscore < -z_threshold) & (rsi < rsi_long_max) & valid
+    short_setup = (zscore > z_threshold) & (rsi > rsi_short_min) & valid
+    any_setup = long_setup | short_setup
+
+    # --- Edge per stretch bucket (long, short, and combined "fade" return) ---
+    def bucket_mask(lo, hi):
+        return (stretch >= lo) & (stretch < hi)
+
+    by_bucket = []
+    for label, lo, hi in _STRETCH_BUCKETS:
+        bm = bucket_mask(lo, hi)
+        lset = long_setup & bm
+        sset = short_setup & bm
+        # combined fade return: +fwd for longs, -fwd for shorts (return TO the trade)
+        fade_ret = np.concatenate([fwd[lset], -fwd[sset]]) if (lset.any() or sset.any()) else np.array([])
+        by_bucket.append({
+            "bucket": label,
+            "n_setups": int(lset.sum() + sset.sum()),
+            "long": _edge_stats(fwd[lset], drift),
+            "short": _edge_stats(-fwd[sset], -drift),
+            "fade": _edge_stats(fade_ret, 0.0),  # vs zero: is fading net-profitable here?
+        })
+
+    # --- stretch ceiling sweep: edge if you only fade when stretch <= X ---
+    # This is the actual filter VWMA Reversion would apply. Does tightening the
+    # ceiling improve the per-trade fade edge (filter helps) or just cut sample
+    # size with no improvement (filter is noise)?
+    ceil_grid = [round(0.25 * k, 2) for k in range(1, 13)]  # 0.25 .. 3.0
+    stretch_sweep = []
+    for x in ceil_grid:
+        lm = long_setup & (stretch <= x)
+        sm = short_setup & (stretch <= x)
+        fade_ret = np.concatenate([fwd[lm], -fwd[sm]]) if (lm.any() or sm.any()) else np.array([])
+        stretch_sweep.append({
+            "max_stretch": x,
+            "n": int(lm.sum() + sm.sum()),
+            "fade_edge_pct": _safe(float(fade_ret.mean()) * 100) if fade_ret.size else None,
+            "win_rate": _safe(float(np.mean(fade_ret > 0)) * 100) if fade_ret.size else None,
+        })
+
+    # --- stretch distribution across the setups (where do setups actually fire?) ---
+    setup_stretch = stretch[any_setup]
+    setup_stretch = setup_stretch[np.isfinite(setup_stretch)]
+    if setup_stretch.size:
+        pcts = np.percentile(setup_stretch, [25, 50, 75, 90])
+        safe_frac = float(np.mean(setup_stretch <= 1.0))
+        tail_frac = float(np.mean(setup_stretch > 2.0))
+    else:
+        pcts = [np.nan] * 4
+        safe_frac = tail_frac = float("nan")
+
+    # baseline "do nothing different" fade edge across ALL setups, any stretch.
+    all_fade = np.concatenate([fwd[long_setup], -fwd[short_setup]]) if any_setup.any() else np.array([])
+    unfiltered_edge = _safe(float(all_fade.mean()) * 100) if all_fade.size else None
+    safe_only = np.concatenate([fwd[long_setup & (stretch <= 1.0)], -fwd[short_setup & (stretch <= 1.0)]])
+    safe_edge = _safe(float(safe_only.mean()) * 100) if safe_only.size else None
+
+    return {
+        "by_bucket": by_bucket,
+        "stretch_sweep": stretch_sweep,
+        "baseline": {
+            "drift_pct": _safe(drift * 100),
+            "fwd_horizon": fwd_horizon,
+            "unfiltered_fade_edge_pct": unfiltered_edge,
+            "safe_only_fade_edge_pct": safe_edge,  # stretch <= 1 only
+            "n_setups": int(any_setup.sum()),
+        },
+        "setup_stretch": {
+            "p25": _safe(pcts[0]), "p50": _safe(pcts[1]),
+            "p75": _safe(pcts[2]), "p90": _safe(pcts[3]),
+            "pct_safe": _safe(safe_frac * 100),   # share of setups inside the normal range
+            "pct_tail": _safe(tail_frac * 100),   # share that are tail (>2x) events
+        },
+        "meta": _meta(symbol, timeframe, df, {
+            "setup": {
+                "vwma_length": vwma_length, "rsi_length": rsi_length,
+                "z_threshold": z_threshold, "rsi_long_max": rsi_long_max,
+                "rsi_short_min": rsi_short_min, "fwd_horizon": fwd_horizon,
+                "vol_window": vol_window, "n_sigma": n_sigma, "bs_horizon": bs_horizon,
+            },
+            "caveat": "In-sample, descriptive. Tests whether the Black-Scholes fade-safety "
+                      "filter (only fade when the move is within the normal range) actually "
+                      "separates winning from losing VWMA-reversion setups. The z-score entry "
+                      "and the stretch filter both measure distance from VWMA in different "
+                      "units, so they overlap — read 'fade edge' per bucket, not stretch alone. "
+                      "If low-stretch buckets win and high-stretch bleed, the filter has a real "
+                      "reason to exist. Confirm in Walk-Forward before trading it.",
         }),
     }
 
@@ -798,9 +1167,11 @@ def cluster_patterns(symbol, timeframe, start, end, params=None) -> dict:
     n = close.size
 
     # Build z-normalized shape vectors for windows ending at i (causal), keeping
-    # only windows that have a realized forward return (i + h < n).
+    # only windows that have a realized forward return (i + h < n). `stride`
+    # thins the window set — it was previously parsed but unused, which made
+    # adjacent near-identical windows dominate the clusters.
     shapes, ends, fwd = [], [], []
-    for i in range(W - 1, n):
+    for i in range(W - 1, n, stride):
         if i + h >= n:
             break
         win = close[i - W + 1: i + 1]

@@ -1,4 +1,4 @@
-const TFS = ["1m", "5m", "15m", "1h", "4h", "1d"];
+const TFS = ["1m", "3m", "5m", "6m", "10m", "12m", "15m", "23m", "30m", "46m", "1h", "2h", "4h", "1d"];
 
 export default function TimeframeSelector({ value, onChange, available }) {
   return (

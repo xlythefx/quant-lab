@@ -198,12 +198,20 @@ export default function Dashboard() {
   // Auto-correct timeframe whenever the symbol or mode changes.
   const _FUTURES_LIVE_TF = "1h";
   const _FUTURES_CLASSES = new Set(["equity_index_future", "commodity", "futures"]);
-  const _liveAssetClass = (
+  const _selAssetClass = (
     datasets.find((d) => d.symbol === symbol && (!broker || d.broker === broker))?.asset_class  // has backtest data
     || localStorage.getItem("ql.symbolSelector.assetClass")         // read active tab
     || "crypto"
   );
-  const _isFuturesLive = mode === "live" && _FUTURES_CLASSES.has(_liveAssetClass);
+  const _isFuturesLive = mode === "live" && _FUTURES_CLASSES.has(_selAssetClass);
+
+  // Mirror the backtest engine's sizing branch: index futures size by N
+  // contracts (asset_class equity_index_future/futures), everything else by
+  // %-of-equity (risk_pct). Hide whichever sizing control is inert for the
+  // selected instrument so the Settings panel never shows a dead slider.
+  const _CONTRACT_SIZED_CLASSES = new Set(["equity_index_future", "futures"]);
+  const _isContractSized = _CONTRACT_SIZED_CLASSES.has(_selAssetClass);
+  const _hiddenSizingParams = _isContractSized ? ["risk_pct"] : ["contracts"];
 
   useEffect(() => {
     if (!_isFuturesLive) return;
@@ -283,7 +291,9 @@ export default function Dashboard() {
           total_return_pct: valuePct - 100,
           total_return_dollars: ((valuePct - 100) / 100) * STARTING,
           trades: p.trades, win_rate: p.win_rate,
-          max_drawdown_pct: p.drawdown,
+          // p.drawdown is the CURRENT drawdown at this bar (≤ 0); the "Max DD"
+          // column needs the running minimum, not the instantaneous value.
+          max_drawdown_pct: Math.min(prev[p.strategy_id]?.max_drawdown_pct ?? 0, p.drawdown),
         },
       }));
       const trade = p.trade;
@@ -866,6 +876,7 @@ export default function Dashboard() {
             params={s.params}
             strategyId={s.id}
             builtinPresets={meta.presets || {}}
+            hiddenParams={_hiddenSizingParams}
             onClose={() => setEditingId(null)}
             onApply={(p) => { onApplyParams(s.id, p); setEditingId(null); }}
             onSaveAsDefault={(p) => saveUserDefaults(s.id, p)}

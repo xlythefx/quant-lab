@@ -63,6 +63,7 @@ import pandas as pd
 from services.strategies.base import (
     Strategy, StrategyMeta, ParamSpec, ParamType, Signal, OverlaySpec,
 )
+from services.strategies.session_utils import et_ordinal_days
 
 _UNIX_EPOCH_JD = 2440587.5
 _LUNAR_PERIOD  = 29.53059
@@ -79,12 +80,19 @@ _PHASE_OFFSET     = 0.4137
 
 
 def _moon_phase(times_s) -> pd.Series:
-    """Date-based moon phase — ONE value per UTC calendar day (a step function),
+    """Date-based moon phase — ONE value per ET calendar day (a step function),
     matching TS where `Phase` is computed from `Date` with no intraday component.
-    Returns a triangle wave: 1.0 at the cycle peak (full-moon proxy), 0.0 at trough."""
-    arr        = np.asarray(times_s, dtype=float)
-    day_mid    = np.floor(arr / 86400.0) * 86400.0        # truncate to UTC midnight
-    ts_julian  = day_mid / 86400.0 + _UNIX_EPOCH_JD - _TS_JULIAN_OFFSET  # TS DateToJulian
+    Returns a triangle wave: 1.0 at the cycle peak (full-moon proxy), 0.0 at trough.
+
+    The date basis is US-Eastern (the CME session timezone), not UTC — see
+    session_utils.et_ordinal_days. For this strategy the change is near-cosmetic
+    (~0.2% of session-open phases move, since the 22:00/23:00-UTC open bar already
+    shares the ET date), but it makes the date correct-by-construction rather than
+    correct-by-accident of the parquet's UTC offset. TS DateToJulian and
+    astronomical JD differ by a constant; _UNIX_EPOCH_JD - _TS_JULIAN_OFFSET folds
+    to the integer 25569.0, so ordinal-ET-days + that constant = TS's Julian day."""
+    d_et       = et_ordinal_days(times_s)                  # ET calendar date (ordinal days)
+    ts_julian  = d_et + (_UNIX_EPOCH_JD - _TS_JULIAN_OFFSET)  # TS DateToJulian, ET-based
     raw        = ts_julian / _LUNAR_PERIOD + _PHASE_OFFSET
     frac       = raw - np.floor(raw)
     result     = np.abs(2.0 * (frac - 0.5))
@@ -102,7 +110,7 @@ def _session_ids(times: np.ndarray) -> np.ndarray:
 
 
 def _session_atr_rising(df: pd.DataFrame, atr_period: int,
-                        atr_rising_mult: float) -> np.ndarray:
+                        atr_rising_mult: float, use_hlc3: bool = False) -> np.ndarray:
     """
     True session-level ATR comparison matching TS `avgtruerange(N) of data2`
     where data2 is 1380m (one full session per bar).
@@ -127,14 +135,18 @@ def _session_atr_rising(df: pd.DataFrame, atr_period: int,
         sess_l[i] = low[mask].min()
         sess_c[i] = close[np.where(mask)[0][-1]]
 
+    # HLC3 variant: feed True Range its typical price (H+L+C)/3 as the per-session
+    # reference "close" instead of the raw close. use_hlc3=False -> original behavior.
+    sess_ref = (sess_h + sess_l + sess_c) / 3.0 if use_hlc3 else sess_c
+
     # Wilder ATR on session bars
     alpha = 1.0 / atr_period
     sess_atr = np.full(m, np.nan)
     for i in range(m):
         h = sess_h[i]; l = sess_l[i]
         tr = (h - l) if i == 0 else max(h - l,
-                                        abs(h - sess_c[i - 1]),
-                                        abs(l - sess_c[i - 1]))
+                                        abs(h - sess_ref[i - 1]),
+                                        abs(l - sess_ref[i - 1]))
         sess_atr[i] = tr if (i == 0 or not np.isfinite(sess_atr[i - 1])) else \
                       sess_atr[i - 1] * (1 - alpha) + tr * alpha
 
@@ -156,6 +168,9 @@ def _session_atr_rising(df: pd.DataFrame, atr_period: int,
 
 
 class LunarStrategy(Strategy):
+    # Price basis for the session-ATR filter; HLC3 subclass flips this to True.
+    USE_HLC3 = False
+
     PARAM_SCHEMA = [
         ParamSpec("phase_lag_near", ParamType.INT, 2,  min=1,  max=20, step=1, group="Phase",
                   description="Near lag in SESSIONS. Phase is date-based (one value per "
@@ -300,14 +315,20 @@ class LunarStrategy(Strategy):
         lf = int(p["phase_lag_far"])
         sess_peak   = np.zeros(nS, dtype=bool)
         sess_trough = np.zeros(nS, dtype=bool)
-        for s in range(lf, nS):
+        # Floor at the LARGEST lag, not just `far`. The strategy assumes
+        # near<mid<far, but the Walk-Forward Optuna search varies the three
+        # lags independently, so an ordering like near>far would push
+        # sess_phase[s-near] to a negative index past the array start (e.g.
+        # far=3,near=20,nS=15 → sess_phase[-17]). max() keeps all three in bounds.
+        for s in range(max(ln, lm, lf), nS):
             pn, pm, pf = sess_phase[s - ln], sess_phase[s - lm], sess_phase[s - lf]
             sess_peak[s]   = (pn < pm) and (pm > pf)
             sess_trough[s] = (pn > pm) and (pm < pf)
 
         # FIX 1: True session-level ATR matching TS data2 (1380m), mapped per session.
         atr_rising_bar  = _session_atr_rising(out, int(p["atr_period"]),
-                                              float(p["atr_rising_mult"]))
+                                              float(p["atr_rising_mult"]),
+                                              use_hlc3=self.USE_HLC3)
         atr_rising_sess = atr_rising_bar[sess_open_bar] if nS else np.array([])
 
         # Per-bar entry/exit arrays — TRUE only at session-open bars (TS OpenS gate).
@@ -503,7 +524,9 @@ class LunarStrategy(Strategy):
         for i in range(len(times_arr)):
             if i == 0 or sids_live[i] != sids_live[i - 1]:
                 sopen_live[sids_live[i]] = i
-        if nS_live <= lf:
+        # Need enough sessions to cover the LARGEST lag (lags may be searched
+        # out of the assumed near<mid<far order — see vectorized()).
+        if nS_live <= max(ln, lm, lf):
             return None
         sess_phase = np.array([phase_a[sopen_live[s]] for s in range(nS_live)])
 
@@ -514,7 +537,8 @@ class LunarStrategy(Strategy):
 
         # FIX 1: true session-level ATR from buffer
         atr_rising_arr = _session_atr_rising(df, int(p["atr_period"]),
-                                             float(p["atr_rising_mult"]))
+                                             float(p["atr_rising_mult"]),
+                                             use_hlc3=self.USE_HLC3)
         atr_rising = bool(atr_rising_arr[-1])
 
         c  = float(df["close"].iloc[-1])

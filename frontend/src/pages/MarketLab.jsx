@@ -7,15 +7,16 @@ import { usePersistentState } from "../services/usePersistentState.js";
 import { KpiCard, Section, InsightCard, TabBar } from "../components/analytics/primitives.jsx";
 import { fmtNum, fmtPct, fmtInt } from "../services/format.js";
 import {
-  getSymbols, marketLabRegime, marketLabVolatility, marketLabStatistics, marketLabScan,
-  marketLabFeatureImportance, marketLabScanBatch, marketLabPatterns, marketLabSimilarity,
+  getSymbols, marketLabRegime, marketLabRegimeHmm, marketLabVolatility, marketLabStatistics, marketLabScan,
+  marketLabFadeSafety, marketLabFeatureImportance, marketLabScanBatch, marketLabPatterns, marketLabSimilarity,
   getPresets, savePresets,
   startModelBench, cancelModelBench, getModelBenchStatus, getModelBenchLastResult,
 } from "../services/api.js";
 import { subscribeModelBench } from "../services/socket.js";
 import {
-  RegimeRibbon, REGIME_COLORS, VBarChart, LineChart, HistogramChart, CentroidShape, EdgeHeatmap,
+  RegimeRibbon, REGIME_COLORS, buildRegimeColors, VBarChart, LineChart, HistogramChart, CentroidShape, EdgeHeatmap,
 } from "../components/marketlab/charts.jsx";
+import RegimeCandleChart from "../components/marketlab/RegimeCandleChart.jsx";
 
 // ---- date helpers (same convention as WalkForward) ----
 function dateStrToEpoch(s, endOfDay = false) {
@@ -31,9 +32,11 @@ function fmtDate(epoch) {
 
 const TABS = [
   { id: "regime", label: "Regime" },
+  { id: "regimehmm", label: "HMM Regime" },
   { id: "volatility", label: "Volatility" },
   { id: "statistics", label: "Statistics" },
   { id: "scanner", label: "Alpha Scanner" },
+  { id: "fadesafety", label: "Fade Safety" },
   { id: "features", label: "Feature Importance" },
   { id: "patterns", label: "Pattern Finder" },
   { id: "similarity", label: "Similarity" },
@@ -51,6 +54,21 @@ const SCAN_DEFAULTS = {
   vwma_length: 30, rsi_length: 14, z_threshold: 1.5,
   rsi_long_max: 35, rsi_short_min: 65, fwd_horizon: 10,
 };
+
+// Black-Scholes fade safety — reuses the VWMA-reversion setup plus the BS knobs
+// (vol window for realized sigma, n_sigma = how many sigmas count as "normal").
+const FADESAFE_DEFAULTS = {
+  vwma_length: 30, rsi_length: 14, z_threshold: 1.5,
+  rsi_long_max: 35, rsi_short_min: 65, fwd_horizon: 10,
+  vol_window: 20, n_sigma: 1.0, bs_horizon: 30,
+};
+const FADESAFE_FIELDS = [
+  ["vwma_length", "VWMA length", 1], ["z_threshold", "Z threshold", 0.1],
+  ["rsi_length", "RSI length", 1], ["rsi_long_max", "RSI long <", 1],
+  ["rsi_short_min", "RSI short >", 1], ["fwd_horizon", "Forward bars", 1],
+  ["vol_window", "Vol window (σ)", 1], ["n_sigma", "n·σ = normal", 0.1],
+  ["bs_horizon", "BS horizon (bars)", 1],
+];
 const z1 = (v) => v.toFixed(1);
 const SCAN_KNOBS = [
   { key: "vwma_length", label: "VWMA length", min: 5, max: 200, step: 1 },
@@ -79,6 +97,25 @@ const REGIME_KNOBS = [
   { key: "fwd_horizon", label: "Forward bars", min: 1, max: 50, step: 1 },
 ];
 
+// Causal Gaussian-HMM regime engine (data-driven alternative to the rule tree).
+const HMM_DEFAULTS = {
+  n_states: 4, trend_window: 36, rv_window: 20, hurst_window: 250,
+  train_window: 4380, refit_every: 1080, warmup: 2160, fwd_horizon: 1, edge_horizon: 10,
+  max_bars: 15000,
+};
+const HMM_KNOBS = [
+  { key: "n_states", label: "States", min: 2, max: 6, step: 1 },
+  { key: "trend_window", label: "Trend window", min: 5, max: 120, step: 1 },
+  { key: "rv_window", label: "Vol window", min: 5, max: 60, step: 1 },
+  { key: "hurst_window", label: "Hurst window", min: 50, max: 1000, step: 10 },
+  { key: "train_window", label: "Train window", min: 1000, max: 17000, step: 100 },
+  { key: "refit_every", label: "Refit every", min: 120, max: 3000, step: 20 },
+  { key: "warmup", label: "Warmup", min: 500, max: 6000, step: 50 },
+  { key: "fwd_horizon", label: "Forward bars", min: 1, max: 50, step: 1 },
+  { key: "edge_horizon", label: "Edge horizon", min: 1, max: 50, step: 1 },
+  { key: "max_bars", label: "Max bars", min: 2000, max: 60000, step: 1000 },
+];
+
 function getTabFromHash() {
   const m = window.location.hash.match(/tab=([^&]+)/);
   const t = m ? decodeURIComponent(m[1]) : "regime";
@@ -104,16 +141,19 @@ export default function MarketLab() {
   const onTab = (id) => { setTabInHash(id); setTab(id); };
 
   // per-tab result cache + loading/error
-  const blank = { regime: null, volatility: null, statistics: null, scanner: null, features: null, patterns: null, similarity: null };
+  const blank = { regime: null, regimehmm: null, volatility: null, statistics: null, scanner: null, fadesafety: null, features: null, patterns: null, similarity: null };
   const [results, setResults] = useState(blank);
   const [loading, setLoading] = useState({ ...blank, regime: false });
   const [errors, setErrors] = useState(blank);
   const [scanParams, setScanParams] = usePersistentState("ql.mlab.scan", SCAN_DEFAULTS);
+  const [fadeParams, setFadeParams] = usePersistentState("ql.mlab.fade", FADESAFE_DEFAULTS);
   const [regimeParams, setRegimeParams] = usePersistentState("ql.mlab.regimeparams", REGIME_DEFAULTS);
+  const [hmmParams, setHmmParams] = usePersistentState("ql.mlab.hmmparams", HMM_DEFAULTS);
   const [featureParams, setFeatureParams] = usePersistentState("ql.mlab.features", FEATURE_DEFAULTS);
   const [patternParams, setPatternParams] = usePersistentState("ql.mlab.patterns", PATTERN_DEFAULTS);
   const [simParams, setSimParams] = usePersistentState("ql.mlab.sim", SIM_DEFAULTS);
   const [regimeModalOpen, setRegimeModalOpen] = useState(false);
+  const [hmmModalOpen, setHmmModalOpen] = useState(false);
   const [scanModalOpen, setScanModalOpen] = useState(false);
 
   // ---- load symbols + datasets on mount ----
@@ -157,13 +197,17 @@ export default function MarketLab() {
   const canRun = !!symbol && !!currentDataset;
 
   const API = {
-    regime: marketLabRegime, volatility: marketLabVolatility, statistics: marketLabStatistics,
-    scanner: marketLabScan, features: marketLabFeatureImportance,
+    regime: marketLabRegime, regimehmm: marketLabRegimeHmm,
+    volatility: marketLabVolatility, statistics: marketLabStatistics,
+    scanner: marketLabScan, fadesafety: marketLabFadeSafety,
+    features: marketLabFeatureImportance,
     patterns: marketLabPatterns, similarity: marketLabSimilarity,
   };
   const paramsFor = (which) => ({
     scanner: { ...regimeParams, ...scanParams },
+    fadesafety: fadeParams,
     regime: regimeParams,
+    regimehmm: hmmParams,
     features: { ...regimeParams, ...featureParams },
     patterns: patternParams,
     similarity: simParams,
@@ -242,12 +286,22 @@ export default function MarketLab() {
             summary={`ADX ${regimeParams.adx_period}/${regimeParams.adx_trend_thresh} · vol ${regimeParams.vol_window} in ${regimeParams.vol_lookback} · smooth ${regimeParams.smooth_bars}`}
             onOpen={() => setRegimeModalOpen(true)} />
         )}
+        {tab === "regimehmm" && (
+          <KnobTrigger label="HMM settings"
+            summary={`${hmmParams.n_states} states · trend ${hmmParams.trend_window} · vol ${hmmParams.rv_window} · hurst ${hmmParams.hurst_window} · refit ${hmmParams.refit_every}/${hmmParams.train_window}`}
+            onOpen={() => setHmmModalOpen(true)} />
+        )}
         {tab === "scanner" && (
           <KnobTrigger label="Setup definition"
             summary={`VWMA ${scanParams.vwma_length} · z ${z1(scanParams.z_threshold)} · RSI ${scanParams.rsi_length} (long<${scanParams.rsi_long_max}, short>${scanParams.rsi_short_min}) · fwd ${scanParams.fwd_horizon}`}
             onOpen={() => setScanModalOpen(true)} />
         )}
 
+        {tab === "fadesafety" && (
+          <ParamsBar title="Fade-safety setup" fields={FADESAFE_FIELDS} params={fadeParams}
+            onChange={setFadeParams} onReset={() => setFadeParams(FADESAFE_DEFAULTS)}
+            hint="Same VWMA z-score + RSI setup as the Alpha Scanner, but bucketed by the Black-Scholes 'stretch' (how big the faded move is vs a statistically normal move). Tests whether low-stretch fades carry the edge and tail-stretch fades bleed — i.e. whether a fade_safe filter is worth adding to VWMA Reversion." />
+        )}
         {tab === "features" && (
           <ParamsBar title="Feature settings" fields={FEATURE_FIELDS} params={featureParams}
             onChange={setFeatureParams} onReset={() => setFeatureParams(FEATURE_DEFAULTS)}
@@ -265,6 +319,7 @@ export default function MarketLab() {
         )}
 
         {tab === "regime" && <RegimeTab data={results.regime} loading={loading.regime} />}
+        {tab === "regimehmm" && <HmmRegimeTab data={results.regimehmm} loading={loading.regimehmm} />}
         {tab === "volatility" && <VolatilityTab data={results.volatility} loading={loading.volatility} />}
         {tab === "statistics" && <StatisticsTab data={results.statistics} loading={loading.statistics} />}
         {tab === "scanner" && (
@@ -272,6 +327,7 @@ export default function MarketLab() {
             symbol={symbol} scanParams={scanParams} regimeParams={regimeParams}
             symbols={symbols} timeframe={timeframe} range={range} />
         )}
+        {tab === "fadesafety" && <FadeSafetyTab data={results.fadesafety} loading={loading.fadesafety} />}
         {tab === "features" && <FeaturesTab data={results.features} loading={loading.features} />}
         {tab === "patterns" && <PatternsTab data={results.patterns} loading={loading.patterns} />}
         {tab === "similarity" && <SimilarityTab data={results.similarity} loading={loading.similarity} />}
@@ -284,6 +340,14 @@ export default function MarketLab() {
         onClose={() => setRegimeModalOpen(false)}
         onRun={() => { setRegimeModalOpen(false); runActive(); }}
         running={loading.regime} />
+
+      <KnobModal open={hmmModalOpen} title="HMM settings" knobs={HMM_KNOBS}
+        params={hmmParams} onChange={setHmmParams}
+        onReset={() => setHmmParams(HMM_DEFAULTS)}
+        onClose={() => setHmmModalOpen(false)}
+        onRun={() => { setHmmModalOpen(false); runActive(); }}
+        running={loading.regime}
+        footer={<p className="text-[11px] text-muted">Causal Gaussian HMM: re-fit every <span className="font-mono">refit</span> bars on a trailing <span className="font-mono">train</span> window, labeled by the filtered posterior (no look-ahead). More states / smaller refit interval = slower.</p>} />
 
       <KnobModal open={scanModalOpen} title="Setup definition" knobs={SCAN_KNOBS}
         params={scanParams} onChange={setScanParams}
@@ -384,10 +448,182 @@ function RegimeTab({ data, loading }) {
   );
 }
 
-function Legend() {
+// --------------------------------------------------------------------------- //
+// HMM Regime tab — causal Gaussian-HMM regimes with state-signature panels
+// --------------------------------------------------------------------------- //
+function HmmRegimeTab({ data, loading }) {
+  if (!data) return (
+    <EmptyState loading={loading}
+      text="Pick a symbol and click Run Analysis. First HMM run takes ~45s (the model is re-fit across history); after that it's cached." />
+  );
+
+  const labels = data.meta?.labels || [];
+  const colors = buildRegimeColors(labels);
+  const method = data.meta?.method || {};
+  const states = data.states || [];
+  const mostCommon = [...data.distribution].sort((a, b) => b.bars - a.bars)[0];
+
+  // Which side is tradeable in which regime (significant positive edge vs baseline).
+  const sideEdge = data.side_edge || [];
+  const sigSide = (s) => s && s.significance === "significant" && s.edge_vs_baseline_pct > 0;
+  const longRegimes = sideEdge.filter((r) => sigSide(r.long)).map((r) => r.regime);
+  const shortRegimes = sideEdge.filter((r) => sigSide(r.short)).map((r) => r.regime);
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard title="Current regime" value={<span style={{ color: colors[data.last_regime] }}>{data.last_regime}</span>} />
+        <KpiCard title="States" value={fmtInt(method.n_states)} sub={`${fmtInt(method.n_refits)} refits`} />
+        <KpiCard title="Avg confidence"
+                 value={method.avg_confidence == null ? "—" : `${fmtNum(method.avg_confidence * 100)}%`}
+                 sub="filtered posterior" />
+        <KpiCard title="Dominant" value={mostCommon?.regime ? short(mostCommon.regime) : "—"}
+                 sub={mostCommon ? `${fmtNum(mostCommon.pct_time)}% of bars` : ""} />
+      </div>
+
+      <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 px-4 py-2.5 text-[11px] text-muted">
+        <span className="text-accent-blue font-medium">Causal Gaussian HMM</span>
+        {` — ${method.n_states} states, re-fit ${method.n_refits}× on a ${method.train_window}-bar trailing window every ${method.refit_every} bars. `}
+        {`First ~${method.warmup_bars} bars are unlabeled warmup. Labels come from the filtered posterior (forward pass only — no look-ahead), so the forward-return stats below are honest. State names are auto-derived from each state's trend / volatility / Hurst signature.`}
+      </div>
+
+      {method.capped && (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-[11px] text-amber-300">
+          Analyzed the most recent <strong>{fmtInt(method.analyzed_bars)}</strong> of {fmtInt(method.available_bars)} bars
+          for speed (fitting the HMM on the full range would time out). Raise <span className="font-mono">Max bars</span> in
+          the knobs, or use a higher timeframe / shorter date range to cover more history.
+        </div>
+      )}
+
+      <Card title="OHLC + regime" hint={`Candlesticks (blue up / red down) with the detected regime shaded behind them — most recent ${fmtInt((data.candles || []).length)} bars. Scroll/zoom to explore.`}>
+        <RegimeCandleChart candles={data.candles} segments={data.segments} colors={colors} height={380} />
+        <Legend labels={labels} colors={colors} hmm />
+      </Card>
+
+      <Card title="Regime ribbon (full window)" hint="Price (grey line) with the HMM regime colored beneath each bar across the whole analyzed window. Hover a band for its label.">
+        <RegimeRibbon segments={data.segments} price={data.price} height={180} colors={colors} />
+        <Legend labels={labels} colors={colors} hmm />
+      </Card>
+
+      <Card title="State signatures" hint="What each discovered state looks like — the mean of its three observation features, % of time, and average run length. This is how to read what the HMM found.">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[11px] uppercase tracking-wider text-muted text-left">
+              <th className="py-1">State</th><th>Trend (%/bar)</th><th>Realized vol</th>
+              <th>Hurst</th><th>% time</th><th className="text-right">Avg run (bars)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {states.map((s) => (
+              <tr key={s.regime} className="border-t border-line/50">
+                <td className="py-1.5 font-medium" style={{ color: colors[s.regime] }}>{s.regime}</td>
+                <td className={signClass(s.trend)}>{s.trend == null ? "—" : (s.trend * 100).toFixed(4)}</td>
+                <td className="text-muted">{s.rv20 == null ? "—" : (s.rv20 * 100).toFixed(3)}%</td>
+                <td className={s.hurst > 0.55 ? "text-profit" : s.hurst < 0.45 ? "text-loss" : "text-muted"}>
+                  {s.hurst == null ? "—" : fmtNum(s.hurst)}
+                </td>
+                <td className="text-muted">{fmtNum(s.pct_time)}%</td>
+                <td className="text-right text-muted">{s.avg_duration_bars == null ? "—" : fmtNum(s.avg_duration_bars)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="text-[11px] text-muted mt-2">
+          Hurst &gt; 0.5 = persistent/trending, &lt; 0.5 = mean-reverting. States are ordered bear→bull by mean trend.
+        </p>
+      </Card>
+
+      <Card title="Regime confidence over time" hint="The filtered posterior probability of the most-likely state at each bar. Low stretches = the model is unsure which regime it's in.">
+        <LineChart points={(data.confidence_series || []).map((p) => ({ time: p.time, value: p.value }))}
+                   height={180} yLabel="confidence" fmt={(x) => `${fmtNum(x * 100)}%`} />
+      </Card>
+
+      <div className="grid md:grid-cols-2 gap-5">
+        <Card title="Time spent in each regime">
+          <VBarChart
+            bars={data.distribution.map((d) => ({ label: short(d.regime), value: d.pct_time, n: d.bars }))}
+            colorMode="fixed" color="#60a5fa" height={200} yLabel="% of bars" fmt={(v) => `${fmtNum(v)}`} />
+        </Card>
+        <Card title="What happens next" hint="Average return over the next bar, conditioned on the current (causal) regime.">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-[11px] uppercase tracking-wider text-muted text-left">
+                <th className="py-1">Regime</th><th>Avg next</th><th>Win rate</th><th className="text-right">n</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.forward_returns?.map((r) => (
+                <tr key={r.regime} className="border-t border-line/50">
+                  <td className="py-1.5" style={{ color: colors[r.regime] }}>{short(r.regime)}</td>
+                  <td className={signClass(r.avg_fwd_return_pct)}>{pct(r.avg_fwd_return_pct)}</td>
+                  <td className="text-muted">{r.win_rate == null ? "—" : `${fmtNum(r.win_rate)}%`}</td>
+                  <td className="text-right text-muted">{fmtInt(r.n)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      </div>
+
+      <Card title="Long vs short edge by regime"
+            hint={`Directional edge over the next ${data.edge_horizon} bars if you go long (or short) in each regime, measured vs the symbol's unconditional drift, with a one-sided t-test. This answers "which side works in which regime" — e.g. short only in bear.`}>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[11px] uppercase tracking-wider text-muted text-left">
+              <th className="py-1">Regime</th>
+              <th>Long edge</th><th>Long sig</th>
+              <th>Short edge</th><th>Short sig</th>
+              <th className="text-right">n</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sideEdge.map((r) => (
+              <tr key={r.regime} className="border-t border-line/50">
+                <td className="py-1.5 font-medium" style={{ color: colors[r.regime] }}>{short(r.regime)}</td>
+                <td className={signClass(r.long?.edge_vs_baseline_pct)}>{pct(r.long?.edge_vs_baseline_pct)}</td>
+                <td><SigBadge sig={r.long?.significance} /></td>
+                <td className={signClass(r.short?.edge_vs_baseline_pct)}>{pct(r.short?.edge_vs_baseline_pct)}</td>
+                <td><SigBadge sig={r.short?.significance} /></td>
+                <td className="text-right text-muted">{fmtInt(r.n)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="mt-3 rounded-md border border-line bg-bg-elev/30 px-3 py-2 text-[11px] text-muted space-y-1">
+          <div>
+            <span className="text-profit font-medium">Long</span> shows a significant edge in:{" "}
+            {longRegimes.length ? longRegimes.map(short).join(", ") : <span className="text-muted">no regime</span>}
+          </div>
+          <div>
+            <span className="text-loss font-medium">Short</span> shows a significant edge in:{" "}
+            {shortRegimes.length ? shortRegimes.map(short).join(", ") : <span className="text-muted">no regime</span>}
+          </div>
+          <div className="text-dim pt-1">
+            If one side is never significant, that's a candidate to turn off. "Edge vs baseline" isolates the
+            regime from the symbol's overall drift; significance is a one-sided t-test. <strong>In-sample</strong> —
+            confirm any choice in Walk-Forward before trading it.
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Regime transitions" hint="How often the market moves from one HMM regime (row) to another (column).">
+        <TransitionMatrix transitions={data.transitions} labels={labels} colors={colors} />
+      </Card>
+
+      <p className="text-[11px] text-muted">{method.note}</p>
+    </div>
+  );
+}
+
+function Legend({ labels, colors, hmm }) {
+  // HMM labels are dynamic → drive the legend off the data's label set; the rule-based
+  // engine uses the fixed semantic palette.
+  const entries = hmm
+    ? (labels || []).map((l) => [l, (colors || {})[l]])
+    : Object.entries(REGIME_COLORS);
   return (
     <div className="flex flex-wrap gap-3 text-[11px] text-muted pt-1">
-      {Object.entries(REGIME_COLORS).map(([k, c]) => (
+      {entries.map(([k, c]) => (
         <span key={k} className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm" style={{ background: c }} />{k}
         </span>
@@ -396,7 +632,7 @@ function Legend() {
   );
 }
 
-function TransitionMatrix({ transitions, labels }) {
+function TransitionMatrix({ transitions, labels, colors = REGIME_COLORS }) {
   if (!transitions?.matrix) return null;
   const m = transitions.matrix;
   const max = Math.max(1, ...labels.flatMap((a) => labels.map((b) => m[a]?.[b] || 0)));
@@ -406,13 +642,13 @@ function TransitionMatrix({ transitions, labels }) {
         <thead>
           <tr>
             <th className="p-1.5 text-muted text-left">from \ to</th>
-            {labels.map((l) => <th key={l} className="p-1.5 text-muted font-normal whitespace-nowrap" style={{ color: REGIME_COLORS[l] }}>{short(l)}</th>)}
+            {labels.map((l) => <th key={l} className="p-1.5 text-muted font-normal whitespace-nowrap" style={{ color: colors[l] }}>{short(l)}</th>)}
           </tr>
         </thead>
         <tbody>
           {labels.map((a) => (
             <tr key={a}>
-              <td className="p-1.5 whitespace-nowrap" style={{ color: REGIME_COLORS[a] }}>{short(a)}</td>
+              <td className="p-1.5 whitespace-nowrap" style={{ color: colors[a] }}>{short(a)}</td>
               {labels.map((b) => {
                 const v = m[a]?.[b] || 0;
                 const intensity = v / max;
@@ -982,6 +1218,107 @@ function SideBlock({ title, block, baselineHint }) {
         </tbody>
       </table>
     </Card>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// Fade Safety tab — Black-Scholes stretch buckets over the VWMA-reversion setup
+// --------------------------------------------------------------------------- //
+function FadeSafetyTab({ data, loading }) {
+  if (!data) return <EmptyState loading={loading} text="Set the setup above and click Run Analysis." />;
+
+  const base = data.baseline || {};
+  const dist = data.setup_stretch || {};
+  const buckets = data.by_bucket || [];
+  const sweep = data.stretch_sweep || [];
+
+  const unfiltered = base.unfiltered_fade_edge_pct;
+  const safeOnly = base.safe_only_fade_edge_pct;
+  const filterHelps = unfiltered != null && safeOnly != null && safeOnly > unfiltered;
+  const lift = unfiltered != null && safeOnly != null ? safeOnly - unfiltered : null;
+
+  // Does the per-trade fade edge decay as stretch grows? (the core question)
+  const calm = buckets.find((b) => b.bucket.startsWith("Calm"));
+  const tail = buckets.find((b) => b.bucket.startsWith("Tail"));
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 px-4 py-2.5 text-[11px] text-muted">
+        <span className="text-accent-blue font-medium">Black-Scholes fade safety</span>
+        {` — "stretch" = how far price moved from VWMA ÷ a statistically normal move (price × realized σ × √horizon). `}
+        {`stretch ≤ 1 = the move is ordinary (safe to fade); stretch ≫ 1 = a tail move (the short-gamma trap). `}
+        {`"Fade edge" is the per-trade return TO the fade (+fwd long / −fwd short) over the next ${base.fwd_horizon} bars.`}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard title="Setups (n)" value={fmtInt(base.n_setups)} sub="all VWMA z + RSI triggers" />
+        <KpiCard title="Fade edge — all" value={pct(unfiltered)} positive={unfiltered >= 0}
+                 sub="no stretch filter" />
+        <KpiCard title="Fade edge — safe only" value={pct(safeOnly)} positive={safeOnly >= 0}
+                 sub="stretch ≤ 1 setups" />
+        <KpiCard title="Tail setups" value={dist.pct_tail == null ? "—" : `${fmtNum(dist.pct_tail)}%`}
+                 sub="fired at stretch > 2" positive={dist.pct_tail != null ? dist.pct_tail < 20 : null} />
+      </div>
+
+      <div className={`rounded-md border px-4 py-3 text-sm ${
+        filterHelps ? "border-profit/40 bg-profit/10 text-profit"
+                    : "border-amber-500/40 bg-amber-500/10 text-amber-300"}`}>
+        <span className="font-medium">Verdict: </span>
+        {unfiltered == null || safeOnly == null
+          ? "Not enough setups in this window to judge the filter."
+          : filterHelps
+            ? `Restricting fades to the normal range (stretch ≤ 1) lifts the per-trade edge by ${pct(lift)} `
+              + `(${pct(unfiltered)} → ${pct(safeOnly)}). The fade_safe filter looks worth testing in Walk-Forward.`
+            : `Restricting to stretch ≤ 1 does NOT improve the edge (${pct(unfiltered)} → ${pct(safeOnly)}). `
+              + `On this window the filter mostly just cuts sample size — weak reason to add it.`}
+      </div>
+
+      <Card title="Fade edge by stretch bucket"
+            hint="The setups split by how stretched the faded move is. If mean reversion is real, the Calm/Normal buckets should carry the positive edge and the Tail bucket should be flat or negative.">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-[11px] uppercase tracking-wider text-muted text-left">
+              <th className="py-1">Stretch bucket</th>
+              <th>Fade edge</th><th>Win rate</th><th>Sig</th>
+              <th>Long</th><th>Short</th><th className="text-right">n</th>
+            </tr>
+          </thead>
+          <tbody>
+            {buckets.map((b) => (
+              <tr key={b.bucket} className="border-t border-line/50">
+                <td className="py-1.5 font-medium">{b.bucket}</td>
+                <td className={signClass(b.fade?.avg_return_pct)}>{pct(b.fade?.avg_return_pct)}</td>
+                <td className="text-muted">{b.fade?.win_rate == null ? "—" : `${fmtNum(b.fade.win_rate)}%`}</td>
+                <td><SigBadge sig={b.fade?.significance} /></td>
+                <td className={signClass(b.long?.avg_return_pct)}>{pct(b.long?.avg_return_pct)}</td>
+                <td className={signClass(b.short?.avg_return_pct)}>{pct(b.short?.avg_return_pct)}</td>
+                <td className="text-right text-muted">{fmtInt(b.n_setups)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="text-[11px] text-muted mt-2">
+          Fade significance is a one-sided t-test of the fade return vs zero (is fading net-profitable in this bucket?).
+        </p>
+      </Card>
+
+      <Card title="Edge vs stretch ceiling"
+            hint="Per-trade fade edge if you only enter when stretch ≤ X. A curve that rises as the ceiling tightens = the filter adds value; flat/jumpy = it doesn't.">
+        <VBarChart
+          bars={sweep.map((s) => ({ label: s.max_stretch.toFixed(2), value: s.fade_edge_pct, n: s.n }))}
+          colorMode="sign" height={200} yLabel="fade edge %" labelEvery={2} fmt={(x) => fmtNum(x)}
+        />
+      </Card>
+
+      <InsightCard rows={[
+        ["Where setups fire", `median stretch ${fmtNum(dist.p50)}`, `p90 = ${fmtNum(dist.p90)}`, "neutral"],
+        ["Inside normal range", dist.pct_safe == null ? "—" : `${fmtNum(dist.pct_safe)}% of setups`, "stretch ≤ 1", dist.pct_safe >= 50 ? "profit" : "neutral"],
+        ["Calm-bucket edge", pct(calm?.fade?.avg_return_pct), `n=${fmtInt(calm?.n_setups)}`, calm && calm.fade?.avg_return_pct >= 0 ? "profit" : "loss"],
+        ["Tail-bucket edge", pct(tail?.fade?.avg_return_pct), `n=${fmtInt(tail?.n_setups)}`, tail && tail.fade?.avg_return_pct >= 0 ? "profit" : "loss"],
+      ]} />
+
+      <p className="text-[11px] text-muted">{data.meta?.caveat}</p>
+    </div>
   );
 }
 

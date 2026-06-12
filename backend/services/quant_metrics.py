@@ -42,6 +42,17 @@ def compute(
         "distribution":  _distribution(trades, starting_capital),
         "edge":          _edge(trades),
     }
+    # Geometric mean per-trade return — derived from the EQUITY CURVE, not from
+    # pnl_pct_equity (which are additive fractions of starting capital, not
+    # sequential growth factors; compounding them was wrong, and meaningless
+    # for fixed-contract futures sizing).
+    n_tr = len(trades)
+    if n_tr >= 1 and equity_curve and starting_capital > 0:
+        final_eq = float(equity_curve[-1].get("equity") or 0.0)
+        if final_eq > 0:
+            out["trade_stats"]["geometric_mean_return_pct"] = _safe(
+                ((final_eq / starting_capital) ** (1.0 / n_tr) - 1.0) * 100.0
+            )
     if wf_trials:
         out["robustness"] = _robustness(wf_trials, bars_per_year)
     return out
@@ -98,14 +109,9 @@ def _trade_stats(trades: list[dict]) -> dict:
         if std_pnl > 0:
             sqn = _safe(math.sqrt(n) * expectancy / std_pnl)
 
-    # Geometric mean per-trade return from pnl_pct_equity (compounding-aware average).
+    # Geometric mean per-trade return: overwritten in compute() from the equity
+    # curve (the only correct compounding basis). None when no curve available.
     geo_mean_pct = None
-    pnl_pct_eq = np.array([float(t.get("pnl_pct_equity", 0.0)) / 100.0 for t in trades])
-    if n >= 1 and np.all(pnl_pct_eq > -1.0):
-        try:
-            geo_mean_pct = _safe((float(np.exp(np.mean(np.log(1.0 + pnl_pct_eq)))) - 1.0) * 100.0)
-        except Exception:
-            pass
 
     # Max consecutive loss: worst cumulative dollar damage from a losing streak.
     max_consec_loss = 0.0
@@ -180,6 +186,10 @@ def _risk_adjusted(trades: list[dict], equity_curve: list[dict],
     if r.size >= 2:
         # Standard target downside deviation (MAR=0): RMS of shortfalls below 0
         # over ALL periods — not std() of only the negative returns.
+        # ddof=0 (population RMS via np.mean) is DELIBERATE and differs from
+        # Sharpe's std(ddof=1): the textbook Sortino/van-der-Meer definition is
+        # an RMS about a fixed target (0), not a sample std about the mean, so
+        # Bessel's correction does not apply. Audited 2026-06-11 — not a bug.
         shortfall = np.minimum(r, 0.0)
         dd_dev = float(np.sqrt(np.mean(shortfall ** 2)))
         if dd_dev > 0:
@@ -447,11 +457,19 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
         "optuna_trials": list[{params, value}],   # all trials across all windows
         "window_pairs":  list[{is_score, oos_sharpe, oos_return_pct}],
         "best_sharpe_oos": float | None,
+        "metric": str | None,                     # the IS optimization metric
       }
+
+    Deflated Sharpe and Walk-Forward Efficiency compare/divide quantities that
+    are only commensurable when the IS metric is itself a Sharpe — for
+    profit_factor / total_return metrics both are reported as None rather than
+    mixing units. Older bundles without a "metric" key are treated as sharpe.
     """
     optuna_trials = wf_trials.get("optuna_trials") or []
     window_pairs = wf_trials.get("window_pairs") or []
     best_oos_sharpe = wf_trials.get("best_sharpe_oos")
+    metric = wf_trials.get("metric") or "sharpe"
+    metric_is_sharpe = metric == "sharpe"
 
     # ---- Parameter stability: stdev of scores in the top decile of trials.
     # Higher score (lower variance) = flatter optimum = more robust.
@@ -474,24 +492,28 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
 
     # ---- Deflated Sharpe (Bailey & López de Prado).
     # Adjusts the best observed Sharpe for the fact that many trials were tested.
+    # Only meaningful when the trial values ARE Sharpes (metric == "sharpe").
     deflated_sharpe = None
-    if optuna_trials and best_oos_sharpe is not None and math.isfinite(best_oos_sharpe):
+    if (metric_is_sharpe and optuna_trials
+            and best_oos_sharpe is not None and math.isfinite(best_oos_sharpe)):
         vals = np.array(
             [t["value"] for t in optuna_trials if t.get("value") is not None and math.isfinite(t["value"])],
             dtype=float,
         )
         N = vals.size
         if N >= 2:
+            sr_mean = float(vals.mean())
             sr_std = float(vals.std(ddof=1))
             if sr_std > 0:
                 # DSR adapted for WFA: uses best OOS Sharpe (more conservative than
                 # IS-space original). Expected max Sharpe under the null (Bailey &
-                # López de Prado eq. 4):
+                # López de Prado eq. 4) — note the MEAN term: E[max] is centered on
+                # the trial mean, not on zero. Omitting it (the old bug) overstated
+                # the survival probability by ~10x for typical positive trial means.
                 euler = 0.5772156649
-                # Φ⁻¹ approximation: scipy.stats.norm.ppf
                 z1 = stats.norm.ppf(1.0 - 1.0 / N) if N > 1 else 0.0
                 z2 = stats.norm.ppf(1.0 - 1.0 / (N * math.e)) if N > 1 else 0.0
-                expected_max_sr = sr_std * ((1.0 - euler) * z1 + euler * z2)
+                expected_max_sr = sr_mean + sr_std * ((1.0 - euler) * z1 + euler * z2)
                 # Deflated Sharpe: probability that observed best > expected max
                 # under the null distribution of trial Sharpes. We approximate
                 # with a normal CDF using N-1 effective dof.
@@ -499,21 +521,24 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
                 deflated_sharpe = float(stats.norm.cdf(z))
 
     # ---- Walk-Forward Efficiency: median(oos / is) across windows.
+    # Only computed when IS scores are Sharpes — dividing an OOS Sharpe by an
+    # IS profit-factor or return-% is not an efficiency.
     wfe_median = None
     pct_positive = None
     if window_pairs:
-        ratios = []
         valid_windows = [w for w in window_pairs if w.get("oos_sharpe") is not None]
         if valid_windows:
             positives = sum(1 for w in valid_windows if w["oos_sharpe"] > 0)
             pct_positive = float(positives) / len(valid_windows) * 100.0
-        for w in window_pairs:
-            is_s = w.get("is_score")
-            oos_s = w.get("oos_sharpe")
-            if is_s is not None and oos_s is not None and is_s > 0:
-                ratios.append(oos_s / is_s)
-        if ratios:
-            wfe_median = float(np.median(ratios))
+        if metric_is_sharpe:
+            ratios = []
+            for w in window_pairs:
+                is_s = w.get("is_score")
+                oos_s = w.get("oos_sharpe")
+                if is_s is not None and oos_s is not None and is_s > 0:
+                    ratios.append(oos_s / is_s)
+            if ratios:
+                wfe_median = float(np.median(ratios))
 
     return {
         "parameter_stability_score": _safe(stability),

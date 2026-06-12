@@ -29,7 +29,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from services import backtest_engine, market_data, quant_metrics, risk_config, assets
+from services import (backtest_engine, market_data, quant_metrics, risk_config,
+                      assets, portfolio_correlation)
 from services.strategy_registry import get_strategy_class
 
 log = logging.getLogger(__name__)
@@ -135,14 +136,16 @@ class _Stream:
         self.fee_pct  = 0.0
         self.futures_commission = 0.0
 
+        # Most-recent close, used for MTM at unified timestamps where this
+        # strategy doesn't have a bar. Must be initialised here so cross-broker
+        # portfolios (e.g. BTCUSDT + ES) — whose timelines don't fully overlap —
+        # have a valid mark on bars where this stream is idle before its first.
+        self.last_close: float = float(self.close_a[0]) if len(self.close_a) else 0.0
+
     def fee(self, notional: float) -> float:
         if self.contract_sizing:
             return self.fee_flat + self.futures_commission * self.n_contracts
         return self.fee_flat + abs(notional) * self.fee_pct
-
-        # Most-recent close, used for MTM at unified timestamps where this
-        # strategy doesn't have a bar.
-        self.last_close: float = float(self.close_a[0]) if len(self.close_a) else 0.0
 
     # ---------------------------------------------------------------------
     # MTM helper
@@ -158,7 +161,14 @@ class _Stream:
         return u
 
     def locked_notional(self) -> float:
-        """Cash currently locked in this strategy's open positions."""
+        """Cash currently locked in this strategy's open positions.
+
+        Futures (contract_sizing) are margin-based: opening them deducts only
+        the fee from cash (see _process_entries), so nothing is "locked" —
+        returning 0 keeps the equity identity cash + locked + unrealized exact.
+        """
+        if self.contract_sizing:
+            return 0.0
         v = 0.0
         for tr in self.tranches_long:
             v += abs(tr["entry_price"] * tr["units"])
@@ -320,6 +330,12 @@ def run_portfolio(specs: list[StrategySpec],
         ts_i = int(ts)
 
         # Determine which streams have a current bar at this ts and their idx.
+        # IMPORTANT: last_close is NOT advanced to this bar's close yet — entry
+        # sizing (Phase B) must mark open positions at the PREVIOUS close, like
+        # the engine ("sized off MTM equity at previous close"). Advancing it
+        # here (the old behavior) sized entries with the current bar's close —
+        # information not available at the bar's open — and broke exact N=1
+        # equivalence under pyramiding. last_close moves forward in Phase B½.
         active = []  # (stream, idx) where idx >= 1 — we need a prior bar to act.
         for s in streams:
             idx = s.ts_to_idx.get(ts_i)
@@ -327,9 +343,9 @@ def run_portfolio(specs: list[StrategySpec],
                 continue
             if idx >= 1:
                 active.append((s, idx))
-            # Update last_close opportunistically even on idx=0 so MTM has a
-            # reasonable mark from the start.
-            s.last_close = float(s.close_a[idx])
+            else:
+                # idx == 0: first bar of this stream — seed the initial mark.
+                s.last_close = float(s.close_a[idx])
 
         # ---- Phase A: exits (priority order). Close-first frees cash for
         # subsequent same-bar entries.
@@ -337,14 +353,25 @@ def run_portfolio(specs: list[StrategySpec],
             _process_exits(s, t, state, fee_flat, fee_pct, slippage, starting_capital)
 
         # Current portfolio equity AFTER exits, used to size new entries.
-        # We snapshot at PREVIOUS close of each stream that has data, which
-        # matches the legacy engine's `cur_eq` computed at prev_close.
-        cur_eq = state.cash + sum(s.unrealized() for s in streams)
+        # Same identity as the Phase-D snapshot: cash + locked collateral +
+        # unrealized P&L. Omitting locked_notional here (the old bug) made every
+        # open position shrink the sizing equity by its full notional, breaking
+        # the N=1 equivalence with backtest_engine whenever pyramiding >= 2 or
+        # a second strategy held a position.
+        cur_eq = (state.cash
+                  + sum(s.unrealized() for s in streams)
+                  + sum(s.locked_notional() for s in streams))
 
         # ---- Phase B: entries (priority order). Honest cash gating.
         for s, t in active:
             _process_entries(s, t, ts_i, state, cur_eq, fee_flat, fee_pct,
                              slippage, starting_capital)
+
+        # ---- Phase B½: NOW advance last_close to this bar's close so the
+        # Phase-D MTM snapshot (and idle streams on later timestamps) mark at
+        # the latest known price.
+        for s, t in active:
+            s.last_close = float(s.close_a[t])
 
         # ---- Phase C: MAE/MFE update for any open tranche using THIS bar's
         # range (per-stream).
@@ -399,6 +426,22 @@ def run_portfolio(specs: list[StrategySpec],
                            slipped=False)
         s.tranches_long.clear()
         s.tranches_short.clear()
+
+    # Refresh the final snapshot after force-closes: all positions are settled,
+    # so portfolio equity == cash exactly (this folds the force-close exit fees
+    # into the final point, matching backtest_engine / stats.final_equity).
+    if state.equity_curve:
+        final_settled = float(state.cash)
+        state.peak_equity = max(state.peak_equity, final_settled)
+        last = state.equity_curve[-1]
+        last["equity"] = final_settled
+        last["value"] = final_settled / starting_capital * 100.0
+        last["drawdown_dollars"] = final_settled - state.peak_equity
+        last["drawdown"] = (final_settled - state.peak_equity) / starting_capital * 100.0
+        last["per_strategy"] = {
+            s.spec.strategy_id: float(state.starting_capital + s.realized_pnl + s.unrealized())
+            for s in streams
+        }
 
     # ---- Build result -------------------------------------------------
     aggregate_trades = []
@@ -523,6 +566,7 @@ def run_portfolio(specs: list[StrategySpec],
         "stats": stats,
         "analytics": analytics,
         "per_strategy": per_strategy,
+        "correlation": portfolio_correlation.compute(per_strategy, starting_capital),
     }
 
 
@@ -594,13 +638,21 @@ def _close_tranche(s: _Stream, tr: dict, side: str, fill: float, ts: int,
     else:
         pnl = (tr["entry_price"] - fill) * tr["units"] - fee_close
 
-    # Cash: release the notional collateral plus the pnl (already net of close fee).
-    state.cash += abs(tr["entry_price"] * tr["units"]) + pnl
+    # Cash release mirrors the open-side accounting:
+    #   crypto/spot — entry notional was deducted at open, so release it + pnl;
+    #   futures     — only the fee was deducted at open (margin model), so the
+    #                 close settles pnl only.
+    if s.contract_sizing:
+        state.cash += pnl
+    else:
+        state.cash += abs(tr["entry_price"] * tr["units"]) + pnl
     s.realized_pnl += pnl
 
+    # Trade record is net of BOTH fees (fee_open already hit realized/cash at
+    # entry, so portfolio accounting above is unchanged).
     s.trades.append(backtest_engine._trade(
         side, tr["entry_price"], fill, tr["entry_time"], ts,
-        pnl, tr["units"], tr["fee_open"] + fee_close,
+        pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
         starting_capital=starting_capital,
         mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
     ))
@@ -625,11 +677,12 @@ def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
         units = s.contract_units if s.contract_sizing else (cur_eq * s.risk_frac) / fill
         notional = abs(fill * units)
         fee_open = s.fee(notional)
-        required = notional + fee_open
-        # Futures (contract sizing) are margin-based — don't cash-gate on full
-        # notional; only the fee needs to be funded.
+        # Futures (contract sizing) are margin-based — only the fee is funded
+        # from cash; crypto/spot fund the full notional + fee.
+        required = fee_open if s.contract_sizing else notional + fee_open
         if not s.contract_sizing and state.cash < required:
-            # Skip + log with counterfactual.
+            # Skip + log with counterfactual. `required_notional` includes the
+            # open fee so the log matches the gate exactly.
             would_be = _counterfactual_pnl(
                 s, t - 1, side, cur_eq, fee_pct, fee_flat, slippage
             )
@@ -638,7 +691,7 @@ def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
                 "strategy_id": s.spec.strategy_id,
                 "symbol": s.spec.symbol,
                 "side": side,
-                "required_notional": float(notional),
+                "required_notional": float(required),
                 "available_cash": float(state.cash),
                 "would_be_pnl": float(would_be) if would_be is not None else None,
                 "reason": "insufficient_cash",
@@ -677,8 +730,8 @@ def _empty_portfolio_result(specs: list[StrategySpec], rc: dict) -> dict:
         "starting_capital": starting_capital,
         "final_equity": starting_capital,
         "total_return_dollars": 0.0, "total_return_pct": 0.0,
-        "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
-        "profit_factor": 0.0, "sharpe": 0.0,
+        "trades": 0, "wins": 0, "losses": 0, "breakeven": 0, "win_rate": 0.0,
+        "profit_factor": 0.0, "sharpe": None,
         "gross_profit": 0.0, "gross_loss": 0.0,
         "max_drawdown_pct": 0.0, "max_drawdown_pct_peak": 0.0,
         "max_drawdown_dollars": 0.0,
@@ -690,7 +743,9 @@ def _empty_portfolio_result(specs: list[StrategySpec], rc: dict) -> dict:
         "first_time": None, "last_time": None,
     }
     empty_analytics = {
-        "by_session": [], "heatmap": {"pnl": [[0]*24]*7, "count": [[0]*24]*7},
+        "by_session": [],
+        "heatmap": {"pnl": [[0.0] * 24 for _ in range(7)],
+                    "count": [[0] * 24 for _ in range(7)]},
         "monthly_returns": [], "streaks": {"max_win_streak": 0, "max_loss_streak": 0},
         "drawdown_curve": [], "max_drawdown_duration_bars": 0,
         "distribution_pnl_pct": [], "distribution_duration_min": [],

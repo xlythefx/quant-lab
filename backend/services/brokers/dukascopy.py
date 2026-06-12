@@ -66,8 +66,11 @@ _DIGITS = {
 }
 
 # Pandas resample aliases. Use lowercase 'h' / 'min' (pandas 2.2+).
+# Includes the bespoke minutes used by the imported MultiCharts strategies
+# (6/10/12/23/46m).
 _TF_PANDAS = {
-    "1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+    "1m": "1min", "3m": "3min", "5m": "5min", "6m": "6min", "10m": "10min",
+    "12m": "12min", "15m": "15min", "23m": "23min", "30m": "30min", "46m": "46min",
     "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "12h": "12h",
     "1d": "1D",
 }

@@ -11,9 +11,16 @@ function defaultsFromSchema(schema) {
   return out;
 }
 
+const KIND_FILTERS = [
+  { key: "all", label: "All" },
+  { key: "ohlc", label: "OHLC" },
+  { key: "hlc", label: "HLC" },
+];
+
 export default function Strategies() {
   const [strategies, setStrategies] = useState([]);
   const [error, setError] = useState(null);
+  const [kindFilter, setKindFilter] = useState("all");
   const active = useActiveStrategies();
 
   useEffect(() => {
@@ -21,6 +28,10 @@ export default function Strategies() {
       .then(setStrategies)
       .catch((e) => setError(e?.response?.data?.error || e.message));
   }, []);
+
+  const shown = strategies.filter(
+    (s) => kindFilter === "all" || (s.kind || "ohlc") === kindFilter
+  );
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -33,6 +44,21 @@ export default function Strategies() {
             Browse registered strategies. Add one or more to the dashboard
             to see them run live or in backtest with editable params.
           </p>
+          <div className="flex gap-2 mt-3">
+            {KIND_FILTERS.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setKindFilter(f.key)}
+                className={`px-3 py-1.5 text-xs uppercase tracking-wider rounded-md font-medium border ${
+                  kindFilter === f.key
+                    ? "bg-accent-grad text-white border-transparent"
+                    : "border-line text-muted hover:text-text"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
         </header>
 
         {error && (
@@ -40,10 +66,10 @@ export default function Strategies() {
         )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {strategies.length === 0 && !error && (
+          {shown.length === 0 && !error && (
             <div className="text-sm text-muted">no strategies registered</div>
           )}
-          {strategies.map((s) => {
+          {shown.map((s) => {
             const on = isActive(s.id);
             return (
               <div key={s.id} className="rounded-xl border border-line bg-bg-panel/60 p-5 flex flex-col gap-3">

@@ -81,6 +81,33 @@ _exchange = ccxt.binance({"enableRateLimit": True, "timeout": 20000})
 
 _QUOTES = ("USDT", "USDC", "BUSD", "BTC", "ETH", "FDUSD", "TUSD", "EUR", "TRY", "BNB")
 
+# Timeframes Binance/CCXT can fetch natively. Anything else (e.g. the bespoke
+# 6/10/12/23/46m used by the imported strategies) is fetched as 1m and resampled.
+_CCXT_TFS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"}
+
+# pandas resample rules for the non-native timeframes (lowercase 'min'/'h', 2.2+).
+_TF_PANDAS_RULE = {
+    "6m": "6min", "10m": "10min", "12m": "12min", "23m": "23min", "46m": "46min",
+}
+
+
+def _resample_ohlcv_ms(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Resample a 1-minute OHLCV frame (columns: ts_ms, open, high, low, close,
+    volume) up to `timeframe`. Returns [time (int seconds), open, high, low,
+    close, volume] — the standard parquet contract."""
+    rule = _TF_PANDAS_RULE[timeframe]
+    d = df.copy()
+    d.index = pd.to_datetime(d["ts_ms"], unit="ms", utc=True)
+    agg = (
+        d.resample(rule, label="left", closed="left")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna(subset=["open", "high", "low", "close"])
+        .reset_index(names="ts")
+    )
+    ts_naive = agg["ts"].dt.tz_convert("UTC").dt.tz_localize(None)
+    agg["time"] = ts_naive.values.astype("datetime64[s]").astype("int64")
+    return agg[["time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
 
 def _to_ccxt_symbol(symbol: str) -> str:
     """BTCUSDT -> BTC/USDT. Splits on the longest known quote suffix."""
@@ -222,19 +249,22 @@ def download_range(
         raise ValueError("start must be before end")
 
     pair = _to_ccxt_symbol(symbol)
-    tf_seconds = TIMEFRAME_SECONDS[timeframe]
+    # Binance can't fetch odd intervals (6/10/12/23/46m) — pull 1m and resample.
+    native = timeframe in _CCXT_TFS
+    fetch_tf = timeframe if native else "1m"
+    tf_seconds = TIMEFRAME_SECONDS[fetch_tf]
     page_limit = 1000
 
     new_rows = []
     since = start_ms
-    log.info("Downloading %s %s from %s to %s", symbol, timeframe, start_ms, end_ms)
+    log.info("Downloading %s %s from %s to %s (fetch_tf=%s)", symbol, timeframe, start_ms, end_ms, fetch_tf)
 
     while since < end_ms:
         if cancel_check is not None and cancel_check():
             log.info("download_range cancelled at since=%s", since)
             break
         try:
-            rows = _exchange.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=page_limit)
+            rows = _exchange.fetch_ohlcv(pair, timeframe=fetch_tf, since=since, limit=page_limit)
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
             log.warning("page failed since=%s: %s — retrying", since, e)
             time.sleep(2)
@@ -278,8 +308,14 @@ def download_range(
             }
         raise RuntimeError("Binance returned no candles for that range")
 
-    new_df["time"] = (new_df["ts_ms"] // 1000).astype("int64")
-    new_df = new_df[["time", "open", "high", "low", "close", "volume"]]
+    if native:
+        new_df["time"] = (new_df["ts_ms"] // 1000).astype("int64")
+        new_df = new_df[["time", "open", "high", "low", "close", "volume"]]
+    else:
+        # Trim to the requested window before resampling so partial edge bars
+        # don't leak in, then aggregate 1m -> target timeframe.
+        new_df = new_df[new_df["ts_ms"] <= end_ms]
+        new_df = _resample_ohlcv_ms(new_df, timeframe)
 
     path = parquet_path(symbol, timeframe)
     rows_before = 0

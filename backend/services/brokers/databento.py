@@ -47,9 +47,12 @@ _NATIVE = {"1m": "ohlcv-1m", "1h": "ohlcv-1h", "1d": "ohlcv-1d"}
 
 # Non-native TFs: fetch ohlcv-1m and resample with this pandas rule.
 # Lowercase 'h' / 'min' aliases (pandas 2.2+), matching dukascopy.py.
+# Includes the bespoke minutes used by the imported MultiCharts strategies
+# (6/10/12/23/46m).
 _RESAMPLE = {
-    "5m": "5min", "15m": "15min", "30m": "30min",
-    "2h": "2h", "4h": "4h", "6h": "6h", "12h": "12h",
+    "3m": "3min", "5m": "5min", "6m": "6min", "10m": "10min",
+    "12m": "12min", "15m": "15min", "23m": "23min", "30m": "30min",
+    "46m": "46min", "2h": "2h", "4h": "4h", "6h": "6h", "12h": "12h",
 }
 
 # Explicit contract month code at the end of a root, e.g. ESH4 / ESM24 / CLZ2025.
@@ -76,6 +79,72 @@ def _extract_available_end(msg: str):
             except Exception:  # noqa: BLE001
                 continue
     return None
+
+
+def _extract_available_start(msg: str):
+    """Parse the dataset's available *start* out of a Databento range error
+    ('`start` ... was before the available start of dataset GLBX.MDP3
+    ('2010-06-06 ...')'). Returns a tz-aware UTC datetime, or None. Lets a
+    too-early `start` clamp forward instead of failing the whole pull."""
+    m = re.search(
+        r"available start of dataset\s+\S+\s*\(\s*'?\"?([0-9][0-9 T:\.\+\-]*Z?)", msg
+    )
+    if m:
+        try:
+            return pd.to_datetime(m.group(1).strip().rstrip("'\""), utc=True).to_pydatetime()
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _chunk_ranges(start: datetime, end: datetime, months: int):
+    """Split [start, end) into consecutive [cs, ce) slices `months` long. Used to
+    stream a long pull as many small requests so progress advances and memory
+    stays bounded (a decade of 1m bars in one get_range buffers millions of rows
+    and reports no progress until it all lands)."""
+    out = []
+    cur = start
+    while cur < end:
+        nxt = (pd.Timestamp(cur) + pd.DateOffset(months=months)).to_pydatetime()
+        if nxt > end:
+            nxt = end
+        out.append((cur, nxt))
+        cur = nxt
+    return out
+
+
+def _get_clamped(client, dataset, symbols, schema, stype_in, start, end):
+    """Fetch one [start, end) slice, tolerating the two range boundaries
+    Databento can reject on: a `start` before the dataset's available start
+    (clamp forward, or skip the slice entirely if it's all pre-data) and an
+    `end` past the available/licensed end (clamp back). Returns
+    (to_df_frame_or_None, hit_end_boundary); hit_end_boundary True means every
+    later slice is beyond the data end, so the caller can stop."""
+    cur_start, cur_end = start, end
+    for _ in range(4):
+        try:
+            data = client.timeseries.get_range(
+                dataset=dataset, symbols=symbols, schema=schema,
+                stype_in=stype_in, start=cur_start, end=cur_end,
+            )
+            return data.to_df(), (cur_end < end)
+        except Exception as e:  # noqa: BLE001 - inspect message for recoverable cases
+            msg = str(e)
+            ns = _extract_available_start(msg)
+            if ns is not None:
+                if ns >= cur_end:
+                    return None, False   # whole slice precedes available data; skip
+                if ns > cur_start:
+                    cur_start = ns
+                    continue
+            ne = _extract_available_end(msg)
+            if ne is not None and ne < cur_end:
+                cur_end = ne
+                if cur_start >= cur_end:
+                    return None, True
+                continue
+            raise
+    return None, cur_end < end
 
 
 def _resolve_symbol(symbol: str) -> tuple[str, str]:
@@ -200,59 +269,61 @@ def download(
 
     if cancel_check is not None and cancel_check():
         return _empty()
+
+    client = db.Historical(key)
+
+    # Stream the pull as consecutive chunks so the progress bar advances and
+    # memory stays bounded. Resampled TFs (and native 1m) request 1m bars — chunk
+    # by month; native 1h/1d are light — chunk by year. A single get_range for a
+    # decade of 1m bars buffers millions of rows and reports nothing until it all
+    # lands (looks hung); monthly slices report after each and cap memory.
+    chunk_months = 1 if (resample_rule or schema == "ohlcv-1m") else 12
+    chunks = _chunk_ranges(start, end, chunk_months)
+    total = len(chunks)
+
+    log.info(
+        "databento fetching %s (stype_in=%s) schema=%s %s -> %s in %d chunk(s)",
+        db_symbols, stype_in, schema, start.isoformat(), end.isoformat(), total,
+    )
+
     if progress_cb is not None:
         try:
-            progress_cb(0, 1)
+            progress_cb(0, total)
         except Exception:
             pass
 
-    log.info(
-        "databento fetching %s (stype_in=%s) schema=%s %s -> %s",
-        db_symbols, stype_in, schema, start.isoformat(), end.isoformat(),
-    )
-    client = db.Historical(key)
-
-    def _get(end_):
-        return client.timeseries.get_range(
-            dataset=_DATASET,
-            symbols=db_symbols,
-            schema=schema,
-            stype_in=stype_in,
-            start=start,
-            end=end_,
+    cols = ["open", "high", "low", "close", "volume"]
+    raw_frames = []
+    for i, (cs, ce) in enumerate(chunks):
+        if cancel_check is not None and cancel_check():
+            return _empty()
+        df_chunk, hit_end = _get_clamped(
+            client, _DATASET, db_symbols, schema, stype_in, cs, ce
         )
-
-    # The requested end can exceed two distinct boundaries: the dataset's
-    # physically-available end (`data_end_after_available_end`) and the end your
-    # license/subscription covers (`dataset_unavailable_range` — the most recent
-    # ~24h of CME data needs a live subscription). Both errors name the new end
-    # to use, so clamp and retry until the request is within bounds.
-    data = None
-    for _ in range(3):
-        try:
-            data = _get(end)
-            break
-        except Exception as e:  # noqa: BLE001 - inspect message for recoverable cases
-            new_end = _extract_available_end(str(e))
-            if new_end is None or new_end >= end:
-                raise
-            log.warning("databento end %s out of bounds; clamping to %s",
-                        end.isoformat(), new_end.isoformat())
-            end = new_end
-            if start >= end:
-                return _empty()
-    if data is None:
-        return _empty()
-    df = data.to_df()
+        if df_chunk is not None and not df_chunk.empty:
+            # Keep only the OHLCV columns (drop ids/symbol) to bound memory while
+            # accumulating; _normalize decodes the kept tz-aware datetime index.
+            keep = [c for c in cols if c in df_chunk.columns]
+            raw_frames.append(df_chunk[keep])
+        if progress_cb is not None:
+            try:
+                progress_cb(i + 1, total)
+            except Exception:
+                pass
+        if hit_end:
+            break  # every later slice is beyond the available/licensed data end
 
     if cancel_check is not None and cancel_check():
         return _empty()
+    if not raw_frames:
+        return _empty()
 
-    bars = _normalize(df, resample_rule)
+    combined = pd.concat(raw_frames)
+    bars = _normalize(combined, resample_rule)
 
     if progress_cb is not None:
         try:
-            progress_cb(1, 1)
+            progress_cb(total, total)
         except Exception:
             pass
     return bars

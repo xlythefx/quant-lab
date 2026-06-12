@@ -1,0 +1,122 @@
+# QuantLab — project guide for Claude
+
+A multi-asset quantitative trading research platform: Flask + SocketIO backend (Python),
+React frontend, with backtesting, walk-forward optimization, a "Market Lab" of read-only
+market-structure analyses, and live/paper strategy running across brokers (Binance via CCXT,
+Databento for CME futures, TradeStation).
+
+## Environment (important)
+
+- **Python 3.14** is the only interpreter installed (no venv). The full backend stack is
+  already installed and working on it: `torch 2.12.0+cpu`, `pandas 3.0.3`, `optuna`,
+  `ccxt`, `pyarrow`, `scikit-learn`, `flask`, etc.
+- **`hmmlearn` will NOT install on 3.14** — no prebuilt cp314 wheel, and a source build needs
+  the MSVC C++ Build Tools. Don't add it to `backend/requirements.txt`. The HMM experiment
+  (below) implements the model in pure numpy/scipy to avoid this. Do not downgrade the project
+  to get a single package — 3.14 already runs everything else.
+- Platform: Windows 11, PowerShell. Use PowerShell syntax (`$null`, `$env:VAR`).
+
+## Layout
+
+```
+backend/
+  app.py                      # Flask + SocketIO entrypoint (port 6173)
+  config.py                   # SUPPORTED_SYMBOLS, TIMEFRAMES, DATA_DIR, lookback, capital
+  services/
+    market_data.py            # parquet OHLCV cache; load_parquet / ensure_parquet / download_range
+    backtest_engine.py        # run(strategy_id, symbol, timeframe, ...) -> candles/trades/equity/stats
+    walkforward.py            # rolling IS/OOS + Optuna; stitched OOS equity curve
+    strategy_registry.py      # auto-discovers Strategy subclasses
+    market_lab.py             # read-only analyses (regimes, vol, stats, MR scan, feature importance...)
+    quant_metrics.py          # Sharpe/Sortino/Calmar, infer_bars_per_year, _safe
+    brokers/                  # binance, databento (CME), tradestation, dukascopy
+    strategies/
+      base.py                 # Strategy ABC: vectorized() + on_candle(); ParamSpec/Signal/OverlaySpec
+      regime.py               # DETERMINISTIC regime detection (see below)
+      vwma_reversion.py       # only strategy that uses regimes (entry gating)
+      vwma_momentum.py, pivot_breakout.py, rsi2_reversion.py, lunar.py
+  routes/                     # Flask blueprints (strategy, market, walkforward, market_lab, ...)
+  data/{binance,databento,tradestation}/{SYMBOL}_{TF}.parquet
+frontend/                     # React (Vite dev server, port 5173)
+experiments/hmm_regime/       # ISOLATED HMM regime experiment (see below)
+scripts/pull_databento.py     # bulk CME futures downloader
+ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat)
+```
+
+## Data
+
+- `market_data.load_parquet(symbol, timeframe, broker=None)` returns a DataFrame with columns
+  `[time (int seconds), open, high, low, close, volume]`. Raises `FileNotFoundError` if not
+  cached — `ensure_parquet(symbol, timeframe)` downloads ~2yr (Binance/CCXT) first.
+- Cached crypto symbols: `BTCUSDT`, `FETUSDT` at `1m/5m/15m/1h`. CME futures (ES/NQ/CL/GC) via
+  Databento need `DATABENTO_API_KEY` in `backend/.env`.
+
+## Regime detection
+
+Two systems exist; keep them straight:
+
+1. **Deterministic (production)** — [backend/services/strategies/regime.py](backend/services/strategies/regime.py).
+   - `RegimeDetector(period, threshold)` — binary ADX filter: `detect(df)` → bool Series
+     (True = ranging/safe for mean reversion); `last_adx(df)` for live.
+   - `_regime_labels(df, _regime_params(p))` → 5 labels: `Trending Up/Down`, `High-Volatility`,
+     `Quiet`, `Choppy-Range`, from ADX + rolling-linreg slope + trailing volatility percentile.
+     **Causal** (every feature at bar i uses only bars ≤ i). Shared by `vwma_reversion.py`
+     (entry gating) and `market_lab.classify_regimes()` (UI regime ribbon).
+
+2. **Gaussian HMM (experimental, isolated)** — [experiments/hmm_regime/](experiments/hmm_regime/).
+   - Evaluating an HMM as a data-driven alternative to the rule-based detector for BTCUSDT.
+     Phase 1 is purely diagnostic: "does it read well?" — NOT yet wired into any strategy.
+   - Model is implemented **from scratch** in `hmm_model.py` (Baum-Welch EM, log-space
+     forward-backward, Viterbi, full-covariance Gaussian emissions, KMeans init) — no hmmlearn.
+   - Observations (`features.py`): log return, 20-bar realized vol, rolling Hurst (R/S), standardized.
+   - Run: `pip install -r experiments\hmm_regime\requirements-hmm.txt` then
+     `python experiments\hmm_regime\run_hmm_btc.py` → PNGs + `hmm_bars.csv` + console report in
+     `experiments/hmm_regime/out/`. Fits k=2/3/4 and cross-tabs against the deterministic labels.
+   - **Isolation rule:** this folder must not be imported by `backend/`, must not edit
+     `regime.py`/strategies/routes, and its deps stay in `requirements-hmm.txt`. It only READS
+     market data and the deterministic labels.
+   - **Caveat:** the fit is full-sample (look-ahead) — fine for visual evaluation, NOT tradeable
+     as-is. A rolling/expanding refit is the prerequisite before any strategy integration.
+
+## Strategies & backtests
+
+- A `Strategy` subclass (in `backend/services/strategies/`) with a `META` and `PARAM_SCHEMA`
+  auto-registers. Implement `vectorized(df)` (batch backtest → entry/exit/stop columns) and
+  `on_candle(candle, state)` (live). See `vwma_reversion.py` as the reference.
+- Backtest: `backtest_engine.run(...)`. Optimize across rolling windows with `walkforward.py`.
+- Market Lab analyses are read-only, causal, and deliberately "honest" (in-sample edges flagged,
+  t-tests vs baselines, no look-ahead) — mirror that tone when extending it.
+
+## Sizing & fees — futures vs crypto
+
+The single branch point is in [backtest_engine.py](backend/services/backtest_engine.py) (~L200):
+`contract_sizing = _meta.asset_class in ("equity_index_future", "futures") and _meta.contract_size > 1.0`,
+where `_meta = assets.get(symbol, broker)`. Note `"equity_index_future"` is **dead** — the
+catalogs and the `ASSET_CLASSES` enum only ever emit `"futures"`; the live trigger is
+`asset_class == "futures"`. `contract_size` comes from `data/assets/{broker}.json`
+(ES 50, NQ 20, GC 100, CL 1000; crypto = 1.0).
+
+- **Sizing** (one line, both entry paths): `units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill`.
+  - Futures → **fixed** `units = contracts × contract_size`. P&L = `move × units` yields TS-style
+    dollars ($50/pt for 1 ES). Driven by the per-strategy `contracts` param; **`risk_pct` is inert**.
+  - Crypto/spot → `units = equity × risk_pct / price` — **compounds** with MTM equity each bar.
+    Driven by `risk_pct`; **`contracts` is inert**.
+- **Fees** (`_fee()`, per side, charged on entry AND exit):
+  - Futures → `fee_flat + futures_commission × contracts` ($/contract; notional ignored).
+  - Crypto → `fee_flat + |notional| × fee_pct` (fee_pct default 0.04%).
+- **Slippage** (`slippage_bps`, default 1bp) applies symmetrically to both.
+- **Global vs per-strategy:** `starting_capital`, `fee_flat`, `fee_pct`, `futures_commission`,
+  `slippage_bps` live in the global `risk_config` (Risk Settings page — symbol-agnostic, so it
+  correctly shows both fee types). `risk_pct`, `contracts`, `pyramiding` are per-strategy
+  (PARAM_SCHEMA), edited in the Dashboard Settings panel.
+- **UI:** the Settings panel ([StrategyEditor.jsx](frontend/src/components/StrategyEditor.jsx))
+  takes a `hiddenParams` prop; [Dashboard.jsx](frontend/src/pages/Dashboard.jsx) computes it from
+  the selected symbol's asset class (`_isContractSized`) to hide the inert sizing slider —
+  `risk_pct` on futures, `contracts` on crypto. WalkForward/GridSearch param editors do NOT yet
+  do this (still show both as optimizable ranges).
+
+## Running
+
+- App: `python ui.py` (GUI launcher) or `python backend/app.py` (backend on :6173) +
+  the Vite frontend on :5173.
+- Commit messages end with the Co-Authored-By trailer; branch off `main` before committing.

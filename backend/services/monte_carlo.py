@@ -139,7 +139,8 @@ def run(method: str,
         "max_drawdown_pct":     float(base["stats"]["max_drawdown_pct"]),
         "max_drawdown_dollars": float(base["stats"]["max_drawdown_dollars"]),
         "trades":               int(base["stats"]["trades"]),
-        "sharpe":               float(base["stats"]["sharpe"]),
+        "sharpe":               (float(base["stats"]["sharpe"])
+                                 if base["stats"].get("sharpe") is not None else None),
     }
     return result
 

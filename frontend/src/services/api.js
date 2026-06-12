@@ -226,6 +226,15 @@ export async function marketLabRegime({ symbol, timeframe, start_time, end_time,
   return data;
 }
 
+/** Causal Gaussian-HMM regime classification (same response shape as marketLabRegime).
+ *  The HMM re-fits across history, so a cold run can take a while — allow up to 5 min. */
+export async function marketLabRegimeHmm({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/regime-hmm", {
+    symbol, timeframe, start_time, end_time, params,
+  }, { timeout: 300_000 });
+  return data;
+}
+
 /** Realized vol, clustering, EWMA/persistence forecast + skill. */
 export async function marketLabVolatility({ symbol, timeframe, start_time, end_time, params }) {
   const { data } = await api.post("/api/marketlab/volatility", {
@@ -245,6 +254,14 @@ export async function marketLabStatistics({ symbol, timeframe, start_time, end_t
 /** Mean-reversion alpha scanner: VWMA z-score + RSI setup edge, by regime, with significance. */
 export async function marketLabScan({ symbol, timeframe, start_time, end_time, params }) {
   const { data } = await api.post("/api/marketlab/scan", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+/** Black-Scholes fade safety: do low-stretch VWMA-reversion setups carry the edge? */
+export async function marketLabFadeSafety({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/fade-safety", {
     symbol, timeframe, start_time, end_time, params,
   });
   return data;
@@ -369,4 +386,26 @@ export async function getPresets(strategyId) {
 export async function savePresets(strategyId, presets) {
   const { data } = await api.put("/api/presets", { strategy_id: strategyId, presets });
   return data.presets; // {name: params}
+}
+
+// Skills catalog + Quant Researcher (AI-generated theories in docs/research).
+export async function getSkills() {
+  const { data } = await api.get("/api/skills");
+  return data.skills; // [{id, name, icon, category, kind, summary}]
+}
+
+export async function runSkill(skill_id, params) {
+  // Generator skills can take 10-30s — give the call generous headroom.
+  const { data } = await api.post("/api/skills/run", { skill_id, params }, { timeout: 180_000 });
+  return data; // {name, title, markdown, spec, model, usage}
+}
+
+export async function listResearch() {
+  const { data } = await api.get("/api/skills/research");
+  return data.items; // [{name, title, created, size}]
+}
+
+export async function getResearch(name) {
+  const { data } = await api.get(`/api/skills/research/${encodeURIComponent(name)}`);
+  return data; // {name, markdown}
 }

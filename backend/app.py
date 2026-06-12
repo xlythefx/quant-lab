@@ -32,6 +32,7 @@ from routes.model_bench_routes import model_bench_bp
 from routes.ai_routes import ai_bp
 from routes.live_alerts_routes import live_alerts_bp
 from routes.presets_routes import presets_bp
+from routes.skills_routes import skills_bp
 from services.socket_manager import SocketManager
 from services.strategy_manager import StrategyManager
 from services import event_bus, alerts_daemon
@@ -65,6 +66,7 @@ def create_app():
     app.register_blueprint(ai_bp)
     app.register_blueprint(live_alerts_bp)
     app.register_blueprint(presets_bp)
+    app.register_blueprint(skills_bp)
 
     socketio = SocketIO(
         app,

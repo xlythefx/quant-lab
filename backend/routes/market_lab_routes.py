@@ -66,6 +66,11 @@ def regime():
     return _run(market_lab.classify_regimes, "regime")
 
 
+@market_lab_bp.post("/regime-hmm")
+def regime_hmm():
+    return _run(market_lab.classify_regimes_hmm, "regime_hmm")
+
+
 @market_lab_bp.post("/volatility")
 def volatility():
     return _run(market_lab.forecast_volatility, "volatility")
@@ -79,6 +84,11 @@ def statistics():
 @market_lab_bp.post("/scan")
 def scan():
     return _run(market_lab.scan_mean_reversion, "scan")
+
+
+@market_lab_bp.post("/fade-safety")
+def fade_safety():
+    return _run(market_lab.fade_safety_scan, "fade_safety")
 
 
 @market_lab_bp.post("/feature-importance")
