@@ -210,13 +210,14 @@ export function subscribeCostSweep({ onProgress, onComplete, onCancelled, onErro
  *   onCancelled({job_id})
  *   onError({job_id, message})
  */
-export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onError } = {}) {
+export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onError, onTargetHit } = {}) {
   const wrap = (fn) => (fn ? (p) => fn(p) : null);
   const h = {
-    gs_progress:  wrap(onProgress),
-    gs_complete:  wrap(onComplete),
-    gs_cancelled: wrap(onCancelled),
-    gs_error:     wrap(onError),
+    gs_progress:   wrap(onProgress),
+    gs_complete:   wrap(onComplete),
+    gs_cancelled:  wrap(onCancelled),
+    gs_error:      wrap(onError),
+    gs_target_hit: wrap(onTargetHit),
   };
   for (const [evt, fn] of Object.entries(h)) {
     if (fn) socket.on(evt, fn);

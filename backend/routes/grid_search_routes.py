@@ -31,6 +31,8 @@ def start_job():
             "base_params": body.get("base_params") or {},
             "grid_params": body.get("grid_params") or [],
             "metric":      body.get("metric"),
+            "target_trades":     body.get("target_trades"),
+            "target_trades_tol": body.get("target_trades_tol"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")

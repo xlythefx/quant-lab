@@ -7,8 +7,9 @@ import CustomEquityChart from "../components/CustomEquityChart.jsx";
 import WalkForwardParamEditor from "../components/WalkForwardParamEditor.jsx";
 import WalkForwardPresetPicker from "../components/WalkForwardPresetPicker.jsx";
 import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
+import CostAssumptions from "../components/CostAssumptions.jsx";
 import {
-  getSymbols, getStrategies, getRiskConfig,
+  getSymbols, getStrategies,
   startWalkForward, cancelWalkForward, getWalkForwardStatus, getWalkForwardLastResult,
   aiSuggestWalkForward, aiAnalyzeWalkForwardSection, aiChatWalkForward,
 } from "../services/api.js";
@@ -421,6 +422,29 @@ export default function WalkForward() {
     window.location.hash = "#costsweep";
   };
 
+  // Per-window handoff: robustness-test a single OOS fold in Monte Carlo.
+  // Mirrors onOpenInCostSweep but carries one window's params + OOS range.
+  const onCheckMonteCarlo = (w) => {
+    if (!result || !w) return;
+    const handoff = {
+      source:      "walkforward",
+      window_idx:  w.window_idx,
+      strategy_id: result.strategy_id,
+      symbol:      result.symbol,
+      timeframe:   result.timeframe,
+      params:      w.best_params || {},
+      oos_start:   w.oos_start,   // epoch seconds
+      oos_end:     w.oos_end,     // epoch seconds
+      oos_stats: {                // context line for the MC provenance strip
+        total_return_pct: w.oos_stats?.total_return_pct ?? null,
+        sharpe:           w.oos_stats?.sharpe ?? null,
+        trades:           w.oos_stats?.trades ?? null,
+      },
+    };
+    localStorage.setItem("ql.mc.wf_import", JSON.stringify(handoff));
+    window.location.hash = "#montecarlo";
+  };
+
   const tabs = useMemo(
     () => TABS.map((t) => ({ ...t, disabled: t.id !== "setup" && !result })),
     [result],
@@ -501,7 +525,7 @@ export default function WalkForward() {
 
           {tab === "setup"      && <SetupTab {...setupProps} />}
           {tab === "overview"   && result && <OverviewTab   result={result} />}
-          {tab === "folds"      && result && <FoldsTab      result={result} />}
+          {tab === "folds"      && result && <FoldsTab      result={result} onCheckMonteCarlo={onCheckMonteCarlo} />}
           {tab === "parameters" && result && <ParametersTab result={result} />}
           {tab === "optuna"     && result && <OptunaTab     result={result} />}
           {tab === "robustness" && result && <RobustnessTab result={result} />}
@@ -757,42 +781,9 @@ function SetupTab({
 // OVERVIEW — headline KPIs + stitched OOS equity (B&H overlay in C.1)
 // ---------------------------------------------------------------------------
 
-// Read-only cost assumptions, shown on the Setup tab so you always know what
-// fees/slippage the OOS result will be charged. Editable on Risk Settings.
-function CostStat({ label, value, warn }) {
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
-      <div className={`font-mono text-sm ${warn ? "text-amber-400" : "text-text"}`}>{value}</div>
-    </div>
-  );
-}
-
-function CostAssumptions() {
-  const [rc, setRc] = useState(null);
-  useEffect(() => { getRiskConfig().then(setRc).catch(() => {}); }, []);
-  if (!rc) return null;
-  const feePct = Number(rc.fee_pct) || 0;
-  const feeFlat = Number(rc.fee_flat) || 0;
-  const slipBps = Number(rc.slippage_bps) || 0;
-  const futCom = Number(rc.futures_commission) || 0;
-  const allZero = feePct === 0 && feeFlat === 0 && slipBps === 0 && futCom === 0;
-  return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-2 border-t border-line/40">
-      <div className="text-[11px] uppercase tracking-wider text-muted">Cost assumptions</div>
-      <CostStat label="Fee / side" value={`${feePct}%`} warn={allZero} />
-      <CostStat label="Flat fee / side" value={`$${feeFlat}`} />
-      <CostStat label="Slippage" value={`${slipBps} bps`} warn={allZero} />
-      <CostStat label="Futures comm. / contract" value={`$${futCom}`} />
-      <a href="#settings" className="text-[11px] text-accent-blue hover:underline">Edit in Risk Settings →</a>
-      {allZero && (
-        <span className="text-[11px] text-amber-400 w-full">
-          ⚠ All costs are zero — the OOS result will be frictionless (too optimistic). Set a realistic fee % and slippage, then run.
-        </span>
-      )}
-    </div>
-  );
-}
+// Read-only cost assumptions (shared component, components/CostAssumptions.jsx),
+// shown on the Setup tab so you always know what fees/slippage the OOS result
+// will be charged. Editable on Risk Settings.
 
 // Trading-cost attribution over the stitched OOS trades — how much of the edge
 // went to commissions vs slippage. Renders `result.costs` from the backend.
@@ -1023,7 +1014,7 @@ function OverviewTab({ result }) {
 // FOLDS — per-window table + heatmap (C.2 adds IS-vs-OOS / vs-B&H / CI charts)
 // ---------------------------------------------------------------------------
 
-function FoldsTab({ result }) {
+function FoldsTab({ result, onCheckMonteCarlo }) {
   const windows = result.windows || [];
   return (
     <section className="space-y-4">
@@ -1031,7 +1022,11 @@ function FoldsTab({ result }) {
       <FoldsStratVsBHChart windows={windows} />
       <FoldsSharpeCIChart windows={windows} />
       <WindowRankings windows={windows} />
-      <WindowHeatmap windows={windows} searchSpace={result?.wf_spec?.search_space || []} />
+      <WindowHeatmap
+        windows={windows}
+        searchSpace={result?.wf_spec?.search_space || []}
+        onCheckMonteCarlo={onCheckMonteCarlo}
+      />
     </section>
   );
 }

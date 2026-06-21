@@ -57,6 +57,8 @@ export default function LiveAlerts() {
   const [openDropdown, setOpenDropdown] = useState(null); // { name, rule, x, y }
   const [firingDetail, setFiringDetail] = useState(null);
   const [showRead, setShowRead] = useState(false);
+  const [mainTab, setMainTab] = useState("rules"); // "rules" | "firings"
+  const [formOpen, setFormOpen] = useState(false);
 
   const saveFirings = (next) => {
     try { localStorage.setItem("ql.live_firings", JSON.stringify(next)); } catch {}
@@ -133,19 +135,28 @@ export default function LiveAlerts() {
     await persist(next);
     setDraft({ ...BLANK_RULE });
     setEditIdx(null);
+    setFormOpen(false);
+  };
+
+  const openAdd = () => {
+    setEditIdx(null);
+    setDraft({ ...BLANK_RULE });
+    setErr(null);
+    setFormOpen(true);
   };
 
   const startEdit = (idx) => {
     setEditIdx(idx);
     setDraft({ ...rules[idx] });
     setErr(null);
-    document.getElementById("rule-form")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setFormOpen(true);
   };
 
   const cancelEdit = () => {
     setEditIdx(null);
     setDraft({ ...BLANK_RULE });
     setErr(null);
+    setFormOpen(false);
   };
 
   const updateRule = (idx, patch) => {
@@ -183,18 +194,59 @@ export default function LiveAlerts() {
           </p>
         </header>
 
-        {err && (
+        {err && !formOpen && (
           <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss flex items-center justify-between gap-3">
             <span>{err}</span>
             <button onClick={() => setErr(null)} className="text-loss/60 hover:text-loss text-xs shrink-0">dismiss</button>
           </div>
         )}
 
-        {/* Rules table */}
+        {/* Tab bar */}
+        <div className="flex items-center border-b border-line">
+          {(() => {
+            const unread = firings.filter((f) => !f.read).length;
+            const TABS = [
+              { id: "rules", label: `Rules (${rules.length})` },
+              { id: "firings", label: "Recent Firings", badge: unread },
+            ];
+            return TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setMainTab(t.id)}
+                className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px flex items-center gap-2 ${
+                  mainTab === t.id
+                    ? "border-accent-blue text-accent-blue"
+                    : "border-transparent text-muted hover:text-text"
+                }`}
+              >
+                {t.label}
+                {t.badge > 0 && (
+                  <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-accent-blue/20 text-accent-blue font-semibold">
+                    {t.badge}
+                  </span>
+                )}
+              </button>
+            ));
+          })()}
+        </div>
+
+        {/* Rules tab */}
+        {mainTab === "rules" && (
         <section>
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm uppercase tracking-wider text-muted">Rules ({rules.length})</h2>
-            {savedAt && <span className="text-xs text-muted">saved {savedAt.toLocaleTimeString()}</span>}
+            <div className="flex items-center gap-3">
+              <h2 className="text-sm uppercase tracking-wider text-muted">Rules ({rules.length})</h2>
+              {savedAt && <span className="text-xs text-muted">saved {savedAt.toLocaleTimeString()}</span>}
+            </div>
+            <button
+              onClick={openAdd}
+              className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold flex items-center gap-1.5"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+                <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
+              </svg>
+              Add Alert
+            </button>
           </div>
           <div className="rounded-xl border border-line bg-bg-panel/60 overflow-x-auto">
             <table className="w-full text-sm">
@@ -315,15 +367,30 @@ export default function LiveAlerts() {
             </table>
           </div>
         </section>
+        )}
 
-        {/* Add / Edit rule form */}
-        <section id="rule-form">
-          <h2 className="text-sm uppercase tracking-wider text-muted mb-2">
-            {editIdx !== null ? `Edit rule · ${rules[editIdx]?.name}` : "Add rule"}
-          </h2>
-          <div className={`rounded-xl border p-5 grid grid-cols-1 md:grid-cols-2 gap-4 ${
-            editIdx !== null ? "border-accent-blue/40 bg-accent-blue/5" : "border-line bg-bg-panel/60"
-          }`}>
+        {/* Add / Edit rule modal */}
+        {formOpen && (
+        <div className="fixed inset-0 z-30 flex items-start justify-center bg-black/70 backdrop-blur-sm p-4 overflow-y-auto" onClick={cancelEdit}>
+        <div id="rule-form" className="bg-bg-panel border border-line rounded-2xl shadow-2xl w-full max-w-3xl my-8 flex flex-col max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-line shrink-0">
+            <h2 className="text-base font-semibold">
+              {editIdx !== null ? `Edit rule · ${rules[editIdx]?.name}` : "Add alert"}
+            </h2>
+            <button onClick={cancelEdit} className="p-1.5 rounded-md text-muted hover:text-text hover:bg-bg-elev transition-colors">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+                <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+              </svg>
+            </button>
+          </div>
+          <div className="overflow-y-auto flex-1 px-5 py-5">
+            {err && (
+              <div className="mb-4 rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss flex items-center justify-between gap-3">
+                <span>{err}</span>
+                <button onClick={() => setErr(null)} className="text-loss/60 hover:text-loss text-xs shrink-0">dismiss</button>
+              </div>
+            )}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
             <Field label="Alert name" full>
               <input
@@ -519,36 +586,38 @@ export default function LiveAlerts() {
               </span>
             </div>
 
-            <div className="md:col-span-2 flex items-center gap-3 pt-1">
-              <label className="flex items-center gap-2 text-sm text-muted">
-                <input type="checkbox"
-                  checked={draft.enabled}
-                  onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
-                />
-                enabled on save
-              </label>
-              <div className="flex-1" />
-              {editIdx !== null && (
-                <button
-                  onClick={cancelEdit}
-                  disabled={busy}
-                  className="px-4 py-2 rounded-md border border-line text-muted text-sm hover:text-text disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-              )}
-              <button
-                onClick={addRule}
-                disabled={busy}
-                className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50"
-              >
-                {busy ? "Saving…" : editIdx !== null ? "Save changes" : "Add rule"}
-              </button>
             </div>
           </div>
-        </section>
+          <div className="flex items-center gap-3 px-5 py-4 border-t border-line shrink-0">
+            <label className="flex items-center gap-2 text-sm text-muted">
+              <input type="checkbox"
+                checked={draft.enabled}
+                onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
+              />
+              enabled on save
+            </label>
+            <div className="flex-1" />
+            <button
+              onClick={cancelEdit}
+              disabled={busy}
+              className="px-4 py-2 rounded-md border border-line text-muted text-sm hover:text-text disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={addRule}
+              disabled={busy}
+              className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50"
+            >
+              {busy ? "Saving…" : editIdx !== null ? "Save changes" : "Add alert"}
+            </button>
+          </div>
+        </div>
+        </div>
+        )}
 
-        {/* Recent firings */}
+        {/* Recent firings tab */}
+        {mainTab === "firings" && (
         <section>
           {(() => {
             const unread = firings.filter((f) => !f.read);
@@ -646,6 +715,7 @@ export default function LiveAlerts() {
             );
           })()}
         </section>
+        )}
       </main>
 
       {openDropdown && createPortal(

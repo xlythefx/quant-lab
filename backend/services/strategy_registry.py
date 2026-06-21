@@ -56,6 +56,11 @@ def list_strategies() -> list[dict]:
         d["symbol_defaults"] = dict(getattr(cls, "SYMBOL_DEFAULTS", {}) or {})
         d["timeframe_defaults"] = dict(getattr(cls, "TIMEFRAME_DEFAULTS", {}) or {})
         d["presets"] = dict(getattr(cls, "PRESETS", {}) or {})
+        # Per-symbol tradeable window (e.g. Lunar on ES → 2018-01-01..2026-04-30).
+        # The engine floors to this when no explicit dates are passed; the UI uses
+        # it to pre-fill and bound the date picker so a default run matches.
+        d["symbol_backtest_start"] = dict(getattr(cls, "SYMBOL_BACKTEST_START", {}) or {})
+        d["symbol_backtest_end"] = dict(getattr(cls, "SYMBOL_BACKTEST_END", {}) or {})
         out.append(d)
     return out
 

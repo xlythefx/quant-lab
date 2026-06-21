@@ -409,3 +409,16 @@ export async function getResearch(name) {
   const { data } = await api.get(`/api/skills/research/${encodeURIComponent(name)}`);
   return data; // {name, markdown}
 }
+
+// Report Import — parse an uploaded TradeStation Performance Report CSV.
+// One-off, session-only: no persistence on the server. Returns the full
+// dashboard payload {meta, reported, recomputed, equity_curve, ...}.
+export async function parseTradestationReport(file) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/api/report/tradestation", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 120_000,
+  });
+  return data;
+}

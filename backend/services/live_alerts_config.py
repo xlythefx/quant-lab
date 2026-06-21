@@ -28,6 +28,7 @@ import os
 from threading import Lock
 
 from config import DATA_DIR
+from services.atomic_io import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -147,11 +148,7 @@ def save_rules(rules) -> list[dict]:
     global _cache
     with _LOCK:
         coerced = _coerce_rules(rules)
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = _PATH + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump({"rules": coerced}, f, indent=2)
-        os.replace(tmp, _PATH)
+        atomic_write_json(_PATH, {"rules": coerced})
         _cache = coerced
         log.info("live_alerts saved: %d rule(s)", len(coerced))
         return [dict(r) for r in _cache]

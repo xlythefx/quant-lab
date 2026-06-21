@@ -124,7 +124,7 @@ class Rsi2ReversionStrategy(Strategy):
 
     META = StrategyMeta(
         id="rsi2_reversion",
-        name="RSI-2 Reversion (Long)",
+        name="RSI-2 Reversion (Long) - ES 1H",
         description=("Daily RSI(2) mean reversion, long-only. Buys oversold (RSI<20) dips in an "
                      "uptrend (price > 200-day SMA) on volatility-expansion days; exits on "
                      "RSI>80, a dollar stop with profit-protect, or after ~10 days."),

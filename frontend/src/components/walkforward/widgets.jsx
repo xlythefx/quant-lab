@@ -570,7 +570,7 @@ export function useParamStats(windows, searchSpace) {
   }, [windows, searchSpace]);
 }
 
-export function WindowHeatmap({ windows, searchSpace }) {
+export function WindowHeatmap({ windows, searchSpace, onCheckMonteCarlo }) {
   const [selectedIdx, setSelectedIdx] = useState(null);
   const { cols, stats } = useParamStats(windows, searchSpace);
 
@@ -694,8 +694,20 @@ export function WindowHeatmap({ windows, searchSpace }) {
       </div>
 
       {selectedIdx != null && (
-        <div className="pt-2 border-t border-line/30">
+        <div className="pt-2 border-t border-line/30 space-y-2">
           <WindowCard w={windows.find((w) => w.window_idx === selectedIdx)} />
+          {onCheckMonteCarlo && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => onCheckMonteCarlo(windows.find((w) => w.window_idx === selectedIdx))}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-accent-blue/50 text-accent-blue hover:bg-accent-blue/10 transition"
+                title="Robustness-test this window's params over its OOS range in Monte Carlo"
+              >
+                Check Monte Carlo →
+              </button>
+            </div>
+          )}
         </div>
       )}
     </section>

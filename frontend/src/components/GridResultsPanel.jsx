@@ -1,27 +1,22 @@
-import { useMemo, useState } from "react";
-import { fmtNum, fmtInt, fmtPct } from "../services/format.js";
+import { useEffect, useMemo, useState } from "react";
+import { fmtNum, fmtInt } from "../services/format.js";
+import { METRIC_COLUMNS, METRIC_TO_STAT, metricColor, statValue } from "./gridMetrics.js";
+import GridPlateauPanel from "./GridPlateauPanel.jsx";
+import CostAssumptions from "./CostAssumptions.jsx";
+import GridDetailModal from "./GridDetailModal.jsx";
 
 /**
  * Grid-search results visualization.
  *
- * Always renders a sortable table. If the run gridded exactly one param,
- * also renders a line chart (metric vs param value). If exactly two,
- * renders a heatmap.
+ * Always renders the per-param plateau tiles and a sortable table. If the run
+ * gridded exactly one param, also renders a line chart (metric vs param
+ * value). If exactly two, a heatmap. One shared metric selector drives the
+ * chart, heatmap, and plateau tiles together; the table sorts independently.
  *
  * Props:
- *   result: { results: [{combo_idx, params, stats}], grid_params, metric, ... }
+ *   result: { results: [{combo_idx, params, stats}], grid_params, metric,
+ *             risk_config?, ... }
  */
-
-const METRIC_COLUMNS = [
-  { id: "sharpe",            label: "Sharpe",        fmt: (v) => fmtNum(v),       sortable: true,  signed: false },
-  { id: "total_return_pct",  label: "Return %",      fmt: (v) => fmtPct(v),       sortable: true,  signed: true  },
-  { id: "max_drawdown_pct",  label: "Max DD %",      fmt: (v) => fmtPct(v, false),sortable: true,  signed: false, lowerIsBetter: true },
-  { id: "win_rate",          label: "Win Rate",      fmt: (v) => `${fmtNum((v ?? 0) * 100)}%`, sortable: true, signed: false },
-  { id: "trades",            label: "Trades",        fmt: (v) => fmtInt(v),       sortable: true,  signed: false },
-  { id: "profit_factor",     label: "Profit Factor", fmt: (v) => v == null ? "∞" : fmtNum(v), sortable: true, signed: false },
-];
-
-const CHART_METRICS = METRIC_COLUMNS;
 
 function exportCsv(rows, gridParams) {
   const colHeaders = METRIC_COLUMNS.map((c) => c.label);
@@ -54,6 +49,14 @@ export default function GridResultsPanel({ result }) {
   const gridParams = result?.grid_params || [];
   const dims = gridParams.length;
 
+  // The backend's metric id ("total_return") is not always the stats key
+  // ("total_return_pct") — map it before using it as a default sort/chart key.
+  const defaultStatKey = METRIC_TO_STAT[result?.metric] || result?.metric || "sharpe";
+
+  // One metric selector shared by the chart, heatmap, and plateau tiles.
+  const [metricId, setMetricId] = useState(defaultStatKey);
+  useEffect(() => { setMetricId(defaultStatKey); }, [result]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (rows.length === 0) {
     return (
       <section className="rounded-xl border border-line bg-bg-panel/60 p-6 text-center text-sm text-muted">
@@ -64,33 +67,55 @@ export default function GridResultsPanel({ result }) {
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div className="text-[11px] uppercase tracking-wider text-muted">
           Grid Result · {rows.length} of {result.total_combos} backtests
           {result.partial && <span className="text-amber-400"> · partial (cancelled)</span>}
           {" · "}default metric = <span className="font-mono">{result.metric}</span>
         </div>
-        <button
-          onClick={() => exportCsv(rows, gridParams)}
-          className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md border border-line text-muted hover:text-text hover:border-accent-blue transition"
-          title="Export results as CSV"
-        >
-          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <select
+            value={metricId}
+            onChange={(e) => setMetricId(e.target.value)}
+            className="px-2 py-1 text-xs font-mono rounded bg-bg border border-line focus:outline-none focus:border-accent-blue"
+            title="Metric shown in the chart / heatmap / plateau tiles"
+          >
+            {METRIC_COLUMNS.map((m) => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+          <button
+            onClick={() => exportCsv(rows, gridParams)}
+            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-md border border-line text-muted hover:text-text hover:border-accent-blue transition"
+            title="Export results as CSV"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M8 2v8M5 7l3 3 3-3M3 12h10" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            CSV
+          </button>
+        </div>
       </div>
 
-      {dims === 1 && <Grid1DChart rows={rows} gridParams={gridParams} defaultMetric={result.metric} />}
-      {dims === 2 && <Grid2DHeatmap rows={rows} gridParams={gridParams} defaultMetric={result.metric} />}
-      {dims >= 3 && (
-        <div className="rounded-md border border-line/40 bg-bg-elev/20 px-4 py-3 text-xs text-muted">
-          Heatmap available when sweeping 1 or 2 params at a time. Use the table below to explore the {dims}-D grid.
+      {result.risk_config ? (
+        <CostAssumptions rc={result.risk_config} title="Costs used for this run" showEditLink={false} />
+      ) : (
+        <div className="text-[11px] text-muted/70 font-mono">
+          Cost snapshot unavailable for this result — re-run to capture the fees used.
         </div>
       )}
 
-      <ResultsTable rows={rows} gridParams={gridParams} defaultMetric={result.metric} />
+      {dims === 1 && <Grid1DChart rows={rows} gridParams={gridParams} metricId={metricId} />}
+      {dims === 2 && <Grid2DHeatmap rows={rows} gridParams={gridParams} metricId={metricId} />}
+
+      <GridPlateauPanel rows={rows} gridParams={gridParams} metricId={metricId} />
+
+      <ResultsTable
+        rows={rows}
+        gridParams={gridParams}
+        defaultMetric={defaultStatKey}
+        baseParams={result?.base_params || {}}
+      />
     </section>
   );
 }
@@ -99,20 +124,23 @@ export default function GridResultsPanel({ result }) {
 // Sortable table
 // ---------------------------------------------------------------------------
 
-function ResultsTable({ rows, gridParams, defaultMetric }) {
+function ResultsTable({ rows, gridParams, defaultMetric, baseParams }) {
   const [sortKey, setSortKey] = useState(defaultMetric);
   const [sortDir, setSortDir] = useState("desc"); // desc by default for metrics
-  const [expanded, setExpanded] = useState(null); // combo_idx
+  const [detail, setDetail] = useState(null); // row object shown in the modal
 
   const sorted = useMemo(() => {
     const isParam = gridParams.some((gp) => gp.name === sortKey);
-    const get = (r) => isParam ? r.params[sortKey] : r.stats[sortKey];
+    // statValue() maps profit_factor null -> Infinity (it displays as "∞"),
+    // so zero-loss combos sort as best instead of falling to the bottom.
+    const get = (r) => isParam ? r.params[sortKey] : statValue(r.stats, sortKey);
     const arr = [...rows];
     arr.sort((a, b) => {
       const av = get(a), bv = get(b);
       if (av == null && bv == null) return 0;
       if (av == null) return 1;
       if (bv == null) return -1;
+      if (av === bv) return 0; // avoid Infinity - Infinity = NaN
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return arr;
@@ -129,6 +157,9 @@ function ResultsTable({ rows, gridParams, defaultMetric }) {
 
   return (
     <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
+      <div className="px-3 py-2 text-[10px] text-muted/70 border-b border-line/30">
+        Click any row for full analytics (trade counts, long/short split, drawdown…).
+      </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs font-mono">
           <thead className="bg-bg-elev/40 text-muted">
@@ -140,7 +171,7 @@ function ResultsTable({ rows, gridParams, defaultMetric }) {
                 </SortHeader>
               ))}
               {METRIC_COLUMNS.map((c) => (
-                <SortHeader key={c.id} active={sortKey === c.id} dir={sortDir} onClick={() => clickHeader(c.id)} align="right">
+                <SortHeader key={c.id} active={sortKey === c.id} dir={sortDir} onClick={() => clickHeader(c.id)} align="right" title={c.title}>
                   {c.label}
                 </SortHeader>
               ))}
@@ -152,22 +183,31 @@ function ResultsTable({ rows, gridParams, defaultMetric }) {
                 key={r.combo_idx}
                 row={r}
                 gridParams={gridParams}
-                expanded={expanded === r.combo_idx}
-                onClick={() => setExpanded(expanded === r.combo_idx ? null : r.combo_idx)}
+                active={detail?.combo_idx === r.combo_idx}
+                onClick={() => setDetail(r)}
               />
             ))}
           </tbody>
         </table>
       </div>
+
+      <GridDetailModal
+        open={!!detail}
+        onClose={() => setDetail(null)}
+        row={detail}
+        gridParams={gridParams}
+        baseParams={baseParams}
+      />
     </div>
   );
 }
 
-function SortHeader({ children, active, dir, onClick, align = "left" }) {
+function SortHeader({ children, active, dir, onClick, align = "left", title }) {
   const arrow = !active ? "" : dir === "asc" ? " ▲" : " ▼";
   return (
     <th
       onClick={onClick}
+      title={title}
       className={`px-3 py-2 cursor-pointer select-none hover:text-text ${align === "right" ? "text-right" : "text-left"} ${active ? "text-text" : ""}`}
     >
       {children}{arrow}
@@ -175,68 +215,32 @@ function SortHeader({ children, active, dir, onClick, align = "left" }) {
   );
 }
 
-function Row({ row, gridParams, expanded, onClick }) {
+function Row({ row, gridParams, active, onClick }) {
   const s = row.stats || {};
-  const ret = s.total_return_pct ?? 0;
   return (
-    <>
-      <tr
-        onClick={onClick}
-        className={`border-t border-line/30 cursor-pointer hover:bg-bg-elev/30 ${expanded ? "bg-bg-elev/40" : ""}`}
-      >
-        <td className="px-3 py-1.5 text-muted">{row.combo_idx}</td>
-        {gridParams.map((gp) => (
-          <td key={gp.name} className="px-3 py-1.5 text-text">
-            {gp.type === "int" ? fmtInt(row.params[gp.name]) : fmtNum(row.params[gp.name])}
+    <tr
+      onClick={onClick}
+      className={`border-t border-line/30 cursor-pointer hover:bg-bg-elev/30 ${active ? "bg-bg-elev/40" : ""}`}
+    >
+      <td className="px-3 py-1.5 text-muted">{row.combo_idx}</td>
+      {gridParams.map((gp) => (
+        <td key={gp.name} className="px-3 py-1.5 text-text">
+          {gp.type === "int" ? fmtInt(row.params[gp.name]) : fmtNum(row.params[gp.name])}
+        </td>
+      ))}
+      {METRIC_COLUMNS.map((c) => {
+        const v = s[c.id];
+        let cls = "text-text";
+        if (c.signed && typeof v === "number") {
+          cls = v >= 0 ? "text-profit" : "text-loss";
+        }
+        return (
+          <td key={c.id} className={`px-3 py-1.5 text-right ${cls}`}>
+            {c.fmt(v)}
           </td>
-        ))}
-        {METRIC_COLUMNS.map((c) => {
-          const v = s[c.id];
-          let cls = "text-text";
-          if (c.signed && typeof v === "number") {
-            cls = v >= 0 ? "text-profit" : "text-loss";
-          }
-          if (c.lowerIsBetter && typeof v === "number" && v > 0) {
-            cls = "text-loss";
-          }
-          return (
-            <td key={c.id} className={`px-3 py-1.5 text-right ${cls}`}>
-              {c.fmt(v)}
-            </td>
-          );
-        })}
-      </tr>
-      {expanded && <ExpandedRow row={row} gridParams={gridParams} />}
-    </>
-  );
-}
-
-function ExpandedRow({ row, gridParams }) {
-  const s = row.stats || {};
-  return (
-    <tr className="border-t border-line/30 bg-bg-elev/20">
-      <td colSpan={gridParams.length + METRIC_COLUMNS.length + 1} className="px-4 py-3">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px] font-mono">
-          <KV k="Final Equity"   v={fmtNum(s.final_equity)} />
-          <KV k="Total $"         v={fmtNum(s.total_return_dollars)} />
-          <KV k="Avg Trade $"     v={fmtNum(s.avg_pnl_dollars)} />
-          <KV k="Gross Profit"    v={fmtNum(s.gross_profit)} />
-          <KV k="Gross Loss"      v={fmtNum(s.gross_loss)} />
-          <KV k="Max DD $"        v={fmtNum(s.max_drawdown_dollars)} />
-          <KV k="Wins"            v={fmtInt(s.wins)} />
-          <KV k="Losses"          v={fmtInt(s.losses)} />
-        </div>
-      </td>
+        );
+      })}
     </tr>
-  );
-}
-
-function KV({ k, v }) {
-  return (
-    <div className="flex items-center justify-between gap-2 rounded border border-line/30 bg-bg/40 px-2 py-1">
-      <span className="text-muted text-[10px] uppercase">{k}</span>
-      <span className="text-text">{v}</span>
-    </div>
   );
 }
 
@@ -244,8 +248,7 @@ function KV({ k, v }) {
 // 1D line chart (one param sweep)
 // ---------------------------------------------------------------------------
 
-function Grid1DChart({ rows, gridParams, defaultMetric }) {
-  const [metricId, setMetricId] = useState(defaultMetric);
+function Grid1DChart({ rows, gridParams, metricId }) {
   const gp = gridParams[0];
   const points = useMemo(() => {
     return rows
@@ -274,19 +277,8 @@ function Grid1DChart({ rows, gridParams, defaultMetric }) {
 
   return (
     <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-2">
-      <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold text-text">
-          {METRIC_COLUMNS.find((m) => m.id === metricId)?.label || metricId} vs <span className="font-mono">{gp.name}</span>
-        </div>
-        <select
-          value={metricId}
-          onChange={(e) => setMetricId(e.target.value)}
-          className="px-2 py-1 text-xs font-mono rounded bg-bg border border-line focus:outline-none focus:border-accent-blue"
-        >
-          {CHART_METRICS.map((m) => (
-            <option key={m.id} value={m.id}>{m.label}</option>
-          ))}
-        </select>
+      <div className="text-sm font-semibold text-text">
+        {METRIC_COLUMNS.find((m) => m.id === metricId)?.label || metricId} vs <span className="font-mono">{gp.name}</span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[220px]">
         <line x1={PAD_L} y1={zeroY} x2={W - PAD_R} y2={zeroY} stroke="rgba(255,255,255,0.15)" strokeDasharray="2 3" />
@@ -312,8 +304,7 @@ function Grid1DChart({ rows, gridParams, defaultMetric }) {
 // 2D heatmap (two-param sweep)
 // ---------------------------------------------------------------------------
 
-function Grid2DHeatmap({ rows, gridParams, defaultMetric }) {
-  const [metricId, setMetricId] = useState(defaultMetric);
+function Grid2DHeatmap({ rows, gridParams, metricId }) {
   const [gpX, gpY] = gridParams; // x-axis = first param, y-axis = second
   const xVals = useMemo(() => [...gpX.values].sort((a, b) => a - b), [gpX]);
   const yVals = useMemo(() => [...gpY.values].sort((a, b) => a - b), [gpY]);
@@ -328,45 +319,18 @@ function Grid2DHeatmap({ rows, gridParams, defaultMetric }) {
     return m;
   }, [rows, gpX.name, gpY.name, metricId]);
 
-  // Color scale: red (worst) → neutral → green (best). Center at 0 when metric is signed.
-  const metricMeta = METRIC_COLUMNS.find((m) => m.id === metricId);
+  // All stats are numerically-higher-is-better (max_drawdown_pct is negative:
+  // -9 is a worse drawdown than -7.8), so the plain ramp needs no inversion.
   const allValues = Array.from(valueAt.values()).filter((v) => typeof v === "number" && Number.isFinite(v));
   if (allValues.length === 0) return null;
   const vMin = Math.min(...allValues);
   const vMax = Math.max(...allValues);
-  const lowerBetter = !!metricMeta?.lowerIsBetter;
-
-  const color = (v) => {
-    if (v == null || !Number.isFinite(v)) return "rgba(255,255,255,0.04)";
-    // Normalize to 0..1 within observed range.
-    let t = (v - vMin) / (vMax - vMin || 1);
-    if (lowerBetter) t = 1 - t;
-    // 0 = red, 0.5 = neutral, 1 = green
-    if (t < 0.5) {
-      const a = t / 0.5;       // 0..1
-      return `rgba(239, 68, 68, ${0.55 - a * 0.4})`;
-    } else {
-      const a = (t - 0.5) / 0.5;
-      return `rgba(16, 185, 129, ${0.15 + a * 0.55})`;
-    }
-  };
 
   return (
     <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="text-sm font-semibold text-text">
-          {METRIC_COLUMNS.find((m) => m.id === metricId)?.label || metricId} heatmap
-          &nbsp;<span className="text-muted text-xs">({gpX.name} × {gpY.name})</span>
-        </div>
-        <select
-          value={metricId}
-          onChange={(e) => setMetricId(e.target.value)}
-          className="px-2 py-1 text-xs font-mono rounded bg-bg border border-line focus:outline-none focus:border-accent-blue"
-        >
-          {CHART_METRICS.map((m) => (
-            <option key={m.id} value={m.id}>{m.label}</option>
-          ))}
-        </select>
+      <div className="text-sm font-semibold text-text">
+        {METRIC_COLUMNS.find((m) => m.id === metricId)?.label || metricId} heatmap
+        &nbsp;<span className="text-muted text-xs">({gpX.name} × {gpY.name})</span>
       </div>
 
       <div className="overflow-x-auto">
@@ -387,7 +351,7 @@ function Grid2DHeatmap({ rows, gridParams, defaultMetric }) {
                 <td className="px-2 py-1 text-right text-muted">{fmtNum(y)}</td>
                 {xVals.map((x) => {
                   const v = valueAt.get(`${x}|${y}`);
-                  const bg = color(v);
+                  const bg = metricColor(v, vMin, vMax);
                   const display = v == null || !Number.isFinite(v) ? "—" : fmtNum(v);
                   return (
                     <td
@@ -408,7 +372,6 @@ function Grid2DHeatmap({ rows, gridParams, defaultMetric }) {
 
       <div className="text-[10px] text-muted/70 font-mono">
         Color: <span className="text-loss">red</span> = worst, <span className="text-profit">green</span> = best
-        {lowerBetter && <> (inverted — lower is better for this metric)</>}
         &nbsp;· range {fmtNum(vMin)} → {fmtNum(vMax)}
       </div>
     </div>

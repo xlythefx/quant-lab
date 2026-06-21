@@ -198,6 +198,12 @@ class LunarTSTestStrategy(Strategy):
                   description="Exit long on trough / short on peak at session open "
                               "(TS 'LX/SX - Full/New Moon Exit' inside the OpenS gate)."),
 
+        # --- Execution realism ---
+        ParamSpec("look_inside_bar", ParamType.BOOL, True, group="Execution",
+                  description="Look-Inside-Bar: detect stop / target / breakeven INTRABAR via "
+                              "the bar's high & low (matches TS Look-Inside-Bar ON). OFF = only "
+                              "check at the bar CLOSE — more conservative, fewer/later fills."),
+
         # --- Entries ---
         ParamSpec("one_entry_per_day", ParamType.BOOL, True, group="Entries",
                   description="Cap to 1 entry per session (TS entriestoday(d) < 1)."),
@@ -214,11 +220,12 @@ class LunarTSTestStrategy(Strategy):
 
     META = StrategyMeta(
         id="lunar_ts_test",
-        name="Lunar Tradestation Test Strategy",
+        name="Lunar Tradestation Test Strategy - ES",
         description=("Literal port of the TradeStation/MultiCharts Moon Cycle bias engine "
                      "(bar-based Phase[1/35/65] lags, Date+2 phase, $-breakeven). Side-by-side "
                      "TEST against the production 'lunar' strategy."),
         schema=PARAM_SCHEMA,
+        archived=True,
     )
 
     OVERLAYS = [
@@ -237,6 +244,7 @@ class LunarTSTestStrategy(Strategy):
         out  = df.copy()
         high  = out["high"].astype(float)
         low   = out["low"].astype(float)
+        close = out["close"].astype(float)
         open_ = out["open"].astype(float)
         time  = out["time"].astype(float)
 
@@ -245,6 +253,7 @@ class LunarTSTestStrategy(Strategy):
         time_a  = time.to_numpy()
         high_a  = high.to_numpy()
         low_a   = low.to_numpy()
+        close_a = close.to_numpy()
         open_a  = open_.to_numpy()
         phase_a = phase.to_numpy()
 
@@ -289,6 +298,10 @@ class LunarTSTestStrategy(Strategy):
         max_bars    = int(p["n_bars_exit"])
         one_per_day = bool(p.get("one_entry_per_day", True))
         use_dlr     = stop_dlr > 0 and tgt_dlr > 0
+        # Look-Inside-Bar: when True, stop/target/breakeven are tested against the
+        # bar's high & low (intrabar, like TS LIB ON). When False, only the close
+        # is used, so a level must be breached AT the close to trigger.
+        look_inside = bool(p.get("look_inside_bar", True))
 
         pos             = 0
         entry_price     = np.nan
@@ -303,6 +316,11 @@ class LunarTSTestStrategy(Strategy):
         for t in range(n):
             h = high_a[t]
             l = low_a[t]
+            cl_t = close_a[t]
+            # Price probes for level tests: full intrabar range when Look-Inside-Bar
+            # is on, else the close only (so a stop/target must be hit at the close).
+            hi_chk = h if look_inside else cl_t
+            lo_chk = l if look_inside else cl_t
 
             if is_sess[t]:
                 session_count += 1
@@ -310,9 +328,9 @@ class LunarTSTestStrategy(Strategy):
             # --- Exit processing (every bar) ---
             if pos != 0 and np.isfinite(entry_price):
                 if pos == 1:
-                    if h > mfe_price: mfe_price = float(h)
+                    if hi_chk > mfe_price: mfe_price = float(hi_chk)
                 else:
-                    if l < mfe_price: mfe_price = float(l)
+                    if lo_chk < mfe_price: mfe_price = float(lo_chk)
 
                 reason = None
                 if pos == 1:
@@ -324,11 +342,11 @@ class LunarTSTestStrategy(Strategy):
                         tgt_lvl  =  np.inf
                     be_armed = (mfe_price - entry_price) * pv >= stop_dlr if use_dlr else False
                     be_stop  = entry_price + be_off_pts
-                    if   l <= stop_lvl:                          reason = "stop"
-                    elif h >= tgt_lvl:                           reason = "target"
+                    if   lo_chk <= stop_lvl:                     reason = "stop"
+                    elif hi_chk >= tgt_lvl:                      reason = "target"
                     elif is_sess[t] and phase_flip and trough_bar[t]:  reason = "phase_flip"
                     elif (t - entry_idx) >= max_bars:            reason = "maxbars"
-                    elif be_armed and l <= be_stop:             reason = "breakeven"
+                    elif be_armed and lo_chk <= be_stop:        reason = "breakeven"
                 else:
                     if use_dlr:
                         stop_lvl = entry_price + stop_dlr / pv
@@ -338,11 +356,11 @@ class LunarTSTestStrategy(Strategy):
                         tgt_lvl  = -np.inf
                     be_armed = (entry_price - mfe_price) * pv >= stop_dlr if use_dlr else False
                     be_stop  = entry_price - be_off_pts
-                    if   h >= stop_lvl:                          reason = "stop"
-                    elif l <= tgt_lvl:                           reason = "target"
+                    if   hi_chk >= stop_lvl:                     reason = "stop"
+                    elif lo_chk <= tgt_lvl:                      reason = "target"
                     elif is_sess[t] and phase_flip and peak_bar[t]:    reason = "phase_flip"
                     elif (t - entry_idx) >= max_bars:            reason = "maxbars"
-                    elif be_armed and h >= be_stop:             reason = "breakeven"
+                    elif be_armed and hi_chk >= be_stop:        reason = "breakeven"
 
                 if reason:
                     o = open_a[t]

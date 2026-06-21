@@ -6,6 +6,7 @@ import DateRangePicker from "../components/DateRangePicker.jsx";
 import ConfirmModal from "../components/ConfirmModal.jsx";
 import GridSearchParamEditor from "../components/GridSearchParamEditor.jsx";
 import GridResultsPanel from "../components/GridResultsPanel.jsx";
+import CostAssumptions from "../components/CostAssumptions.jsx";
 import {
   getSymbols, getStrategies,
   startGridSearch, cancelGridSearch,
@@ -51,6 +52,10 @@ export default function GridSearch() {
   const [strategyId, setStrategyId] = usePersistentState("ql.gs.strategy", "");
   const [range, setRange]           = usePersistentState("ql.gs.range", { start: "", end: "" });
   const [metric, setMetric]         = usePersistentState("ql.gs.metric", "sharpe");
+  // Optional early-stop: blank = exhaustive full grid; a number stops the sweep
+  // at the first combo whose trade count lands within ±tol of the target.
+  const [targetTrades, setTargetTrades] = usePersistentState("ql.gs.targetTrades", "");
+  const [targetTol, setTargetTol]       = usePersistentState("ql.gs.targetTol", "0");
 
   // Per-strategy params (reset when strategy changes).
   const [baseParams, setBaseParams] = usePersistentState("ql.gs.base", {});
@@ -153,6 +158,9 @@ export default function GridSearch() {
         setResult(p.result);
         setJobState((prev) => ({ ...(prev || {}), state: "done" }));
       },
+      onTargetHit: (p) => {
+        setJobState((prev) => ({ ...(prev || {}), target_match: p }));
+      },
       onCancelled: () => {
         setJobState((prev) => ({ ...(prev || {}), state: "cancelled" }));
       },
@@ -198,6 +206,8 @@ export default function GridSearch() {
         base_params: baseParams,
         grid_params: gridParams,
         metric,
+        target_trades: targetTrades === "" ? null : Number(targetTrades),
+        target_trades_tol: Number(targetTol) || 0,
       });
     } catch (e) {
       setError(e?.response?.data?.error || e.message);
@@ -277,9 +287,35 @@ export default function GridSearch() {
                 ))}
               </select>
             </Field>
+
+            <Field label="Stop at trades">
+              <input
+                type="number" min="0" placeholder="off"
+                value={targetTrades}
+                onChange={(e) => setTargetTrades(e.target.value)}
+                className="w-20 px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+              />
+              <span className="text-xs text-muted">±</span>
+              <input
+                type="number" min="0"
+                value={targetTol}
+                onChange={(e) => setTargetTol(e.target.value)}
+                disabled={targetTrades === ""}
+                className="w-14 px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue disabled:opacity-40"
+              />
+            </Field>
           </div>
 
+          {targetTrades !== "" && (
+            <div className="text-[11px] font-mono text-muted -mt-1">
+              Sweep stops at the first combo with {targetTrades}
+              {Number(targetTol) > 0 ? ` ±${targetTol}` : ""} trades. Leave blank for a full grid.
+            </div>
+          )}
+
           <EstimateBar estimate={estimate} />
+
+          <CostAssumptions />
 
           {activeStrategy && (
             <div className="pt-2 border-t border-line/40">
@@ -319,6 +355,16 @@ export default function GridSearch() {
         {(running || jobState?.state === "cancelled") && <ProgressPanel jobState={jobState} />}
 
         {/* ---------------- Result ---------------- */}
+        {result?.stopped_early && result?.target_match && !running && (
+          <div className="rounded-md border border-profit/40 bg-profit/10 px-4 py-3 text-sm text-profit">
+            Stopped early at combo {result.target_match.combo_idx} of {result.total_combos} —
+            hit <span className="font-mono">{result.target_match.trades}</span> trades
+            (target {result.target_trades}{result.target_trades_tol > 0 ? ` ±${result.target_trades_tol}` : ""}):{" "}
+            <span className="font-mono text-text">
+              {Object.entries(result.target_match.params).map(([k, v]) => `${k}=${v}`).join(", ")}
+            </span>
+          </div>
+        )}
         {result && !running && <GridResultsPanel result={result} />}
       </main>
 

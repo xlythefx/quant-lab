@@ -84,6 +84,22 @@ def _wanted_rules() -> dict[str, dict]:
     }
 
 
+def _stop_runner(name: str):
+    """Pop and stop a runner without ever raising.
+
+    A runner whose underlying live stream has wedged (e.g. a websocket that
+    died with a teardown error) must not crash refresh() — otherwise every
+    subsequent rule save 500s until the process is restarted.
+    """
+    runner = _runners.pop(name, None)
+    if runner is None:
+        return
+    try:
+        runner.stop()
+    except Exception:
+        log.exception("[alerts_daemon] error stopping runner %s (continuing)", name)
+
+
 def refresh():
     """Reconcile running headless runners against the current enabled rules.
     Safe to call from any thread (e.g. after saving rules via the UI).
@@ -97,7 +113,7 @@ def refresh():
         # Stop runners no longer needed.
         for name in list(_runners):
             if name not in wanted:
-                _runners.pop(name).stop()
+                _stop_runner(name)
 
         # Start runners for new/changed rules.
         for name, rule in wanted.items():
@@ -105,7 +121,7 @@ def refresh():
                 # Restart if params changed so the strategy picks up the new config.
                 if _runners[name].rule.get("params") == rule.get("params"):
                     continue
-                _runners.pop(name).stop()
+                _stop_runner(name)
             try:
                 runner = _HeadlessRunner(rule, _socket_manager)
                 runner.start()

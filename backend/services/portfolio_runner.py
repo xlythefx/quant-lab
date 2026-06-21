@@ -80,6 +80,13 @@ class _Stream:
             self.atr_mult = 0.0
             self.has_exact_fills = False
             self.efl_a = self.efs_a = None
+            self.has_entry_fills = False
+            self.efl_in_a = self.efs_in_a = None
+            self.has_risk_scale = False
+            self.risk_scale_a = None
+            self.has_scale_out = False
+            self.scl_a = self.scs_a = None
+            self.scale_out_frac = 0.0
             self.ts_to_idx = {}
         else:
             self.time_a  = sig_df["time"].to_numpy(dtype=np.int64)
@@ -104,6 +111,26 @@ class _Stream:
             self.efl_a = sig_df["exit_fill_long"].to_numpy(dtype=float)  if self.has_exact_fills else None
             self.efs_a = sig_df["exit_fill_short"].to_numpy(dtype=float) if self.has_exact_fills else None
 
+            # Option-B exact ENTRY fills (stop/limit level, gap-protected). Opt-in —
+            # mirrors backtest_engine so N=1 stays equivalent. Strategies without these
+            # columns fall back to next-bar-open entries (unchanged behavior).
+            self.has_entry_fills = ("entry_fill_long" in sig_df.columns
+                                    and "entry_fill_short" in sig_df.columns)
+            self.efl_in_a = sig_df["entry_fill_long"].to_numpy(dtype=float)  if self.has_entry_fills else None
+            self.efs_in_a = sig_df["entry_fill_short"].to_numpy(dtype=float) if self.has_entry_fills else None
+
+            # Opt-in engine hooks (mirror backtest_engine): per-bar risk multiplier
+            # (ATR sizing) + partial scale-out. Absent => unchanged behavior.
+            self.has_risk_scale = "risk_scale" in sig_df.columns
+            self.risk_scale_a   = sig_df["risk_scale"].to_numpy(dtype=float) if self.has_risk_scale else None
+            self.has_scale_out  = ("scale_exit_long" in sig_df.columns and "scale_exit_short" in sig_df.columns)
+            self.scl_a = sig_df["scale_exit_long"].fillna(False).astype(bool).to_numpy()  if self.has_scale_out else None
+            self.scs_a = sig_df["scale_exit_short"].fillna(False).astype(bool).to_numpy() if self.has_scale_out else None
+            self.scale_out_frac = (float(sig_df["scale_out_frac"].iloc[0])
+                                   if self.has_scale_out and "scale_out_frac" in sig_df.columns else 0.0)
+            if not (0.0 < self.scale_out_frac < 1.0):
+                self.has_scale_out = False
+
             self.ts_to_idx = {int(self.time_a[i]): i for i in range(len(self.time_a))}
 
         # Per-strategy attribution accumulators.
@@ -119,6 +146,14 @@ class _Stream:
 
         # risk_pct (per-strategy). 3.0 fallback matches historical default.
         self.risk_frac = float(strategy.p.get("risk_pct", 3.0)) / 100.0
+
+        # LOOK-AHEAD (diagnostic, fictitious): when on, entries act on THIS bar's
+        # OWN signal and fill at the bar's most favorable extreme (low for longs,
+        # high for shorts) instead of the next-bar open. Read straight from the
+        # request params — it's not a per-strategy schema field, so it would be
+        # dropped from strategy.p. Mirrors backtest_engine so N=1 stays equivalent.
+        self.look_ahead = bool((spec.params or {}).get(
+            "look_ahead", getattr(strategy, "p", {}).get("look_ahead", False)))
 
         # Instrument-driven futures sizing: index futures (asset_class
         # 'equity_index_future', e.g. ES contract_size=50) size as N contracts ×
@@ -586,6 +621,30 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
     # Longs
     still_long: list[dict] = []
     for tr in s.tranches_long:
+        # Partial scale-out (once): close scale_out_frac at this bar's open, book it,
+        # shrink the tranche, let the rest ride. Mirrors backtest_engine.
+        if s.has_scale_out and bool(s.scl_a[t - 1]) and not tr.get("scaled"):
+            part   = tr["units"] * s.scale_out_frac
+            fill_p = op * (1.0 - slippage)
+            fee_p  = s.fee(abs(fill_p * part))
+            pnl    = (fill_p - tr["entry_price"]) * part - fee_p
+            if s.contract_sizing:
+                state.cash += pnl
+            else:
+                state.cash += abs(tr["entry_price"] * part) + pnl
+            s.realized_pnl += pnl
+            fo_p = tr["fee_open"] * s.scale_out_frac
+            s.trades.append(backtest_engine._trade(
+                "long", tr["entry_price"], fill_p, tr["entry_time"], ts,
+                pnl - fo_p, part, fo_p + fee_p,
+                starting_capital=starting_capital,
+                mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                slippage=tr.get("slip_open", 0.0) * s.scale_out_frac + (op - fill_p) * part,
+            ))
+            tr["units"]     *= (1.0 - s.scale_out_frac)
+            tr["fee_open"]  *= (1.0 - s.scale_out_frac)
+            tr["slip_open"]  = tr.get("slip_open", 0.0) * (1.0 - s.scale_out_frac)
+            tr["scaled"] = True
         mean_revert = bool(s.bxl_a[t - 1])
         stop_hit = False
         if s.has_atr_stop and np.isfinite(tr["atr_at_entry"]):
@@ -593,12 +652,13 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
         if mean_revert or stop_hit:
             # Option-B: exact stop/target/BE fill level when the strategy provides it.
             if s.has_exact_fills and mean_revert and np.isfinite(s.efl_a[t - 1]):
-                fill = float(s.efl_a[t - 1]) * (1.0 - slippage)
+                ideal = float(s.efl_a[t - 1])
             else:
-                fill = op * (1.0 - slippage)
+                ideal = op
+            fill = ideal * (1.0 - slippage)
             _close_tranche(s, tr, "long", fill, ts, state,
                            fee_flat, fee_pct, slippage, starting_capital,
-                           slipped=True)
+                           slipped=True, slip_close=(ideal - fill) * tr["units"])
         else:
             still_long.append(tr)
     s.tranches_long = still_long
@@ -606,6 +666,29 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
     # Shorts
     still_short: list[dict] = []
     for tr in s.tranches_short:
+        # Partial scale-out (once): mirror of the long side.
+        if s.has_scale_out and bool(s.scs_a[t - 1]) and not tr.get("scaled"):
+            part   = tr["units"] * s.scale_out_frac
+            fill_p = op * (1.0 + slippage)
+            fee_p  = s.fee(abs(fill_p * part))
+            pnl    = (tr["entry_price"] - fill_p) * part - fee_p
+            if s.contract_sizing:
+                state.cash += pnl
+            else:
+                state.cash += abs(tr["entry_price"] * part) + pnl
+            s.realized_pnl += pnl
+            fo_p = tr["fee_open"] * s.scale_out_frac
+            s.trades.append(backtest_engine._trade(
+                "short", tr["entry_price"], fill_p, tr["entry_time"], ts,
+                pnl - fo_p, part, fo_p + fee_p,
+                starting_capital=starting_capital,
+                mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                slippage=tr.get("slip_open", 0.0) * s.scale_out_frac + (fill_p - op) * part,
+            ))
+            tr["units"]     *= (1.0 - s.scale_out_frac)
+            tr["fee_open"]  *= (1.0 - s.scale_out_frac)
+            tr["slip_open"]  = tr.get("slip_open", 0.0) * (1.0 - s.scale_out_frac)
+            tr["scaled"] = True
         mean_revert = bool(s.bxs_a[t - 1])
         stop_hit = False
         if s.has_atr_stop and np.isfinite(tr["atr_at_entry"]):
@@ -613,12 +696,13 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
         if mean_revert or stop_hit:
             # Option-B: exact stop/target/BE fill level when the strategy provides it.
             if s.has_exact_fills and mean_revert and np.isfinite(s.efs_a[t - 1]):
-                fill = float(s.efs_a[t - 1]) * (1.0 + slippage)
+                ideal = float(s.efs_a[t - 1])
             else:
-                fill = op * (1.0 + slippage)
+                ideal = op
+            fill = ideal * (1.0 + slippage)
             _close_tranche(s, tr, "short", fill, ts, state,
                            fee_flat, fee_pct, slippage, starting_capital,
-                           slipped=True)
+                           slipped=True, slip_close=(fill - ideal) * tr["units"])
         else:
             still_short.append(tr)
     s.tranches_short = still_short
@@ -627,10 +711,10 @@ def _process_exits(s: _Stream, t: int, state: PortfolioState,
 def _close_tranche(s: _Stream, tr: dict, side: str, fill: float, ts: int,
                    state: PortfolioState, fee_flat: float, fee_pct: float,
                    slippage: float, starting_capital: float,
-                   slipped: bool) -> None:
+                   slipped: bool, slip_close: float = 0.0) -> None:
     """Close a single tranche, update cash + per-strategy realized pnl, and
     record the trade. `slipped=False` for forced end-of-data closes which
-    use the close price directly."""
+    use the close price directly (slip_close stays 0)."""
     notional_close = abs(fill * tr["units"])
     fee_close = s.fee(notional_close)
     if side == "long":
@@ -655,26 +739,35 @@ def _close_tranche(s: _Stream, tr: dict, side: str, fill: float, ts: int,
         pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
         starting_capital=starting_capital,
         mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+        slippage=tr.get("slip_open", 0.0) + slip_close,
     ))
 
 
 def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
                      cur_eq: float, fee_flat: float, fee_pct: float,
                      slippage: float, starting_capital: float) -> None:
-    """Open new tranches for any entry signals at bar t-1. Cash-gated."""
+    """Open new tranches for entry signals. Honest mode acts on bar t-1's signal
+    and fills at bar t's open; look-ahead mode (fictitious) acts on bar t's own
+    signal and fills at the bar's most favorable extreme. Cash-gated."""
     op = float(s.open_a[t])
+    # Entry-fill (stop/limit) strategies place the order at the prior bar and fill
+    # the next bar, so they keep the t-1 signal index even in look-ahead mode (which
+    # then fills at bar t's favorable extreme — the real fill bar). See backtest_engine.
+    sig_i = t if (s.look_ahead and not s.has_entry_fills) else t - 1
 
-    def _try_open(side: str, cond_arr, tranches, slip_sign: float) -> None:
-        if not cond_arr[t - 1]:
+    def _try_open(side: str, cond_arr, tranches, slip_sign: float, ideal: float) -> None:
+        if not cond_arr[sig_i]:
             return
         if len(tranches) >= s.max_tranches:
             return
         if cur_eq <= 0:
             return
-        fill = op * (1.0 + slip_sign * slippage)
+        fill = ideal * (1.0 + slip_sign * slippage)
         if fill <= 0:
             return
-        units = s.contract_units if s.contract_sizing else (cur_eq * s.risk_frac) / fill
+        _rs = (float(s.risk_scale_a[sig_i]) if (s.has_risk_scale and np.isfinite(s.risk_scale_a[sig_i])
+                                                and s.risk_scale_a[sig_i] > 0) else 1.0)
+        units = s.contract_units if s.contract_sizing else (cur_eq * s.risk_frac * _rs) / fill
         notional = abs(fill * units)
         fee_open = s.fee(notional)
         # Futures (contract sizing) are margin-based — only the fee is funded
@@ -684,7 +777,7 @@ def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
             # Skip + log with counterfactual. `required_notional` includes the
             # open fee so the log matches the gate exactly.
             would_be = _counterfactual_pnl(
-                s, t - 1, side, cur_eq, fee_pct, fee_flat, slippage
+                s, sig_i, side, cur_eq, fee_pct, fee_flat, slippage
             )
             state.skipped_signals.append({
                 "time": ts_i,
@@ -710,14 +803,25 @@ def _process_entries(s: _Stream, t: int, ts_i: int, state: PortfolioState,
             "entry_price": fill,
             "units":       units,
             "fee_open":    fee_open,
+            "slip_open":   abs(fill - ideal) * units,   # ≥ 0 cost
             "atr_at_entry": atr_at_entry,
             "entry_time":  ts_i,
             "mae_price":   fill,
             "mfe_price":   fill,
         })
 
-    _try_open("long",  s.cond_long_a,  s.tranches_long,  +1.0)
-    _try_open("short", s.cond_short_a, s.tranches_short, -1.0)
+    # Look-ahead fills at the bar's most favorable extreme (low for longs, high
+    # for shorts) — unknowable until the bar closes, so it can only inflate P&L.
+    # Honest path: use the strategy's gap-protected entry fill (stop/limit level)
+    # when provided, else the next-bar open.
+    if s.look_ahead:
+        long_ideal  = float(s.low_a[t])
+        short_ideal = float(s.high_a[t])
+    else:
+        long_ideal  = (float(s.efl_in_a[sig_i]) if (s.has_entry_fills and np.isfinite(s.efl_in_a[sig_i])) else op)
+        short_ideal = (float(s.efs_in_a[sig_i]) if (s.has_entry_fills and np.isfinite(s.efs_in_a[sig_i])) else op)
+    _try_open("long",  s.cond_long_a,  s.tranches_long,  +1.0, long_ideal)
+    _try_open("short", s.cond_short_a, s.tranches_short, -1.0, short_ideal)
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +854,7 @@ def _empty_portfolio_result(specs: list[StrategySpec], rc: dict) -> dict:
         "drawdown_curve": [], "max_drawdown_duration_bars": 0,
         "distribution_pnl_pct": [], "distribution_duration_min": [],
         "best_trade": None, "worst_trade": None, "exposure_pct": 0.0,
-        "commission_dollars": 0.0, "trading_days": 0,
+        "commission_dollars": 0.0, "slippage_dollars": 0.0, "trading_days": 0,
         "advanced": quant_metrics.compute([], [], starting_capital, 0.0),
     }
     return {

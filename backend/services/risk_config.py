@@ -14,6 +14,7 @@ from threading import Lock
 from typing import Any
 
 from config import DATA_DIR, STARTING_CAPITAL
+from services.atomic_io import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -72,8 +73,6 @@ def update(patch: dict) -> dict:
         current = dict(_cache) if _cache is not None else dict(DEFAULTS)
         current.update(patch or {})
         _cache = _coerce(current)
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(_PATH, "w") as f:
-            json.dump(_cache, f, indent=2)
+        atomic_write_json(_PATH, _cache)
         log.info("risk_config updated: %s", _cache)
         return dict(_cache)

@@ -11,6 +11,7 @@ import CostSweep from "./pages/CostSweep.jsx";
 import MarketLab from "./pages/MarketLab.jsx";
 import Skills from "./pages/Skills.jsx";
 import LiveAlerts from "./pages/LiveAlerts.jsx";
+import ReportImport from "./pages/ReportImport.jsx";
 import Landing from "./pages/Landing.jsx";
 import Login from "./pages/Login.jsx";
 import { isAuthenticated } from "./services/auth.js";
@@ -59,12 +60,18 @@ export default function App() {
   if (view === "marketlab")    return <MarketLab />;
   if (view === "skills")       return <Skills />;
   if (view === "livealerts")   return <LiveAlerts />;
+  if (view === "reportimport") return <ReportImport />;
 
-  // Dashboard — page-enter fades it in; ripple overlay bursts on mount
-  return (
-    <div key="dashboard" className="page-enter" style={{ height: "100%", minHeight: "100vh" }}>
-      <div className="page-ripple-overlay" aria-hidden="true" />
-      <Dashboard />
-    </div>
-  );
+  if (view === "dashboard") {
+    // Dashboard — page-enter fades it in; ripple overlay bursts on mount
+    return (
+      <div key="dashboard" className="page-enter" style={{ height: "100%", minHeight: "100vh" }}>
+        <div className="page-ripple-overlay" aria-hidden="true" />
+        <Dashboard />
+      </div>
+    );
+  }
+
+  // Default / unknown hash (incl. empty "" on first open) → public Landing.
+  return <Landing />;
 }

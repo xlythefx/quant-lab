@@ -1,7 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { socket } from "../services/socket.js";
 import LiveClock from "./LiveClock.jsx";
 import { logout } from "../services/auth.js";
+
+// Grouped under the "Validation" dropdown to keep the top bar uncluttered.
+const VALIDATION_ITEMS = [
+  { href: "#walkforward", view: "walkforward", label: "Walk-Forward" },
+  { href: "#gridsearch",  view: "gridsearch",  label: "Grid Search" },
+  { href: "#montecarlo",  view: "montecarlo",  label: "Monte Carlo" },
+  { href: "#costsweep",   view: "costsweep",   label: "Cost Sweep" },
+];
 
 export default function Navbar({ view = "dashboard", mode, onModeChange }) {
   const [connected, setConnected] = useState(socket.connected);
@@ -29,11 +37,9 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
 
         <div className="flex items-center gap-1 ml-4">
           <NavLink href="#dashboard"  active={view === "dashboard"}>Dashboard</NavLink>
-<NavLink href="#walkforward" active={view === "walkforward"}>Walk-Forward</NavLink>
-          <NavLink href="#gridsearch"  active={view === "gridsearch"}>Grid Search</NavLink>
-          <NavLink href="#montecarlo"  active={view === "montecarlo"}>Monte Carlo</NavLink>
-          <NavLink href="#costsweep"   active={view === "costsweep"}>Cost Sweep</NavLink>
+          <NavDropdown label="Validation" items={VALIDATION_ITEMS} view={view} />
           <NavLink href="#marketlab"   active={view === "marketlab"}>Market Lab</NavLink>
+          <NavLink href="#reportimport" active={view === "reportimport"}>Report Import</NavLink>
           <NavLink href="#skills"      active={view === "skills"}>Skills</NavLink>
           <NavLink href="#strategies"  active={view === "strategies"}>Strategies</NavLink>
           <NavLink href="#livealerts"  active={view === "livealerts"}>Live Alerts</NavLink>
@@ -75,6 +81,59 @@ function NavLink({ href, active, children }) {
     >
       {children}
     </a>
+  );
+}
+
+// Click-to-open nav group. Highlights when any child view is active; closes on
+// outside click or after picking an item.
+function NavDropdown({ label, items, view }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const active = items.some((it) => it.view === view);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={`flex items-center gap-1 px-3 py-1.5 text-sm rounded-md transition ${
+          active || open ? "text-text bg-bg-elev" : "text-muted hover:text-text"
+        }`}
+      >
+        {label}
+        <svg className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`}
+             viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5"
+                strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 min-w-[160px] rounded-lg border border-line bg-bg-panel shadow-xl shadow-black/40 py-1 z-50">
+          {items.map((it) => (
+            <a
+              key={it.view}
+              href={it.href}
+              onClick={() => setOpen(false)}
+              className={`block px-3 py-1.5 text-sm transition ${
+                it.view === view
+                  ? "text-text bg-bg-elev"
+                  : "text-muted hover:text-text hover:bg-bg-elev/50"
+              }`}
+            >
+              {it.label}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

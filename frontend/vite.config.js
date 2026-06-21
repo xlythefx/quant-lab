@@ -6,6 +6,6 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-    allowedHosts: ["sean-nonagglutinative-brandie.ngrok-free.dev"],
+    allowedHosts: ["lab.sinegualfamily.com", "sean-nonagglutinative-brandie.ngrok-free.dev"],
   },
 });

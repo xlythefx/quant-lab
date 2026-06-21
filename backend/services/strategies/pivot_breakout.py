@@ -140,7 +140,7 @@ class PivotBreakoutStrategy(Strategy):
 
     META = StrategyMeta(
         id="pivot_breakout",
-        name="Pivot R1 Breakout (Long)",
+        name="Pivot R1 Breakout (Long) - ES 1H",
         description=("Daily pivot-point breakout, long-only. Buys a close-confirmed break above "
                      "the R1 pivot (computed from the prior session) when structure is neutral/"
                      "rising and volatility hasn't been contracting; exits on a dollar target, a "

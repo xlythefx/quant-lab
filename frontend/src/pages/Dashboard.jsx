@@ -11,6 +11,8 @@ import StatsPanel from "../components/StatsPanel.jsx";
 import StrategyCard from "../components/StrategyCard.jsx";
 import StrategyEditor from "../components/StrategyEditor.jsx";
 import PortfolioSummary from "../components/PortfolioSummary.jsx";
+import CostBreakdownModal from "../components/CostBreakdownModal.jsx";
+import LookAheadComparisonModal from "../components/LookAheadComparisonModal.jsx";
 import {
   getSymbols, prepareBacktest, getStrategies, getOHLCV, runBacktest,
   runPortfolioBacktest, getRiskConfig,
@@ -71,6 +73,13 @@ function dateStrToEpoch(s, endOfDay = false) {
 function epochToDateStr(sec) {
   if (!sec) return "";
   return new Date(sec * 1000).toISOString().slice(0, 10);
+}
+// Clamp an ISO "YYYY-MM-DD" string into [lo, hi]. ISO dates sort lexically.
+function clampDateStr(v, lo, hi) {
+  if (!v) return v;
+  if (lo && v < lo) return lo;
+  if (hi && v > hi) return hi;
+  return v;
 }
 
 /**
@@ -137,6 +146,9 @@ export default function Dashboard() {
   const active = useActiveStrategies();
   const [armed, setArmed] = useState(false);     // replay: started?
   const [range, setRange] = usePersistentState("ql.dash.range", { start: "", end: "" });
+  // Separate hindsight range so replay (full data) and hindsight (floored to the
+  // strategy's tradeable window) don't clobber each other's picks.
+  const [hrange, setHRange] = usePersistentState("ql.dash.hrange", { start: "", end: "" });
 
   // Restore chart state from the result cache on FIRST MOUNT so navigating
   // away and back doesn't flash a spinner. Auto-run still fires afterwards
@@ -156,6 +168,9 @@ export default function Dashboard() {
   const inflightRef = useRef(0);
 
   const [editingId, setEditingId] = useState(null);
+  const [showCosts, setShowCosts] = useState(false);
+  // {strategyId, params} when the look-ahead-vs-reality comparison modal is open.
+  const [laCompare, setLaCompare] = useState(null);
 
   // ---- catalog + datasets + risk config -------------------------
   useEffect(() => {
@@ -227,6 +242,36 @@ export default function Dashboard() {
       end:   r.end   || epochToDateStr(ds.last_time),
     }));
   }, [symbol, timeframe, datasets, mode, backtestKind]);
+
+  // Bounds for the hindsight date picker. The floor is the lowest date actually
+  // available in the dataset (no per-strategy tradeable-start floor) so the full
+  // history is selectable. The ceiling is still intersected with any per-symbol
+  // backtest_end. Null when no dataset is loaded.
+  const hindsightBounds = useMemo(() => {
+    const ds = datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe && (!broker || d.broker === broker));
+    if (!ds) return null;
+    const minSec = ds.first_time;
+    let maxSec = ds.last_time;
+    for (const s of active) {
+      const meta = catalogById[s.id];
+      const fe = meta?.symbol_backtest_end?.[symbol];
+      if (fe) maxSec = Math.min(maxSec, dateStrToEpoch(fe, true));
+    }
+    if (minSec > maxSec) return null;
+    return { min: epochToDateStr(minSec), max: epochToDateStr(maxSec) };
+  }, [datasets, symbol, timeframe, broker, active, catalogById]);
+
+  // Pre-fill the hindsight picker to the floored window, and keep picks clamped
+  // within it (handles a stale persisted range from a different symbol).
+  useEffect(() => {
+    if (mode !== "backtest" || backtestKind !== "hindsight" || !hindsightBounds) return;
+    const { min, max } = hindsightBounds;
+    setHRange((r) => {
+      const start = clampDateStr(r.start || min, min, max);
+      const end   = clampDateStr(r.end   || max, min, max);
+      return (start === r.start && end === r.end) ? r : { start, end };
+    });
+  }, [mode, backtestKind, hindsightBounds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Disarm replay on input change.
   useEffect(() => { setArmed(false); }, [mode, symbol, timeframe, backtestKind]);
@@ -385,6 +430,8 @@ export default function Dashboard() {
           strategy_id: s.id, symbol, timeframe,
           params: s.params, priority: i + 1, broker: broker || undefined,
         })),
+        start_time: dateStrToEpoch(hrange.start),
+        end_time:   dateStrToEpoch(hrange.end, true),
       });
 
       const [candles, portfolio] = await Promise.all([candlesP, portfolioP]);
@@ -477,7 +524,10 @@ export default function Dashboard() {
   const reRunOneHindsight = async (id, params) => {
     if (!symbol || !staticData) return;
     try {
-      const r = await runBacktest({ strategy_id: id, symbol, timeframe, params, broker: broker || undefined });
+      const r = await runBacktest({
+        strategy_id: id, symbol, timeframe, params, broker: broker || undefined,
+        start_time: dateStrToEpoch(hrange.start), end_time: dateStrToEpoch(hrange.end, true),
+      });
       const newMarkers = tradesToMarkers(r.trades || []);
       setStaticData((prev) => ({
         ...prev,
@@ -632,6 +682,20 @@ export default function Dashboard() {
             </button>
           </>
         )}
+        {mode === "backtest" && backtestKind === "hindsight" && datasetExists && (
+          <DateRangePicker
+            start={hrange.start}
+            end={hrange.end}
+            min={hindsightBounds?.min}
+            max={hindsightBounds?.max}
+            onChange={(next) => {
+              const b = hindsightBounds;
+              setHRange(b
+                ? { start: clampDateStr(next.start, b.min, b.max), end: clampDateStr(next.end, b.min, b.max) }
+                : next);
+            }}
+          />
+        )}
         <div className="ml-auto flex items-center gap-2">
           {mode === "backtest" && backtestKind === "hindsight" && (
             <button
@@ -641,6 +705,15 @@ export default function Dashboard() {
               title={allCached ? "Re-run backtest (cached results shown)" : "Run backtest"}
             >
               {hindsightLoading ? "Running…" : allCached ? "↻ Re-run" : "▶ Run Backtest"}
+            </button>
+          )}
+          {staticData && portfolioResult && (
+            <button
+              onClick={() => setShowCosts(true)}
+              className="px-4 py-2 rounded-md border border-amber-400/50 text-amber-400 hover:bg-amber-400/10 text-sm font-medium"
+              title="Fees & slippage subtracted from this run"
+            >
+              Costs
             </button>
           )}
           {staticData && (
@@ -864,6 +937,27 @@ export default function Dashboard() {
         <StatsPanel strategies={active} statsById={statsById} />
       </main>
 
+      <CostBreakdownModal
+        open={showCosts}
+        onClose={() => setShowCosts(false)}
+        result={portfolioResult}
+        catalogById={catalogById}
+        isContractSized={_isContractSized}
+      />
+
+      <LookAheadComparisonModal
+        open={!!laCompare}
+        onClose={() => setLaCompare(null)}
+        strategyId={laCompare?.strategyId}
+        symbol={symbol}
+        timeframe={timeframe}
+        broker={broker || undefined}
+        params={laCompare?.params}
+        startTime={hrange.start ? dateStrToEpoch(hrange.start) : undefined}
+        endTime={hrange.end ? dateStrToEpoch(hrange.end, true) : undefined}
+        startingCapital={riskConfig?.starting_capital ?? 100000}
+      />
+
       {editingId && (() => {
         const s = active.find((x) => x.id === editingId);
         const meta = catalogById[editingId];
@@ -877,6 +971,7 @@ export default function Dashboard() {
             strategyId={s.id}
             builtinPresets={meta.presets || {}}
             hiddenParams={_hiddenSizingParams}
+            onCompareLookAhead={(p) => setLaCompare({ strategyId: s.id, params: p })}
             onClose={() => setEditingId(null)}
             onApply={(p) => { onApplyParams(s.id, p); setEditingId(null); }}
             onSaveAsDefault={(p) => saveUserDefaults(s.id, p)}

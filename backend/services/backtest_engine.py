@@ -91,6 +91,26 @@ def _classify_session(entry_ts: int, sessions_cfg: dict) -> str:
 # Engine
 # ---------------------------------------------------------------------------
 
+def symbol_floor_bounds(strategy, symbol: str) -> tuple[Optional[int], Optional[int]]:
+    """Epoch-second (start, end) the strategy declares as the tradeable window
+    for `symbol` via SYMBOL_BACKTEST_START / SYMBOL_BACKTEST_END (e.g. Lunar on
+    ES → 2018-01-01 .. 2026-04-30, matching the TS reference). Either side is
+    None when undeclared. `strategy` may be a class or an instance.
+
+    `run()` applies these only when the caller passes no explicit start/end (the
+    date picker overrides the floor). Callers that auto-fill the full data range
+    but still want the floor (Grid Search) should clamp their requested range to
+    these bounds instead of relying on the None-guard."""
+    def _ts(d: Optional[str]) -> Optional[int]:
+        if not d:
+            return None
+        return int(datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    return (
+        _ts(getattr(strategy, "SYMBOL_BACKTEST_START", {}).get(symbol)),
+        _ts(getattr(strategy, "SYMBOL_BACKTEST_END", {}).get(symbol)),
+    )
+
+
 def run(strategy_id: str, symbol: str, timeframe: str,
         params: Optional[dict] = None,
         start_time: Optional[int] = None,
@@ -98,7 +118,8 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         df: Optional[pd.DataFrame] = None,
         risk_overrides: Optional[dict] = None,
         broker: Optional[str] = None,
-        trade_start_time: Optional[int] = None) -> dict:
+        trade_start_time: Optional[int] = None,
+        stats_only: bool = False) -> dict:
     """Run a backtest.
 
     `df`: if provided, use it directly (and copy it) instead of loading from
@@ -116,7 +137,14 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     Walk-forward uses this to give each IS/OOS window warm-up bars (so rolling
     indicators are valid at the window start) without letting warm-up bars
     generate trades. Equity stays flat at starting_capital before the first
-    in-window entry."""
+    in-window entry.
+
+    `stats_only`: skip everything sweep callers don't read — candle/overlay
+    serialization, the equity-curve dict list, and the analytics block. The
+    simulation and `stats` are byte-identical to a full run; `candles`,
+    `overlays`, `equity` come back empty and `analytics` is None. Grid Search
+    uses this (it only consumes `stats`); walk-forward must NOT (it reads
+    `equity` and `trades` per window)."""
 
     rc = risk_config.get()
     if risk_overrides:
@@ -143,6 +171,16 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     # risk_config value if the strategy doesn't declare it.
     pyramiding_param = strategy.p.get("pyramiding", rc.get("pyramiding", 1))
     max_tranches = max(1, int(float(pyramiding_param)))
+
+    # LOOK-AHEAD (diagnostic only): entries act on THIS bar's own signal instead
+    # of the prior bar's — i.e. fill at the open (or best price) of the bar whose
+    # close produced the signal. This uses not-yet-known information and INFLATES
+    # P&L; the result is flagged `look_ahead=True` so the UI can badge it as
+    # fictitious. Read straight from the request params so it works for ANY
+    # strategy (it's not a per-strategy schema field) — base._merge_with_defaults
+    # would otherwise drop it from `strategy.p`. Falls back to a schema default
+    # for strategies that do declare it (e.g. the HLC3 test twin).
+    look_ahead = bool((params or {}).get("look_ahead", strategy.p.get("look_ahead", False)))
 
     df = df.copy() if df is not None else market_data.load_parquet(symbol, timeframe, broker=broker)
     if start_time is not None:
@@ -213,6 +251,35 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     efl_a = sig_df["exit_fill_long"].to_numpy(dtype=float)  if has_exact_fills else None
     efs_a = sig_df["exit_fill_short"].to_numpy(dtype=float) if has_exact_fills else None
 
+    # Exact-fill ENTRIES (Option B, entry side) — strategy exports a pre-computed,
+    # gap-protected fill price for stop/limit entries (e.g. a Donchian breakout that
+    # fills AT the channel level the moment price pierces it, not a bar later at the
+    # open). NaN = fall back to next-bar open as usual. Opt-in: strategies that don't
+    # emit these columns are unaffected. Honest path only — the look-ahead diagnostic
+    # keeps its own "fill at the bar's favorable extreme" logic untouched.
+    has_entry_fills = "entry_fill_long" in sig_df.columns and "entry_fill_short" in sig_df.columns
+    efl_in_a = sig_df["entry_fill_long"].to_numpy(dtype=float)  if has_entry_fills else None
+    efs_in_a = sig_df["entry_fill_short"].to_numpy(dtype=float) if has_entry_fills else None
+
+    # Per-bar risk multiplier (opt-in): when a strategy emits `risk_scale`, the
+    # engine multiplies risk_frac by it at entry (e.g. ATR sizing — smaller size
+    # in high vol). Absent => factor 1.0, so strategies that don't emit it are
+    # byte-identical. Only affects %-of-equity sizing, not fixed-contract futures.
+    has_risk_scale = "risk_scale" in sig_df.columns
+    risk_scale_a   = sig_df["risk_scale"].to_numpy(dtype=float) if has_risk_scale else None
+
+    # Partial scale-out (opt-in): on a `scale_exit_*` bar the engine closes
+    # `scale_out_frac` of the open position ONCE, books it as a trade, shrinks the
+    # tranche, and lets the remainder ride to the normal exit. Absent => no partial
+    # exits (every other strategy unaffected).
+    has_scale_out = "scale_exit_long" in sig_df.columns and "scale_exit_short" in sig_df.columns
+    scl_a = sig_df["scale_exit_long"].fillna(False).astype(bool).to_numpy()  if has_scale_out else None
+    scs_a = sig_df["scale_exit_short"].fillna(False).astype(bool).to_numpy() if has_scale_out else None
+    scale_out_frac = (float(sig_df["scale_out_frac"].iloc[0])
+                      if has_scale_out and "scale_out_frac" in sig_df.columns and len(sig_df) else 0.0)
+    if not (0.0 < scale_out_frac < 1.0):
+        has_scale_out = False
+
     # Instrument-driven futures sizing: index futures (asset_class
     # 'equity_index_future', e.g. ES with contract_size=50) size as N contracts ×
     # multiplier so the existing `move × units` P&L math yields TS-style dollars
@@ -258,6 +325,27 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             # ---- exits (close-first, then re-open new tranches) ----
             still_long: list[dict] = []
             for tr in tranches_long:
+                # Partial scale-out (once): close scale_out_frac at this bar's open,
+                # book it, shrink the tranche, let the rest ride to the normal exit.
+                if has_scale_out and bool(scl_a[t - 1]) and not tr.get("scaled"):
+                    part   = tr["units"] * scale_out_frac
+                    fill_p = op * (1.0 - slippage)
+                    slip_p = (op - fill_p) * part
+                    fee_p  = _fee(abs(fill_p * part))
+                    pnl_p  = (fill_p - tr["entry_price"]) * part - fee_p
+                    realized_cum += pnl_p
+                    fo_p = tr["fee_open"] * scale_out_frac
+                    trades_list.append(_trade(
+                        "long", tr["entry_price"], fill_p, tr["entry_time"], ts,
+                        pnl_p - fo_p, part, fo_p + fee_p,
+                        starting_capital=starting_capital,
+                        mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                        slippage=tr["slip_open"] * scale_out_frac + slip_p,
+                    ))
+                    tr["units"]     *= (1.0 - scale_out_frac)
+                    tr["fee_open"]  *= (1.0 - scale_out_frac)
+                    tr["slip_open"] *= (1.0 - scale_out_frac)
+                    tr["scaled"] = True
                 mean_revert = bool(bxl_a[t - 1])
                 stop_hit = False
                 if has_atr_stop and np.isfinite(tr["atr_at_entry"]):
@@ -265,9 +353,11 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 if mean_revert or stop_hit:
                     # Option-B: use exact fill level when strategy provides it.
                     if has_exact_fills and mean_revert and np.isfinite(efl_a[t - 1]):
-                        fill = efl_a[t - 1] * (1.0 - slippage)
+                        ideal = float(efl_a[t - 1])
                     else:
-                        fill = op * (1.0 - slippage)
+                        ideal = op
+                    fill = ideal * (1.0 - slippage)
+                    slip_close = (ideal - fill) * tr["units"]   # ≥ 0 cost
                     notional_close = abs(fill * tr["units"])
                     fee_close = _fee(notional_close)
                     pnl = (fill - tr["entry_price"]) * tr["units"] - fee_close
@@ -279,6 +369,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                         pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                         starting_capital=starting_capital,
                         mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                        slippage=tr["slip_open"] + slip_close,
                     ))
                 else:
                     still_long.append(tr)
@@ -286,6 +377,26 @@ def run(strategy_id: str, symbol: str, timeframe: str,
 
             still_short: list[dict] = []
             for tr in tranches_short:
+                # Partial scale-out (once): mirror of the long side.
+                if has_scale_out and bool(scs_a[t - 1]) and not tr.get("scaled"):
+                    part   = tr["units"] * scale_out_frac
+                    fill_p = op * (1.0 + slippage)
+                    slip_p = (fill_p - op) * part
+                    fee_p  = _fee(abs(fill_p * part))
+                    pnl_p  = (tr["entry_price"] - fill_p) * part - fee_p
+                    realized_cum += pnl_p
+                    fo_p = tr["fee_open"] * scale_out_frac
+                    trades_list.append(_trade(
+                        "short", tr["entry_price"], fill_p, tr["entry_time"], ts,
+                        pnl_p - fo_p, part, fo_p + fee_p,
+                        starting_capital=starting_capital,
+                        mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                        slippage=tr["slip_open"] * scale_out_frac + slip_p,
+                    ))
+                    tr["units"]     *= (1.0 - scale_out_frac)
+                    tr["fee_open"]  *= (1.0 - scale_out_frac)
+                    tr["slip_open"] *= (1.0 - scale_out_frac)
+                    tr["scaled"] = True
                 mean_revert = bool(bxs_a[t - 1])
                 stop_hit = False
                 if has_atr_stop and np.isfinite(tr["atr_at_entry"]):
@@ -293,9 +404,11 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 if mean_revert or stop_hit:
                     # Option-B: use exact fill level when strategy provides it.
                     if has_exact_fills and mean_revert and np.isfinite(efs_a[t - 1]):
-                        fill = efs_a[t - 1] * (1.0 + slippage)
+                        ideal = float(efs_a[t - 1])
                     else:
-                        fill = op * (1.0 + slippage)
+                        ideal = op
+                    fill = ideal * (1.0 + slippage)
+                    slip_close = (fill - ideal) * tr["units"]   # ≥ 0 cost
                     notional_close = abs(fill * tr["units"])
                     fee_close = _fee(notional_close)
                     pnl = (tr["entry_price"] - fill) * tr["units"] - fee_close
@@ -305,6 +418,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                         pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                         starting_capital=starting_capital,
                         mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                        slippage=tr["slip_open"] + slip_close,
                     ))
                 else:
                     still_short.append(tr)
@@ -315,32 +429,63 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                       + _unrealized(tranches_long,  +1, prev_close)
                       + _unrealized(tranches_short, -1, prev_close))
 
-            if cur_eq > 0 and cond_long_a[t - 1] and len(tranches_long) < max_tranches:
-                fill = op * (1.0 + slippage)
+            # Entry signal index: prior bar (causal, default) or THIS bar
+            # (look-ahead — acts on a signal from this same bar's close). Entry-fill
+            # strategies (stop/limit orders) place the order at the prior bar and fill
+            # the NEXT bar, so even their look-ahead run keeps the t-1 signal index and
+            # just fills at bar t's favorable extreme (the actual fill bar) — otherwise
+            # look-ahead would fill a bar BEFORE the order could trigger.
+            _sig_e = t if (look_ahead and not has_entry_fills) else t - 1
+
+            # Look-ahead "perfect fill": peek inside the entry bar and fill at its
+            # most favorable extreme (low for longs, high for shorts) — a price only
+            # knowable in hindsight. low<=op<=high, so this can only IMPROVE the fill
+            # vs the honest next-open, i.e. it monotonically inflates P&L. Diagnostic
+            # ceiling only; `look_ahead=True` is returned so the result is flagged.
+            if cur_eq > 0 and cond_long_a[_sig_e] and len(tranches_long) < max_tranches:
+                if look_ahead:
+                    ideal = float(low_a[t])
+                elif has_entry_fills and np.isfinite(efl_in_a[_sig_e]):
+                    ideal = float(efl_in_a[_sig_e])   # strategy's gap-protected entry fill (stop/limit level)
+                else:
+                    ideal = op
+                fill = ideal * (1.0 + slippage)
                 if fill > 0:
-                    units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill
+                    _rs = (float(risk_scale_a[_sig_e]) if (has_risk_scale and np.isfinite(risk_scale_a[_sig_e])
+                                                          and risk_scale_a[_sig_e] > 0) else 1.0)
+                    units = contract_units if contract_sizing else (cur_eq * risk_frac * _rs) / fill
                     fee_open = _fee(fill * units)
                     realized_cum -= fee_open
                     tranches_long.append({
                         "entry_price": fill,
                         "units":       units,
                         "fee_open":    fee_open,
+                        "slip_open":   (fill - ideal) * units,   # ≥ 0 cost
                         "atr_at_entry": float(atr_a[t - 1]) if (has_atr_stop and np.isfinite(atr_a[t - 1])) else float("nan"),
                         "entry_time":  ts,
                         "mae_price":   fill,
                         "mfe_price":   fill,
                     })
 
-            if cur_eq > 0 and cond_short_a[t - 1] and len(tranches_short) < max_tranches:
-                fill = op * (1.0 - slippage)
+            if cur_eq > 0 and cond_short_a[_sig_e] and len(tranches_short) < max_tranches:
+                if look_ahead:
+                    ideal = float(high_a[t])
+                elif has_entry_fills and np.isfinite(efs_in_a[_sig_e]):
+                    ideal = float(efs_in_a[_sig_e])   # strategy's gap-protected entry fill (stop/limit level)
+                else:
+                    ideal = op
+                fill = ideal * (1.0 - slippage)
                 if fill > 0:
-                    units = contract_units if contract_sizing else (cur_eq * risk_frac) / fill
+                    _rs = (float(risk_scale_a[_sig_e]) if (has_risk_scale and np.isfinite(risk_scale_a[_sig_e])
+                                                          and risk_scale_a[_sig_e] > 0) else 1.0)
+                    units = contract_units if contract_sizing else (cur_eq * risk_frac * _rs) / fill
                     fee_open = _fee(fill * units)
                     realized_cum -= fee_open
                     tranches_short.append({
                         "entry_price": fill,
                         "units":       units,
                         "fee_open":    fee_open,
+                        "slip_open":   (ideal - fill) * units,   # ≥ 0 cost
                         "atr_at_entry": float(atr_a[t - 1]) if (has_atr_stop and np.isfinite(atr_a[t - 1])) else float("nan"),
                         "entry_time":  ts,
                         "mae_price":   fill,
@@ -388,6 +533,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                 starting_capital=starting_capital,
                 mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                slippage=tr["slip_open"],   # forced close: no exit slippage
             ))
         for tr in tranches_short:
             notional_close = abs(final_close * tr["units"])
@@ -399,6 +545,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
                 pnl - tr["fee_open"], tr["units"], tr["fee_open"] + fee_close,
                 starting_capital=starting_capital,
                 mae_price=tr["mae_price"], mfe_price=tr["mfe_price"],
+                slippage=tr["slip_open"],   # forced close: no exit slippage
             ))
         tranches_long = []
         tranches_short = []
@@ -413,6 +560,25 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         equity_arr[n - 1] = equity
         dd_dollars_arr[n - 1] = equity - peak_eq
 
+    stats = _compute_stats(trades_list, equity, dd_dollars_arr, time_a,
+                            starting_capital, equity_arr)
+
+    if stats_only:
+        return {
+            "strategy_id": strategy_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "risk_config": rc,
+            "params": strategy.p,
+            "candles": [],
+            "overlays": [],
+            "trades": trades_list,
+            "equity": [],
+            "stats": stats,
+            "analytics": None,
+            "look_ahead": look_ahead,
+        }
+
     equity_curve = []
     for t in range(n):
         eq = float(equity_arr[t])
@@ -424,8 +590,6 @@ def run(strategy_id: str, symbol: str, timeframe: str,
             "drawdown_dollars": float(dd_dollars_arr[t]),
         })
 
-    stats = _compute_stats(trades_list, equity, dd_dollars_arr, time_a,
-                            starting_capital, equity_arr)
     analytics = _compute_analytics(trades_list, equity_curve, sig_df, strategy, starting_capital)
 
     log.info("[hindsight %s/%s/%s] %d bars, %d trades, final $%s (%.2f%%)",
@@ -444,6 +608,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         "equity": equity_curve,
         "stats": stats,
         "analytics": analytics,
+        "look_ahead": look_ahead,
     }
 
 
@@ -452,7 +617,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
 # ---------------------------------------------------------------------------
 
 def _trade(side, entry_p, exit_p, entry_t, exit_t, pnl_dollars, units, fees,
-           starting_capital=0.0, mae_price=None, mfe_price=None):
+           starting_capital=0.0, mae_price=None, mfe_price=None, slippage=0.0):
     # `pnl_pct` here is the underlying asset's price-move %, not the account
     # impact. With pyramiding/leverage these diverge sharply, so we also emit
     # `pnl_pct_equity` (= % of starting capital) for distribution + best/worst.
@@ -484,6 +649,10 @@ def _trade(side, entry_p, exit_p, entry_t, exit_t, pnl_dollars, units, fees,
         "pnl_pct_equity": float(pnl_pct_equity),
         "units": float(units),
         "fees": float(fees),
+        # Dollar cost of slippage on this trade's fills (entry + exit). Already
+        # baked into entry_price/exit_price; surfaced here for the cost-breakdown
+        # modal. Forced end-of-data closes apply no exit slippage.
+        "slippage": float(slippage),
         "duration_min": duration_min,
         "mae_pct": float(mae_pct),
         "mfe_pct": float(mfe_pct),
@@ -716,8 +885,9 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
     best  = max(trades, key=lambda t: t["pnl_dollars"]) if trades else None
     worst = min(trades, key=lambda t: t["pnl_dollars"]) if trades else None
 
-    # ---- commission paid + trading days
+    # ---- commission + slippage paid + trading days
     total_commission = float(sum(t.get("fees", 0.0) for t in trades))
+    total_slippage   = float(sum(t.get("slippage", 0.0) for t in trades))
     trading_days = len({datetime.fromtimestamp(t["entry_time"], tz=timezone.utc).date()
                         for t in trades})
 
@@ -769,6 +939,7 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
         "worst_trade": worst,
         "exposure_pct": float(exposure_pct),
         "commission_dollars": total_commission,
+        "slippage_dollars": total_slippage,
         "trading_days": int(trading_days),
         "advanced": advanced,
     }
@@ -800,7 +971,7 @@ def _empty_result(strategy_id, symbol, timeframe, rc):
             "drawdown_curve": [], "max_drawdown_duration_bars": 0,
             "distribution_pnl_pct": [], "distribution_duration_min": [],
             "best_trade": None, "worst_trade": None, "exposure_pct": 0.0,
-            "commission_dollars": 0.0, "trading_days": 0,
+            "commission_dollars": 0.0, "slippage_dollars": 0.0, "trading_days": 0,
             "advanced": quant_metrics.compute([], [], float(rc["starting_capital"]), 0.0),
         },
     }

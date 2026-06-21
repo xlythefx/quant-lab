@@ -12,15 +12,18 @@ function defaultsFromSchema(schema) {
 }
 
 const KIND_FILTERS = [
+  { key: "available", label: "Available" },
   { key: "all", label: "All" },
   { key: "ohlc", label: "OHLC" },
   { key: "hlc", label: "HLC" },
+  { key: "archived", label: "Archived" },
 ];
 
 export default function Strategies() {
   const [strategies, setStrategies] = useState([]);
   const [error, setError] = useState(null);
-  const [kindFilter, setKindFilter] = useState("all");
+  // Default to "Available" so archived strategies are hidden on first load.
+  const [kindFilter, setKindFilter] = useState("available");
   const active = useActiveStrategies();
 
   useEffect(() => {
@@ -29,9 +32,16 @@ export default function Strategies() {
       .catch((e) => setError(e?.response?.data?.error || e.message));
   }, []);
 
-  const shown = strategies.filter(
-    (s) => kindFilter === "all" || (s.kind || "ohlc") === kindFilter
-  );
+  // "Available" (default) and the OHLC/HLC kind filters hide archived strategies;
+  // "Archived" lists only archived; "All" shows everything including archived.
+  const shown = strategies.filter((s) => {
+    const archived = !!s.archived;
+    if (kindFilter === "archived") return archived;
+    if (kindFilter === "all") return true;
+    if (kindFilter === "available") return !archived;
+    if (archived) return false;
+    return (s.kind || "ohlc") === kindFilter;
+  });
 
   return (
     <div className="min-h-screen flex flex-col">

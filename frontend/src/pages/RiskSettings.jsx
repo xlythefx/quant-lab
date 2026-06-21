@@ -21,6 +21,20 @@ const RISK_DEFAULTS = {
   slippage_bps:       1.0,
 };
 
+// Quick fee/cost-model presets. They stage values into the form (like "Reset
+// to defaults") — not saved until Save. Starting capital is left untouched.
+const COST_PRESETS = [
+  { id: "none", label: "No Fees",
+    hint: "Zero out all fees, commission & slippage.",
+    values: { fee_flat: 0, fee_pct: 0, futures_commission: 0, slippage_bps: 0 } },
+  { id: "binance", label: "Binance",
+    hint: "Crypto/spot: 0.06% per side, no flat fee.",
+    values: { fee_flat: 0, fee_pct: 0.06, futures_commission: 0, slippage_bps: 1 } },
+  { id: "tradestation", label: "TradeStation",
+    hint: "Futures: $1.50 per contract per side (no % fee).",
+    values: { fee_flat: 0, fee_pct: 0, futures_commission: 1.50, slippage_bps: 1 } },
+];
+
 const FIELDS = [
   { key: "starting_capital", label: "Starting Capital",     unit: "$",   step: 1000, min: 1,
     hint: "Same baseline applied to every backtest." },
@@ -67,6 +81,7 @@ export default function RiskSettings() {
   }
 
   const setField = (key, v) => setCfg({ ...cfg, [key]: v });
+  const applyPreset = (values) => setCfg((c) => ({ ...c, ...values }));
 
   const onSave = async () => {
     setBusy(true); setErr(null);
@@ -92,6 +107,23 @@ export default function RiskSettings() {
             Position sizing (<span className="font-mono">risk_pct</span>) and pyramiding live on each strategy.
           </p>
         </header>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs uppercase tracking-wider text-muted mr-1">Cost presets</span>
+          {COST_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => applyPreset(p.values)}
+              title={p.hint}
+              className="px-3 py-1.5 rounded-md border border-line text-sm text-muted hover:text-text hover:border-accent-blue transition"
+            >
+              {p.label}
+            </button>
+          ))}
+          <span className="text-xs text-muted/70 basis-full">
+            Fills the fee fields below — review, then Save. Starting capital is untouched.
+          </span>
+        </div>
 
         <div className="rounded-xl border border-line bg-bg-panel/60 divide-y divide-line/40">
           {FIELDS.map((f) => (

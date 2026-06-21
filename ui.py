@@ -81,6 +81,29 @@ def pids_on_port(port: int) -> set:
     return pids
 
 
+def show_in_taskbar(win: tk.Tk):
+    """Force a borderless (overrideredirect) Tk window to appear in the
+    Windows taskbar. overrideredirect strips the window from the taskbar by
+    default; re-adding the WS_EX_APPWINDOW ex-style (and clearing the
+    tool-window flag) brings the desktop taskbar button back without
+    restoring the native title bar."""
+    if sys.platform != "win32":
+        return
+    GWL_EXSTYLE      = -20
+    WS_EX_APPWINDOW  = 0x00040000
+    WS_EX_TOOLWINDOW = 0x00000080
+    try:
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        style = (style & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        # re-map so the taskbar picks up the changed style
+        win.withdraw()
+        win.after(10, win.deiconify)
+    except Exception:
+        pass
+
+
 def process_name(pid: int) -> str:
     try:
         out = subprocess.check_output(
@@ -353,7 +376,7 @@ class DepsTab(tk.Frame):
         try:
             r = subprocess.run(
                 [sys.executable, "-c", self._BACKEND_CHECK],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=60,
                 creationflags=_cflags(),
             )
             if r.returncode == 0:
@@ -749,6 +772,8 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._center()
         self._build()
+        # borderless windows drop off the taskbar — force the button back
+        self.after(10, lambda: show_in_taskbar(self))
 
     def _center(self):
         self.update_idletasks()
@@ -764,6 +789,7 @@ class App(tk.Tk):
     def _on_restore(self, _event):
         self.unbind("<Map>")
         self.overrideredirect(True)
+        self.after(10, lambda: show_in_taskbar(self))
 
     def _build(self):
         outer = tk.Frame(self, bg=C["bg"], padx=1, pady=1)

@@ -12,7 +12,7 @@ const SESSION_LABELS = {
 
 export default function StrategyEditor({
   open, schema, params, onChange, onClose, onApply, onResetDefaults, onSaveAsDefault, color,
-  strategyId, builtinPresets = {}, hiddenParams = [],
+  strategyId, builtinPresets = {}, hiddenParams = [], onCompareLookAhead,
 }) {
   const [draft, setDraft] = useState(params || {});
   const [saved, setSaved] = useState(false);
@@ -47,12 +47,22 @@ export default function StrategyEditor({
     const g = {};
     for (const spec of schema || []) {
       if (hide.has(spec.name)) continue;
+      // look_ahead is rendered ONLY as the dedicated ⚠ checkbox below (with its
+      // warning + compare button), never as a plain toggle in its schema group.
+      if (spec.name === "look_ahead") continue;
       (g[spec.group] ||= []).push(spec);
     }
     return g;
   }, [schema, hiddenParams]);
 
   if (!open) return null;
+
+  // The look-ahead checkbox reflects the strategy's schema default when the card
+  // has no explicit value yet (e.g. donchian_breakout defaults it ON to match the
+  // TradeStation figure; the backend uses the same default, so this keeps the box
+  // in sync with what actually runs). An explicit false stays false.
+  const _laSpec = (schema || []).find((s) => s.name === "look_ahead");
+  const _laChecked = draft.look_ahead ?? !!(_laSpec && _laSpec.default);
 
   const setField = (name, value) => {
     const next = { ...draft, [name]: value };
@@ -177,6 +187,30 @@ export default function StrategyEditor({
           </section>
         ))}
       </div>
+
+      {onCompareLookAhead && (
+        <div className="px-5 py-3 border-t border-line/60 bg-loss/5 space-y-2">
+          <label className="flex items-center justify-between gap-3 cursor-pointer select-none">
+            <span className="text-xs text-loss/90">
+              ⚠ Look-ahead fills{" "}
+              <span className="text-muted">(fictitious — inflates P&L; diagnostic only)</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={_laChecked}
+              onChange={(e) => setField("look_ahead", e.target.checked)}
+              className="h-4 w-4 accent-loss shrink-0"
+            />
+          </label>
+          <button
+            onClick={() => onCompareLookAhead(draft)}
+            title="Run honest vs look-ahead side by side"
+            className="w-full text-xs text-loss/90 hover:text-loss border border-loss/30 hover:border-loss/60 px-3 py-1.5 rounded-md transition"
+          >
+            ⚠ Look-ahead vs Reality — compare
+          </button>
+        </div>
+      )}
 
       <div className="px-5 py-3 border-t border-line flex items-center justify-between gap-2">
         <button onClick={onResetDefaults} className="text-xs text-muted hover:text-text shrink-0">Reset Defaults</button>

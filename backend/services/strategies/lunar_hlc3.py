@@ -20,9 +20,10 @@ class LunarHLC3Strategy(_lunar.LunarStrategy):
 
     META = StrategyMeta(
         id="lunar_hlc3",
-        name="Lunar HLC3 (Moon Cycle Bias)",
+        name="Lunar HLC3 (Moon Cycle Bias) - ES",
         description=("HLC3 test twin of 'lunar': the session-ATR short filter uses typical "
                      "price (H+L+C)/3 instead of close. All other logic identical."),
         schema=_lunar.LunarStrategy.PARAM_SCHEMA,
         kind="hlc",
+        archived=True,
     )

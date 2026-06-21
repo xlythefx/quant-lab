@@ -18,7 +18,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from services import backtest_engine, event_bus
+from services import assets, backtest_engine, event_bus, market_data, risk_config
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +102,22 @@ def _score_from_stats(stats: dict, metric: str) -> float:
     return float(v)
 
 
+def _resolve_broker(symbol: str, explicit) -> Optional[str]:
+    """Which broker namespace to load the dataset from.
+
+    An explicit broker (if the caller ever passes one) always wins. Otherwise,
+    futures symbols are pinned to databento — the canonical CME feed these grids
+    run against — so a symbol cached under multiple brokers can't silently load a
+    different dataset than the Dashboard. Non-futures (crypto) keep broker=None
+    auto-discovery, so this change doesn't touch them."""
+    if explicit:
+        return str(explicit).strip()
+    meta = assets.lookup(symbol, "databento")
+    if meta is not None and meta.asset_class == "futures":
+        return "databento"
+    return None
+
+
 def _normalize_spec(spec: dict) -> dict:
     grid_params = []
     for entry in (spec.get("grid_params") or []):
@@ -139,15 +155,38 @@ def _normalize_spec(spec: dict) -> dict:
             f"Narrow your values or sweep fewer params."
         )
 
+    # Optional early-stop: stop the sweep as soon as a combo's trade count is
+    # within ±tolerance of this target. None => exhaustive (full grid).
+    target_trades = spec.get("target_trades")
+    if target_trades in ("", None):
+        target_trades = None
+    else:
+        try:
+            target_trades = int(target_trades)
+        except (TypeError, ValueError):
+            raise ValueError(f"target_trades must be an integer, got {target_trades!r}")
+        if target_trades < 0:
+            raise ValueError("target_trades must be >= 0")
+    try:
+        target_trades_tol = int(spec.get("target_trades_tol") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("target_trades_tol must be an integer")
+    if target_trades_tol < 0:
+        raise ValueError("target_trades_tol must be >= 0")
+
+    symbol = str(spec["symbol"]).strip()
     out = {
         "strategy_id": str(spec["strategy_id"]).strip(),
-        "symbol": str(spec["symbol"]).strip(),
+        "symbol": symbol,
         "timeframe": str(spec["timeframe"]).strip(),
+        "broker": _resolve_broker(symbol, spec.get("broker")),
         "start_time": int(spec["start_time"]) if spec.get("start_time") is not None else None,
         "end_time": int(spec["end_time"]) if spec.get("end_time") is not None else None,
         "base_params": dict(spec.get("base_params") or {}),
         "grid_params": grid_params,
         "metric": str(spec.get("metric") or "sharpe"),
+        "target_trades": target_trades,
+        "target_trades_tol": target_trades_tol,
     }
     if not out["strategy_id"]:
         raise ValueError("strategy_id is required")
@@ -207,6 +246,12 @@ class GridSearchJob:
         self.combo_idx = 0
         self.current_best_metric: Optional[float] = None
         self.results: list[dict] = []  # [{combo_idx, params, stats}]
+        self.stopped_early = False        # set when the trade-count target is hit
+        self.target_match: Optional[dict] = None  # {combo_idx, params, trades}
+        # Frozen at run start so every combo is costed identically (editing
+        # Risk Settings mid-sweep must not change costs between combos) and so
+        # the published result records the fees it was actually charged.
+        self.risk_config_snapshot: Optional[dict] = None
 
         self._thread = threading.Thread(target=self._run, name=f"gs-{self.job_id}", daemon=True)
 
@@ -236,6 +281,8 @@ class GridSearchJob:
                 "timeframe": self.spec["timeframe"],
                 "metric": self.spec["metric"],
                 "grid_params": self.spec["grid_params"],
+                "target_trades": self.spec.get("target_trades"),
+                "target_trades_tol": self.spec.get("target_trades_tol"),
             },
             "combo_idx": self.combo_idx,
             "total_combos": self.total_combos,
@@ -243,6 +290,8 @@ class GridSearchJob:
             "elapsed_seconds": elapsed,
             "eta_seconds": eta,
             "error": self.error,
+            "stopped_early": self.stopped_early,
+            "target_match": self.target_match,
         }
 
     # ---- thread ------------------------------------------------------------
@@ -270,6 +319,28 @@ class GridSearchJob:
         names = [gp["name"] for gp in s["grid_params"]]
         value_lists = [gp["values"] for gp in s["grid_params"]]
         best_metric: Optional[float] = None
+        target_trades = s.get("target_trades")
+        target_tol = int(s.get("target_trades_tol") or 0)
+
+        rc_snapshot = risk_config.get()
+        self.risk_config_snapshot = rc_snapshot
+        # Load the dataset once from the pinned broker; the engine copies it per
+        # combo. broker is forwarded to run() too so the recorded run is consistent.
+        df = market_data.load_parquet(s["symbol"], s["timeframe"], broker=s["broker"])
+
+        # Clamp the requested range to the strategy's per-symbol tradeable floor
+        # (e.g. Lunar on ES → 2018-01-01 .. 2026-04-30). The UI auto-fills the
+        # date pickers with the full dataset span, so without this the explicit
+        # start/end bypass the floor that the engine applies on None — making
+        # grid-search trade counts diverge from the Dashboard. Clamping (not
+        # overriding) still honors a user who narrows the range within the floor.
+        floor_start, floor_end = backtest_engine.symbol_floor_bounds(
+            backtest_engine.get_strategy_class(s["strategy_id"]), s["symbol"]
+        )
+        if floor_start is not None:
+            s["start_time"] = floor_start if s["start_time"] is None else max(s["start_time"], floor_start)
+        if floor_end is not None:
+            s["end_time"] = floor_end if s["end_time"] is None else min(s["end_time"], floor_end)
 
         for combo_idx, combo in enumerate(itertools.product(*value_lists), start=1):
             if self.cancel_flag:
@@ -283,6 +354,7 @@ class GridSearchJob:
             result = backtest_engine.run(
                 s["strategy_id"], s["symbol"], s["timeframe"],
                 params, start_time=s["start_time"], end_time=s["end_time"],
+                df=df, broker=s["broker"], risk_overrides=rc_snapshot, stats_only=True,
             )
             stats = result.get("stats") or {}
             metric_value = _score_from_stats(stats, s["metric"])
@@ -306,12 +378,34 @@ class GridSearchJob:
                 "params": row["params"],
             })
 
+            # Optional early-stop: first combo whose trade count lands within
+            # ±tolerance of the target ends the sweep. None => never triggers.
+            if target_trades is not None:
+                n_trades = int(stats.get("trades") or 0)
+                if abs(n_trades - target_trades) <= target_tol:
+                    self.stopped_early = True
+                    self.target_match = {
+                        "combo_idx": combo_idx,
+                        "params": row["params"],
+                        "trades": n_trades,
+                    }
+                    self._emit("gs_target_hit", {
+                        "combo_idx": combo_idx,
+                        "params": row["params"],
+                        "trades": n_trades,
+                        "target_trades": target_trades,
+                        "target_trades_tol": target_tol,
+                    })
+                    break
+
         if self.cancel_flag:
             # Stash partial results so the UI can still render what we got.
             self._publish_result(partial=True)
             return
 
-        self._publish_result(partial=False)
+        # stopped_early is also "partial" (we did not sweep the full grid), but
+        # it's a successful stop, not a cancel — _run() leaves state == done.
+        self._publish_result(partial=self.stopped_early)
 
     def _publish_result(self, partial: bool) -> None:
         s = self.spec
@@ -324,6 +418,7 @@ class GridSearchJob:
             "strategy_id": s["strategy_id"],
             "symbol": s["symbol"],
             "timeframe": s["timeframe"],
+            "broker": s["broker"],
             "metric": s["metric"],
             "grid_params": s["grid_params"],
             "base_params": s["base_params"],
@@ -334,6 +429,11 @@ class GridSearchJob:
             "completed_combos": self.combo_idx,
             "elapsed_seconds": elapsed,
             "partial": partial,
+            "risk_config": self.risk_config_snapshot,
+            "target_trades": s.get("target_trades"),
+            "target_trades_tol": s.get("target_trades_tol"),
+            "stopped_early": self.stopped_early,
+            "target_match": self.target_match,
         }
 
         global _last_result

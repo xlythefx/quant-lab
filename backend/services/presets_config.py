@@ -22,6 +22,7 @@ import os
 from threading import Lock
 
 from config import DATA_DIR
+from services.atomic_io import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -104,8 +105,4 @@ def _read_disk() -> dict:
 
 
 def _write_disk(data: dict) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = _PATH + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, _PATH)
+    atomic_write_json(_PATH, data)

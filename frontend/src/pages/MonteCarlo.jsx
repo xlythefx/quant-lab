@@ -28,6 +28,11 @@ function isoToEpochSec(iso) {
   return Number.isFinite(t) ? Math.floor(t / 1000) : null;
 }
 
+function epochToIso(epoch) {
+  if (!epoch) return "";
+  return new Date(epoch * 1000).toISOString().slice(0, 10);
+}
+
 const MC_METHODS = [
   { id: "trade_bootstrap", label: "Trade-order bootstrap",
     blurb: "Resamples the order of THIS run's trades. Answers: how much of the equity curve was the luck of trade sequencing?" },
@@ -71,6 +76,11 @@ export default function MonteCarlo() {
   const [error, setError] = useState(null);
   const [mc, setMc] = useState(null);
 
+  // Provenance of a config handed off from another page (e.g. a Walk-Forward
+  // window). Drives the strip at the top of the page; null when none.
+  const [handoff, setHandoff] = useState(null);
+  const pendingAutoRunRef = useRef(false);
+
   const onTab = (id) => { setTabInHash(id); setTab(id); };
 
   // Load symbol catalog + strategy catalog.
@@ -78,6 +88,23 @@ export default function MonteCarlo() {
     getSymbols().then((d) => { setSymbolList(d.symbols || []); setDatasets(d.datasets || []); })
                 .catch(() => {});
     getStrategies().then(setCatalog).catch(() => {});
+  }, []);
+
+  // Consume a one-shot handoff from another page (e.g. a Walk-Forward window).
+  // Read-and-delete so a refresh won't re-trigger; pre-fill Setup + arm auto-run.
+  useEffect(() => {
+    const raw = localStorage.getItem("ql.mc.wf_import");
+    if (!raw) return;
+    localStorage.removeItem("ql.mc.wf_import");
+    try {
+      const h = JSON.parse(raw);
+      setSymbol(h.symbol);
+      setTimeframe(h.timeframe);
+      setStrategies([{ id: h.strategy_id, params: h.params || {} }]);
+      setDateRange({ start: epochToIso(h.oos_start), end: epochToIso(h.oos_end) });
+      setHandoff(h);
+      pendingAutoRunRef.current = true;
+    } catch { /* ignore malformed handoff */ }
   }, []);
 
   // When a run completes, auto-flip from Setup to Distribution.
@@ -115,6 +142,17 @@ export default function MonteCarlo() {
     }
   }
 
+  // Auto-run once after a handoff pre-fills the Setup. Gated on canRun so the
+  // run only fires after symbol/timeframe/strategies are committed; the ref
+  // ensures it happens exactly once. onRun reads current state via closure.
+  useEffect(() => {
+    if (pendingAutoRunRef.current && canRun) {
+      pendingAutoRunRef.current = false;
+      onRun();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canRun]);
+
   const tabs = useMemo(
     () => TABS.map((t) => ({ ...t, disabled: t.id !== "setup" && !mc })),
     [mc],
@@ -141,6 +179,8 @@ export default function MonteCarlo() {
           </div>
           <a href="#dashboard" className="text-xs text-accent-blue hover:underline">← Dashboard</a>
         </header>
+
+        {handoff && <HandoffStrip handoff={handoff} onClear={() => setHandoff(null)} />}
 
         <TabBar tabs={tabs} active={tab} onSelect={onTab} />
 
@@ -178,6 +218,59 @@ export default function MonteCarlo() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HANDOFF STRIP — provenance banner when a config was imported from another
+// page (e.g. a Walk-Forward window). Shows source + the imported config.
+// ---------------------------------------------------------------------------
+
+function HandoffStrip({ handoff, onClear }) {
+  const os = handoff.oos_stats || {};
+  const retPos = (os.total_return_pct ?? 0) >= 0;
+  const paramEntries = Object.entries(handoff.params || {})
+    .filter(([k]) => !["sessions", "sides"].includes(k));
+  return (
+    <div className="rounded-xl border border-accent-blue/30 bg-accent-blue/5 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-xs font-mono text-text">
+          <span className="text-accent-blue font-semibold">Imported from Walk-Forward</span>
+          {handoff.window_idx != null && <span className="text-muted"> · Window #{handoff.window_idx}</span>}
+          <span className="text-muted"> · </span>
+          <span className="text-text">{handoff.strategy_id}</span>
+          <span className="text-muted"> · {handoff.symbol} · {handoff.timeframe}</span>
+          {(handoff.oos_start || handoff.oos_end) && (
+            <span className="text-muted"> · OOS {epochToIso(handoff.oos_start)} → {epochToIso(handoff.oos_end)}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-4 text-xs font-mono">
+          {(os.total_return_pct != null || os.sharpe != null || os.trades != null) && (
+            <span className={retPos ? "text-profit" : "text-loss"}>
+              {os.total_return_pct != null ? `OOS ${fmtPct(os.total_return_pct)}` : ""}
+              {os.sharpe != null ? ` · sharpe ${fmtNum(os.sharpe)}` : ""}
+              {os.trades != null ? ` · ${fmtInt(os.trades)}t` : ""}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-[11px] text-muted hover:text-text underline underline-offset-2"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+      {paramEntries.length > 0 && (
+        <div className="flex flex-wrap gap-1 text-[11px] font-mono">
+          {paramEntries.map(([k, v]) => (
+            <span key={k} className="px-2 py-0.5 rounded bg-bg-elev/60 border border-line/40 text-muted">
+              {k}=<span className="text-text">{typeof v === "number" ? fmtNum(v) : String(v)}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -241,11 +241,12 @@ class LunarStrategy(Strategy):
 
     META = StrategyMeta(
         id="lunar",
-        name="Lunar (Moon Cycle Bias)",
+        name="Lunar (Moon Cycle Bias) - ES",
         description=("Multiday moon-cycle bias engine. Entries and phase exits fire only "
                      "at session open (TS OpenS gate). Hard exits: stop, target, "
                      "breakeven, maxbars on every bar."),
         schema=PARAM_SCHEMA,
+        archived=True,
     )
 
     OVERLAYS = [
