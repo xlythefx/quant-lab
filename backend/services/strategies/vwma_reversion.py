@@ -173,6 +173,11 @@ class VwmaReversionStrategy(Strategy):
         OverlaySpec("vwma",  "VWMA",  from_column="vwma",       color="#fbbf24", line_width=2),
         OverlaySpec("upper", "+z·σ",  from_column="upper_band", color="rgba(34,211,238,0.55)", line_style="dashed"),
         OverlaySpec("lower", "-z·σ",  from_column="lower_band", color="rgba(34,211,238,0.55)", line_style="dashed"),
+        # ATR stop level, drawn only while a trade is open (NaN when flat or when
+        # atr_stop is off). The sparse line breaks between trades because
+        # _build_overlays emits whitespace for the NaN gaps.
+        OverlaySpec("atr_stop", "ATR stop", from_column="stop_price",
+                    color="rgba(239,68,68,0.85)", line_width=1, line_style="dashed"),
     ]
 
     # ---- vectorized (backtest) ----------------------------------------
@@ -244,6 +249,13 @@ class VwmaReversionStrategy(Strategy):
         pos = 0           # 0 flat, 1 long, -1 short
         entry_p = np.nan
         atr_at_entry = np.nan
+        cur_stop = np.nan          # active position's ATR stop level (for the overlay line)
+        # Display gate: only paint the stop line when the ATR stop is enabled, so
+        # the line vanishes from the chart when atr_stop is turned off. NOTE: this
+        # gates only the drawn line, not the exit logic below — kept separate so
+        # backtest behaviour is unchanged. At pyramiding=1 (default) the line
+        # tracks the real trade; with pyramiding>1 it reflects the base position.
+        atr_on = bool(p.get("atr_stop", True))
 
         for t in range(n):
             m = mean_a[t]
@@ -259,30 +271,40 @@ class VwmaReversionStrategy(Strategy):
                         atr_at_entry = atr_a[t] if np.isfinite(atr_a[t]) else np.nan
                         entry_long[t] = True
                         if np.isfinite(atr_at_entry):
-                            stop_price[t] = entry_p - p["atr_mult"] * atr_at_entry
+                            cur_stop = entry_p - p["atr_mult"] * atr_at_entry
+                            if atr_on:
+                                stop_price[t] = cur_stop
                     elif sc[t]:
                         pos = -1
                         entry_p = c
                         atr_at_entry = atr_a[t] if np.isfinite(atr_a[t]) else np.nan
                         entry_short[t] = True
                         if np.isfinite(atr_at_entry):
-                            stop_price[t] = entry_p + p["atr_mult"] * atr_at_entry
+                            cur_stop = entry_p + p["atr_mult"] * atr_at_entry
+                            if atr_on:
+                                stop_price[t] = cur_stop
             elif pos == 1:
                 stop_hit = (np.isfinite(atr_at_entry) and np.isfinite(entry_p)
                             and c <= entry_p - p["atr_mult"] * atr_at_entry)
+                if atr_on and np.isfinite(cur_stop):
+                    stop_price[t] = cur_stop   # keep the line visible through the trade
                 if c >= m or stop_hit:
                     exit_long[t] = True
                     pos = 0
                     entry_p = np.nan
                     atr_at_entry = np.nan
+                    cur_stop = np.nan
             else:  # pos == -1
                 stop_hit = (np.isfinite(atr_at_entry) and np.isfinite(entry_p)
                             and c >= entry_p + p["atr_mult"] * atr_at_entry)
+                if atr_on and np.isfinite(cur_stop):
+                    stop_price[t] = cur_stop   # keep the line visible through the trade
                 if c <= m or stop_hit:
                     exit_short[t] = True
                     pos = 0
                     entry_p = np.nan
                     atr_at_entry = np.nan
+                    cur_stop = np.nan
 
         out["entry_long"] = entry_long
         out["entry_short"] = entry_short

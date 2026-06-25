@@ -11,6 +11,13 @@ export const REGIME_COLORS = {
   "Choppy-Range":    "#94a3b8",
 };
 
+// Binary ADX filter → color. Ranging = safe to mean-revert (green), Trending = stay
+// out (red). Mirrors the "ADX below threshold = good / above = dangerous" framing.
+export const ADX_REGIME_COLORS = {
+  "Ranging":  "#22c55e",
+  "Trending": "#ef4444",
+};
+
 // Palette for HMM regimes (dynamic auto-named states). Ordered bear→bull to match
 // the backend's canonical state order (ascending mean trend).
 export const HMM_PALETTE = ["#ef4444", "#f59e0b", "#a78bfa", "#38bdf8", "#22c55e", "#14b8a6"];

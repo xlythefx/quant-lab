@@ -62,7 +62,11 @@ class _HeadlessRunner:
             return
         if sig is None:
             return
-        live_alerter.dispatch_for_rule(self.rule, self.symbol, sig)
+        # on_candle may return a single Signal or a list (pyramiding strategies
+        # emit a BUY per added tranche + one EXIT to close the stack). Fire one
+        # webhook per signal, in order, so the broker stacks/flattens correctly.
+        for s in (sig if isinstance(sig, list) else [sig]):
+            live_alerter.dispatch_for_rule(self.rule, self.symbol, s)
 
     def stop(self):
         if self._listener:

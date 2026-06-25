@@ -1,1 +1,50 @@
-{}
+{
+  "vwma_reversion": {
+    "FETUSDT": {
+      "vwma_length": 30,
+      "z_threshold": 1.5,
+      "rsi_length": 25,
+      "rsi_long_max": 35,
+      "rsi_short_min": 65,
+      "atr_stop": false,
+      "atr_length": 10,
+      "atr_mult": 6,
+      "trade_24_7": false,
+      "sessions": {
+        "london": {
+          "enabled": true
+        },
+        "ny_am": {
+          "enabled": true,
+          "end": "16:00",
+          "start": "12:30"
+        },
+        "ny_pm": {
+          "enabled": false
+        },
+        "tokyo": {
+          "enabled": false,
+          "end": "04:00",
+          "start": "00:00"
+        }
+      },
+      "sides": {
+        "long": false,
+        "short": true
+      },
+      "use_regime": false,
+      "regime_adx_period": 20,
+      "regime_adx_threshold": 40,
+      "use_five_regime": false,
+      "allowed_regimes": {
+        "Choppy-Range": true,
+        "High-Volatility": false,
+        "Quiet": true,
+        "Trending Down": false,
+        "Trending Up": false
+      },
+      "pyramiding": 10,
+      "risk_pct": 10
+    }
+  }
+}

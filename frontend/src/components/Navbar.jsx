@@ -37,6 +37,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
 
         <div className="flex items-center gap-1 ml-4">
           <NavLink href="#dashboard"  active={view === "dashboard"}>Dashboard</NavLink>
+          <NavLink href="#dashboardv2" active={view === "dashboardv2"}>Dashboard V2</NavLink>
           <NavDropdown label="Validation" items={VALIDATION_ITEMS} view={view} />
           <NavLink href="#marketlab"   active={view === "marketlab"}>Market Lab</NavLink>
           <NavLink href="#reportimport" active={view === "reportimport"}>Report Import</NavLink>

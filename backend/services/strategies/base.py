@@ -14,7 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 
 class ParamType(str, Enum):
@@ -169,11 +169,15 @@ class Strategy(ABC):
 
     # ---- abstract interfaces ------------------------------------------
     @abstractmethod
-    def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
+    def on_candle(self, candle: dict, state: dict) -> Union[Signal, list[Signal], None]:
         """Per-candle stateful execution for LIVE mode.
 
-        `state` is a mutable dict the runner persists across calls. Return
-        a Signal for entries/exits, or None for no action.
+        `state` is a mutable dict the runner persists across calls. Return:
+          - None        for no action,
+          - a Signal    for a single entry/exit, or
+          - a list[Signal] when one bar produces several actions (e.g. a
+            pyramiding strategy adding a tranche, or closing a stacked
+            position). Runners fire one alert per signal, in order.
         """
 
     @abstractmethod

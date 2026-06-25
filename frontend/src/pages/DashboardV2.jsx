@@ -1,0 +1,740 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import IconNavRail from "../components/dashboardv2/IconNavRail.jsx";
+import StrategyEditor from "../components/StrategyEditor.jsx";
+import LookAheadComparisonModal from "../components/LookAheadComparisonModal.jsx";
+import { KpiCard, Section, TabBar } from "../components/analytics/primitives.jsx";
+import StrategySidebar, { PORTFOLIO_ID } from "../components/dashboardv2/StrategySidebar.jsx";
+import EquityCurveV2 from "../components/dashboardv2/EquityCurveV2.jsx";
+import PriceChartV2 from "../components/dashboardv2/PriceChartV2.jsx";
+import UnderwaterChart from "../components/dashboardv2/UnderwaterChart.jsx";
+import MonthlyReturnsHeatmap from "../components/dashboardv2/MonthlyReturnsHeatmap.jsx";
+import RangeSelector from "../components/dashboardv2/RangeSelector.jsx";
+import RiskReturnPanel from "../components/dashboardv2/RiskReturnPanel.jsx";
+import InterpretationCard from "../components/dashboardv2/InterpretationCard.jsx";
+import { getSymbols, getStrategies, getRiskConfig, runPortfolioBacktest } from "../services/api.js";
+import {
+  useActiveStrategies, addStrategy, removeStrategy, updateParams, saveUserDefaults, getUserDefaults,
+} from "../services/strategiesStore.js";
+import { usePersistentState } from "../services/usePersistentState.js";
+import { setLast as setLastResult } from "../services/lastResultStore.js";
+import { fmtUsd, fmtNum, fmtPct, fmtRatio, fmtDate, fmtTime } from "../services/format.js";
+import {
+  startingCapital, rangeToWindow, resolveDefaultParams, annualizedVol,
+  underwaterSeries, monthlyReturnsGrid, bestWorstMonth, statusPill, interpretation,
+} from "../components/dashboardv2/metrics.js";
+
+const ASSET_LABELS = {
+  crypto: "Crypto", commodity: "Commodities", forex: "Forex",
+  futures: "Futures · CME", equity_index_future: "Futures · TS",
+  stock: "Stocks", index: "Indices",
+};
+const CLASS_ORDER = { crypto: 0, commodity: 1, forex: 2, futures: 3, equity_index_future: 3.5, stock: 4, index: 5 };
+
+const AGG_ID = "__agg__";
+
+// Shared toolbar field-cell styling so Asset / Symbol / Timeframe read as one
+// uniform segmented control (vs. the shared selectors' mismatched labels).
+const SELECT_CLS = "bg-transparent text-sm font-mono text-text leading-none focus:outline-none cursor-pointer";
+
+function Field({ label, children }) {
+  return (
+    <label className="flex flex-col justify-center gap-1 px-3.5 min-w-[96px] cursor-pointer">
+      <span className="text-[9px] uppercase tracking-[0.14em] text-muted/80 leading-none">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function mapPoints(equity) {
+  return (equity || []).map((e) => ({ time: e.time, value: e.value }));
+}
+
+function agoLabel(sec) {
+  if (!sec) return "—";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - sec);
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return fmtDate(sec);
+}
+
+export default function DashboardV2() {
+  // Reuse the Dashboard's persisted symbol/broker/timeframe so context carries
+  // between the two dashboards. V2-only UI state lives under ql.dv2.*.
+  const [symbol, setSymbol]       = usePersistentState("ql.dash.symbol", "");
+  const [broker, setBroker]       = usePersistentState("ql.dash.broker", "");
+  const [timeframe, setTimeframe] = usePersistentState("ql.dash.timeframe", "15m");
+  const [rangeKey, setRangeKey]   = usePersistentState("ql.dv2.range", "MAX");
+  const [scale, setScale]         = usePersistentState("ql.dv2.scale", "linear");
+  const [tab, setTab]             = usePersistentState("ql.dv2.tab", "performance");
+  const [selectedId, setSelectedId] = usePersistentState("ql.dv2.selected", PORTFOLIO_ID);
+
+  const [datasets, setDatasets] = useState([]);
+  const [catalog, setCatalog] = useState([]);
+  const [riskConfig, setRiskConfig] = useState(null);
+
+  const active = useActiveStrategies();
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastRun, setLastRun] = useState(0);
+  const [editingId, setEditingId] = useState(null);
+  // {strategyId, params} when the look-ahead-vs-reality comparison modal is open.
+  const [laCompare, setLaCompare] = useState(null);
+  const inflightRef = useRef(0);
+
+  const catalogById = useMemo(() => {
+    const m = {}; for (const s of catalog) m[s.id] = s; return m;
+  }, [catalog]);
+
+  // ---- catalog + datasets + risk config ----
+  useEffect(() => { getSymbols().then((d) => { setDatasets(d.datasets || []); }).catch(() => {}); }, []);
+  useEffect(() => { getStrategies().then(setCatalog).catch(() => {}); }, []);
+  useEffect(() => { getRiskConfig().then(setRiskConfig).catch(() => {}); }, []);
+
+  // Auto-correct timeframe to one the selected symbol actually has data for.
+  const tfsForSymbol = useMemo(
+    () => datasets.filter((d) => d.symbol === symbol && (!broker || d.broker === broker)).map((d) => d.timeframe),
+    [datasets, symbol, broker],
+  );
+  useEffect(() => {
+    if (!symbol || tfsForSymbol.length === 0) return;
+    if (!tfsForSymbol.includes(timeframe)) setTimeframe(tfsForSymbol.includes("15m") ? "15m" : tfsForSymbol[0]);
+  }, [symbol, tfsForSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectedDataset = useMemo(
+    () => datasets.find((d) => d.symbol === symbol && d.timeframe === timeframe && (!broker || d.broker === broker)),
+    [datasets, symbol, timeframe, broker],
+  );
+  const datasetExists = !!selectedDataset;
+  const assetClass = selectedDataset?.asset_class
+    || datasets.find((d) => d.symbol === symbol && (!broker || d.broker === broker))?.asset_class
+    || "crypto";
+  const assetLabel = ASSET_LABELS[assetClass] || assetClass;
+  // Mirror the engine's sizing branch: futures size by `contracts` (risk_pct
+  // inert), crypto/spot by `risk_pct` (contracts inert). Hide the dead control.
+  const hiddenSizingParams = ["equity_index_future", "futures"].includes(assetClass) ? ["risk_pct"] : ["contracts"];
+
+  // ---- uniform toolbar selectors (V2-local; replaces shared SymbolSelector) --
+  // Asset-class tab is persisted under the same key the shared selector uses, so
+  // the choice carries across pages.
+  const [activeClass, setActiveClass] = usePersistentState("ql.symbolSelector.assetClass", "crypto");
+  const assetClasses = useMemo(() => {
+    const seen = new Set();
+    for (const d of datasets) seen.add(d.asset_class || "crypto");
+    return Array.from(seen).sort((a, b) => (CLASS_ORDER[a] ?? 99) - (CLASS_ORDER[b] ?? 99));
+  }, [datasets]);
+  const effectiveClass = assetClasses.includes(activeClass) ? activeClass : (assetClasses[0] || "crypto");
+  const symbolRows = useMemo(() => {
+    const seen = new Set();
+    const rows = [];
+    for (const d of datasets) {
+      if ((d.asset_class || "crypto") !== effectiveClass) continue;
+      const b = d.broker || "";
+      const k = `${d.symbol}::${b}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      rows.push({ symbol: d.symbol, broker: b });
+    }
+    const counts = {};
+    for (const r of rows) counts[r.symbol] = (counts[r.symbol] || 0) + 1;
+    for (const r of rows) { r.id = `${r.symbol}::${r.broker}`; r.label = counts[r.symbol] > 1 ? `${r.symbol} · ${r.broker}` : r.symbol; }
+    rows.sort((a, b) => a.symbol.localeCompare(b.symbol) || a.broker.localeCompare(b.broker));
+    return rows;
+  }, [datasets, effectiveClass]);
+  const selectedRow = symbolRows.find((r) => r.symbol === symbol && (broker === "" || r.broker === broker))
+    || symbolRows.find((r) => r.symbol === symbol) || null;
+  // When the active class holds no current selection, default to its first symbol.
+  useEffect(() => {
+    if (symbolRows.length > 0 && !selectedRow) {
+      setSymbol(symbolRows[0].symbol);
+      setBroker(symbolRows[0].broker || "");
+    }
+  }, [effectiveClass, symbolRows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Keep the selection valid: a removed strategy falls back to Portfolio, and a
+  // lone strategy is selected directly (the Portfolio aggregate entry only
+  // appears for 2+ strategies, so "Portfolio" wouldn't show as selectable).
+  useEffect(() => {
+    if (selectedId !== PORTFOLIO_ID && !active.some((s) => s.id === selectedId)) {
+      setSelectedId(active.length === 1 ? active[0].id : PORTFOLIO_ID);
+    } else if (selectedId === PORTFOLIO_ID && active.length === 1) {
+      setSelectedId(active[0].id);
+    }
+  }, [active, selectedId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- run handler (mirrors Dashboard.runHindsight) ----
+  // `overrideList` lets apply-and-rerun pass the just-edited roster without
+  // waiting for the store's `active` to flush through a render.
+  const runBacktest = async (overrideList) => {
+    const list = Array.isArray(overrideList) ? overrideList : active;
+    if (!symbol || !list.length || !datasetExists) {
+      setError(!symbol ? "Pick a symbol first." : !list.length ? "Add at least one strategy." : "No dataset for this symbol/timeframe.");
+      return;
+    }
+    const myReq = ++inflightRef.current;
+    setError(null);
+    setLoading(true);
+    const bounds = selectedDataset ? { firstTime: selectedDataset.first_time, lastTime: selectedDataset.last_time } : null;
+    const { start_time, end_time } = rangeToWindow(rangeKey, bounds);
+    try {
+      const portfolio = await runPortfolioBacktest({
+        strategies: list.map((s, i) => ({
+          strategy_id: s.id, symbol, timeframe,
+          params: s.params, priority: i + 1, broker: broker || undefined,
+        })),
+        start_time, end_time,
+      });
+      if (myReq !== inflightRef.current) return;
+      setResult(portfolio);
+      setLastRun(Math.floor(Date.now() / 1000));
+
+      // Cache slices so the Analytics page (which reads lastResultStore) can
+      // deep-dive without re-running. Mirrors Dashboard.runHindsight: each
+      // per-strategy slice in the legacy single-strategy shape, plus the full
+      // portfolio under the __portfolio__ key.
+      for (const s of list) {
+        const psd = portfolio.per_strategy?.[s.id];
+        if (!psd) continue;
+        setLastResult(`${s.id}|${symbol}|${timeframe}`, {
+          strategy_id: s.id, symbol, timeframe,
+          risk_config: portfolio.risk_config,
+          params: psd.spec?.params || s.params,
+          candles: psd.candles || [],
+          overlays: psd.overlays || [],
+          trades: psd.trades || [],
+          equity: psd.equity || [],
+          stats: psd.stats || {},
+          analytics: psd.analytics || {},
+        });
+      }
+      setLastResult(`__portfolio__|${symbol}|${timeframe}`, portfolio);
+    } catch (e) {
+      if (myReq !== inflightRef.current) return;
+      setError(e?.response?.data?.error || e.message || "Backtest failed.");
+    } finally {
+      if (myReq === inflightRef.current) setLoading(false);
+    }
+  };
+
+  // Clear results when the run inputs change so we never show stale numbers.
+  useEffect(() => { setResult(null); setError(null); }, [symbol, broker, timeframe, active.length]);
+
+  // ---- selection slice resolution ----
+  const sliceFor = (id) => {
+    if (!result) return null;
+    if (id === PORTFOLIO_ID) return result;
+    return result.per_strategy?.[id] || null;
+  };
+  const pointsFor = (id) => {
+    const s = sliceFor(id);
+    return s ? mapPoints(s.equity) : null;
+  };
+  const slice = sliceFor(selectedId);
+
+  // ---- derived metrics for the selected slice ----
+  const sc = startingCapital(slice || result, riskConfig);
+  const derived = useMemo(() => {
+    if (!slice) return null;
+    const st = slice.stats || {};
+    const ra = slice.analytics?.advanced?.risk_adjusted || {};
+    const { best, worst } = bestWorstMonth(slice.analytics?.monthly_returns, sc);
+    return {
+      sharpe: st.sharpe,
+      cagr: ra.cagr_pct,
+      totalReturn: st.total_return_pct,
+      maxDD: st.max_drawdown_pct_peak,
+      sortino: ra.sortino,
+      winRate: typeof st.win_rate === "number" ? st.win_rate * 100 : null,
+      vol: annualizedVol(slice.equity),
+      calmar: ra.calmar,
+      profitFactor: st.profit_factor,
+      exposure: slice.analytics?.exposure_pct,
+      best, worst,
+    };
+  }, [slice, sc]);
+
+  const monthGrid = useMemo(() => monthlyReturnsGrid(slice?.analytics?.monthly_returns, sc), [slice, sc]);
+  const underwater = useMemo(() => underwaterSeries(slice), [slice]);
+
+  // ---- equity chart series for the selected entity ----
+  const chart = useMemo(() => {
+    if (!result) return { strategies: [], points: {} };
+    if (selectedId === PORTFOLIO_ID) {
+      const strategies = active.map((s) => ({ id: s.id, color: s.color, label: catalogById[s.id]?.name || s.id }));
+      const points = {};
+      for (const s of active) points[s.id] = mapPoints(result.per_strategy?.[s.id]?.equity);
+      if (active.length >= 2) {
+        strategies.push({ id: AGG_ID, color: "#e5e7eb", label: "Portfolio" });
+        points[AGG_ID] = mapPoints(result.equity);
+      }
+      return { strategies, points };
+    }
+    const s = active.find((a) => a.id === selectedId);
+    return {
+      strategies: [{ id: selectedId, color: s?.color || "#3b82f6", label: catalogById[selectedId]?.name || selectedId }],
+      points: { [selectedId]: mapPoints(result.per_strategy?.[selectedId]?.equity) },
+    };
+  }, [result, selectedId, active, catalogById]);
+
+  const isPortfolio = selectedId === PORTFOLIO_ID;
+  // Deep-dive link: the cache was populated on run under these exact keys, and
+  // `result` is cleared whenever symbol/tf/roster change, so the key always
+  // matches the cached payload.
+  const analyticsKey = result
+    ? (isPortfolio ? `__portfolio__|${symbol}|${timeframe}` : `${selectedId}|${symbol}|${timeframe}`)
+    : null;
+  const headerName = isPortfolio ? "Portfolio" : (catalogById[selectedId]?.name || selectedId);
+  const pill = derived ? statusPill(slice?.stats) : { label: "NO RUN", tone: "muted" };
+  const pillCls = pill.tone === "profit" ? "text-profit border-profit/40 bg-profit/10"
+    : pill.tone === "loss" ? "text-loss border-loss/40 bg-loss/10"
+    : pill.tone === "neutral" ? "text-accent-cyan border-accent-cyan/40 bg-accent-cyan/10"
+    : "text-muted border-line bg-bg-elev";
+
+  const onAdd = (id) => {
+    const meta = catalogById[id];
+    addStrategy(id, resolveDefaultParams(meta, symbol, timeframe, getUserDefaults(id)));
+  };
+
+  // Apply edited params to the store and re-run the whole portfolio (shared cash
+  // makes per-strategy results interdependent, so we recompute the lot). Pass the
+  // edited roster explicitly so the run doesn't use stale pre-update params.
+  const onApplyParams = (id, p) => {
+    updateParams(id, p);
+    setEditingId(null);
+    if (symbol && datasetExists) {
+      runBacktest(active.map((s) => (s.id === id ? { ...s, params: p } : s)));
+    }
+  };
+  const onResetDefaults = (id) => {
+    const meta = catalogById[id];
+    onApplyParams(id, resolveDefaultParams(meta, symbol, timeframe, getUserDefaults(id)));
+  };
+  const editingStrategy = editingId ? active.find((s) => s.id === editingId) : null;
+  const editingMeta = editingId ? catalogById[editingId] : null;
+  // Window for the look-ahead comparison — same range the portfolio run uses.
+  const laWindow = useMemo(() => {
+    const bounds = selectedDataset ? { firstTime: selectedDataset.first_time, lastTime: selectedDataset.last_time } : null;
+    return rangeToWindow(rangeKey, bounds);
+  }, [selectedDataset, rangeKey]);
+
+  const canRun = symbol && active.length > 0 && datasetExists && !loading;
+
+  return (
+    <div className="flex h-screen">
+      <IconNavRail view="dashboardv2" />
+
+      <div className="flex flex-1 min-h-0">
+        <StrategySidebar
+          active={active}
+          catalogById={catalogById}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onRemove={removeStrategy}
+          onAdd={onAdd}
+          onEdit={setEditingId}
+          sliceFor={sliceFor}
+          pointsFor={pointsFor}
+          strategySubtitle={symbol ? `${assetLabel} · ${symbol}` : "no symbol"}
+        />
+
+        <main className="flex-1 min-w-0 overflow-y-auto">
+          {/* header */}
+          <div className="px-6 pt-5 pb-3 border-b border-line">
+            {/* title block */}
+            <div className="min-w-0">
+              <div className="flex items-center gap-3 flex-wrap">
+                <h1 className="text-2xl font-semibold tracking-tight text-text">{headerName}</h1>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider border ${pillCls}`}>
+                  ● {pill.label}
+                </span>
+                <span className="text-xs text-muted">
+                  {isPortfolio ? `${active.length} ${active.length === 1 ? "strategy" : "strategies"}` : assetLabel}
+                  {symbol ? ` · ${symbol} · ${timeframe}` : ""}
+                </span>
+              </div>
+              <div className="text-xs text-muted mt-1 font-mono">
+                {slice?.stats?.first_time
+                  ? `Backtest ${fmtDate(slice.stats.first_time)} – ${fmtDate(slice.stats.last_time)} · ${(slice.equity || []).length} bars · last run ${agoLabel(lastRun)}`
+                  : "Not yet run"}
+              </div>
+            </div>
+
+            {/* unified control toolbar */}
+            <div className="flex items-center gap-3 mt-4 flex-wrap">
+              {/* segmented selector group */}
+              <div className="flex items-stretch h-11 rounded-xl border border-line bg-bg-panel/40 divide-x divide-line overflow-hidden">
+                <Field label="Asset">
+                  <select className={SELECT_CLS} value={effectiveClass} onChange={(e) => setActiveClass(e.target.value)} aria-label="Asset class">
+                    {assetClasses.length === 0
+                      ? <option value={effectiveClass}>—</option>
+                      : assetClasses.map((c) => <option key={c} value={c}>{ASSET_LABELS[c] || c}</option>)}
+                  </select>
+                </Field>
+                <Field label="Symbol">
+                  <select
+                    className={SELECT_CLS}
+                    value={selectedRow ? selectedRow.id : ""}
+                    onChange={(e) => { const r = symbolRows.find((x) => x.id === e.target.value); if (r) { setSymbol(r.symbol); setBroker(r.broker || ""); } }}
+                    aria-label="Symbol"
+                  >
+                    {symbolRows.length === 0 ? (
+                      <option value="">no data</option>
+                    ) : (
+                      <>
+                        {!selectedRow && <option value="">— pick —</option>}
+                        {symbolRows.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                      </>
+                    )}
+                  </select>
+                </Field>
+                <Field label="Timeframe">
+                  <select className={SELECT_CLS} value={timeframe} onChange={(e) => setTimeframe(e.target.value)} aria-label="Timeframe">
+                    {(tfsForSymbol.length ? tfsForSymbol : [timeframe]).map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </Field>
+              </div>
+
+              {/* range + actions, pinned right */}
+              <div className="flex items-center gap-3 ml-auto">
+                <RangeSelector value={rangeKey} onChange={setRangeKey} />
+                <a
+                  href={analyticsKey ? `#analytics?key=${encodeURIComponent(analyticsKey)}` : undefined}
+                  aria-disabled={!analyticsKey}
+                  onClick={(e) => { if (!analyticsKey) e.preventDefault(); }}
+                  title={analyticsKey
+                    ? `Open in-depth analytics for ${isPortfolio ? "the portfolio" : headerName}`
+                    : "Run a backtest first"}
+                  className={`h-11 inline-flex items-center px-4 rounded-xl text-sm font-medium border transition ${
+                    analyticsKey
+                      ? "border-line text-text hover:border-accent-blue/60 hover:text-accent-blue cursor-pointer"
+                      : "border-line text-muted/40 cursor-not-allowed"
+                  }`}
+                >
+                  Analytics →
+                </a>
+                <button
+                  onClick={() => runBacktest()}
+                  disabled={!canRun}
+                  className={`h-11 inline-flex items-center gap-2 px-5 rounded-xl text-sm font-medium transition ${
+                    canRun ? "bg-accent-grad text-white shadow-lg shadow-accent-blue/20 hover:opacity-90 cursor-pointer" : "bg-bg-elev text-muted cursor-not-allowed"
+                  }`}
+                >
+                  {loading ? "Running…" : "▶ Run backtest"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* tabs */}
+          <div className="px-6 pt-3">
+            <TabBar
+              tabs={[
+                { id: "performance", label: "Performance" },
+                { id: "chart", label: "Chart" },
+                { id: "trades", label: "Trades" },
+                { id: "config", label: "Config" },
+              ]}
+              active={tab}
+              onSelect={setTab}
+            />
+          </div>
+
+          {/* body */}
+          <div className="px-6 py-5">
+            {error && (
+              <div className="mb-4 px-4 py-2 rounded-lg text-sm text-loss bg-loss/10 border border-loss/30">{error}</div>
+            )}
+
+            {!result && !loading && (
+              <EmptyState hasStrategies={active.length > 0} hasSymbol={!!symbol} />
+            )}
+
+            {loading && !result && (
+              <div className="flex items-center justify-center py-24 text-muted text-sm gap-3">
+                <span className="w-4 h-4 rounded-full border-2 border-accent-blue border-t-transparent animate-spin" />
+                Running portfolio backtest…
+              </div>
+            )}
+
+            {result && slice && tab === "performance" && (
+              <PerformanceTab
+                derived={derived}
+                sc={sc}
+                chart={chart}
+                scale={scale}
+                setScale={setScale}
+                underwater={underwater}
+                monthGrid={monthGrid}
+                interpText={interpretation(slice, derived)}
+                hasAdvanced={!!slice.analytics?.advanced}
+              />
+            )}
+
+            {result && slice && tab === "chart" && (
+              <div>
+                <div className="text-[11px] text-muted/80 mb-2 font-mono">
+                  {isPortfolio ? "All strategies" : headerName} · candles, VWMA & ±z·σ bands, dashed ATR stop (shown only while a trade is open), entry/exit markers.
+                </div>
+                <div className="rounded-xl border border-line bg-bg-panel/40 overflow-hidden" style={{ height: 560 }}>
+                  <PriceChartV2
+                    result={result}
+                    selectedId={selectedId}
+                    active={active}
+                    symbol={symbol}
+                    timeframe={timeframe}
+                    broker={broker}
+                    portfolioId={PORTFOLIO_ID}
+                  />
+                </div>
+              </div>
+            )}
+
+            {result && slice && tab === "trades" && (
+              <TradesTab trades={slice.trades} isPortfolio={isPortfolio} catalogById={catalogById} />
+            )}
+
+            {result && slice && tab === "config" && (
+              <ConfigTab
+                isPortfolio={isPortfolio}
+                active={active}
+                selectedId={selectedId}
+                slice={slice}
+                catalogById={catalogById}
+                symbol={symbol}
+                timeframe={timeframe}
+                rangeKey={rangeKey}
+                riskConfig={result.risk_config || riskConfig}
+                onEdit={setEditingId}
+              />
+            )}
+          </div>
+        </main>
+      </div>
+
+      {editingStrategy && editingMeta && (
+        <StrategyEditor
+          open
+          color={editingStrategy.color}
+          schema={editingMeta.schema}
+          params={editingStrategy.params}
+          strategyId={editingStrategy.id}
+          builtinPresets={editingMeta.presets || {}}
+          hiddenParams={hiddenSizingParams}
+          onChange={() => {}}
+          onClose={() => setEditingId(null)}
+          onApply={(p) => onApplyParams(editingStrategy.id, p)}
+          onResetDefaults={() => onResetDefaults(editingStrategy.id)}
+          onSaveAsDefault={(p) => saveUserDefaults(editingStrategy.id, p)}
+          onCompareLookAhead={(p) => setLaCompare({ strategyId: editingStrategy.id, params: p })}
+        />
+      )}
+
+      <LookAheadComparisonModal
+        open={!!laCompare}
+        onClose={() => setLaCompare(null)}
+        strategyId={laCompare?.strategyId}
+        symbol={symbol}
+        timeframe={timeframe}
+        broker={broker || undefined}
+        params={laCompare?.params}
+        startTime={laWindow.start_time}
+        endTime={laWindow.end_time}
+        startingCapital={sc}
+      />
+    </div>
+  );
+}
+
+function EmptyState({ hasStrategies, hasSymbol }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-24 text-center">
+      <div className="w-12 h-12 rounded-xl bg-accent-grad/20 border border-line mb-4" />
+      <div className="text-text font-medium">
+        {!hasStrategies ? "Add strategies to your portfolio" : !hasSymbol ? "Pick a symbol" : "Ready to run"}
+      </div>
+      <div className="text-sm text-muted mt-1 max-w-sm">
+        {!hasStrategies
+          ? "Use “+ Add strategy” in the left rail to build a shared-cash portfolio."
+          : !hasSymbol
+            ? "Choose a symbol and timeframe above, then run a backtest."
+            : "Press “Run backtest” to compute the portfolio report."}
+      </div>
+    </div>
+  );
+}
+
+function PerformanceTab({ derived, sc, chart, scale, setScale, underwater, monthGrid, interpText, hasAdvanced }) {
+  const d = derived || {};
+  return (
+    <div className="space-y-5">
+      {/* metric cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <KpiCard title="Sharpe Ratio" value={fmtRatio(d.sharpe)} sub="risk-adjusted" positive={d.sharpe == null ? null : d.sharpe > 0} />
+        <KpiCard title="CAGR" value={fmtPct(d.cagr)} sub="annualized" positive={d.cagr == null ? null : d.cagr >= 0} />
+        <KpiCard title="Total Return" value={fmtPct(d.totalReturn)} sub="cumulative" positive={d.totalReturn == null ? null : d.totalReturn >= 0} />
+        <KpiCard title="Max Drawdown" value={d.maxDD == null ? "—" : fmtPct(-Math.abs(d.maxDD))} sub="peak-to-trough" positive={false} />
+        <KpiCard title="Sortino" value={fmtRatio(d.sortino)} sub="downside-adjusted" positive={d.sortino == null ? null : d.sortino > 0} />
+        <KpiCard title="Win Rate" value={d.winRate == null ? "—" : `${fmtNum(d.winRate)}%`} sub="of trades" />
+      </div>
+
+      {!hasAdvanced && (
+        <div className="text-[11px] text-muted/80 italic">
+          Some risk-adjusted metrics are unavailable for this result — re-run the backtest to compute them.
+        </div>
+      )}
+
+      {/* equity + risk panel */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
+        <Section title="Equity Curve" hint="value as % of starting capital">
+          <div className="rounded-xl border border-line bg-bg-panel/40 relative" style={{ height: 320 }}>
+            <div className="absolute top-2 right-3 z-10 flex items-center gap-1 p-0.5 rounded-md border border-line bg-bg-elev">
+              {["linear", "log"].map((sv) => (
+                <button
+                  key={sv}
+                  onClick={() => setScale(sv)}
+                  className={`px-2 py-0.5 text-[11px] rounded transition ${scale === sv ? "bg-accent-grad text-white" : "text-muted hover:text-text"}`}
+                >
+                  {sv}
+                </button>
+              ))}
+            </div>
+            <EquityCurveV2 strategies={chart.strategies} pointsByStrategy={chart.points} startingCapital={sc} scale={scale} />
+          </div>
+        </Section>
+        <RiskReturnPanel m={d} />
+      </div>
+
+      {/* underwater */}
+      <Section title="Underwater / Drawdown" hint="depth below the running peak">
+        <div className="rounded-xl border border-line bg-bg-panel/40" style={{ height: 150 }}>
+          <UnderwaterChart points={underwater} />
+        </div>
+      </Section>
+
+      {/* monthly heatmap */}
+      <Section title="Monthly Returns" hint="% of starting capital, by calendar month">
+        <div className="rounded-xl border border-line bg-bg-panel/40 p-4">
+          <MonthlyReturnsHeatmap grid={monthGrid} />
+        </div>
+      </Section>
+
+      <InterpretationCard text={interpText} />
+    </div>
+  );
+}
+
+function TradesTab({ trades, isPortfolio, catalogById }) {
+  const list = trades || [];
+  if (list.length === 0) return <div className="text-sm text-muted py-10 text-center">No trades for this selection.</div>;
+  const CAP = 1000;
+  const shown = list.slice(0, CAP);
+  return (
+    <div>
+      <div className="text-xs text-muted mb-2 font-mono">
+        {list.length} trade{list.length === 1 ? "" : "s"}{list.length > CAP ? ` (showing first ${CAP})` : ""}
+      </div>
+      <div className="rounded-xl border border-line overflow-hidden">
+        <div className="overflow-x-auto max-h-[60vh]">
+          <table className="w-full text-xs font-mono">
+            <thead className="bg-bg-elev text-muted sticky top-0">
+              <tr className="text-left">
+                {isPortfolio && <th className="px-3 py-2 font-medium">Strategy</th>}
+                <th className="px-3 py-2 font-medium">Side</th>
+                <th className="px-3 py-2 font-medium">Entry</th>
+                <th className="px-3 py-2 font-medium text-right">Entry px</th>
+                <th className="px-3 py-2 font-medium text-right">Exit px</th>
+                <th className="px-3 py-2 font-medium text-right">P&amp;L $</th>
+                <th className="px-3 py-2 font-medium text-right">P&amp;L %</th>
+                <th className="px-3 py-2 font-medium text-right">Dur (min)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((t, i) => {
+                const win = t.win || (t.pnl_dollars != null ? t.pnl_dollars >= 0 : false);
+                return (
+                  <tr key={i} className="border-t border-line/60 hover:bg-bg-elev/40">
+                    {isPortfolio && <td className="px-3 py-1.5 text-muted">{catalogById[t.strategy_id]?.name || t.strategy_id || "—"}</td>}
+                    <td className={`px-3 py-1.5 uppercase ${t.side === "long" ? "text-accent-cyan" : "text-accent-violet"}`}>{t.side}</td>
+                    <td className="px-3 py-1.5 text-muted">{fmtTime(t.entry_time)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmtNum(t.entry_price)}</td>
+                    <td className="px-3 py-1.5 text-right">{fmtNum(t.exit_price)}</td>
+                    <td className={`px-3 py-1.5 text-right ${win ? "text-profit" : "text-loss"}`}>{fmtUsd(t.pnl_dollars)}</td>
+                    <td className={`px-3 py-1.5 text-right ${win ? "text-profit" : "text-loss"}`}>{fmtPct(t.pnl_pct)}</td>
+                    <td className="px-3 py-1.5 text-right text-muted">{t.duration_min != null ? fmtNum(t.duration_min) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfigTab({ isPortfolio, active, selectedId, slice, catalogById, symbol, timeframe, rangeKey, riskConfig, onEdit }) {
+  const Info = ({ label, value }) => (
+    <div className="flex justify-between gap-4 py-1.5 border-b border-line/60 last:border-0 text-sm">
+      <span className="text-muted">{label}</span>
+      <span className="font-mono text-text text-right break-all">{value}</span>
+    </div>
+  );
+
+  const fmtVal = (v) => {
+    if (v == null) return "—";
+    if (typeof v === "object") return JSON.stringify(v);
+    if (typeof v === "boolean") return v ? "true" : "false";
+    return String(v);
+  };
+
+  const renderParams = (id) => {
+    const meta = catalogById[id];
+    const params = (id === selectedId && !isPortfolio ? slice?.spec?.params : null)
+      || active.find((s) => s.id === id)?.params
+      || {};
+    const schema = meta?.schema || [];
+    return (
+      <div className="rounded-xl border border-line bg-bg-panel/40 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm font-semibold text-text">{meta?.name || id}</div>
+          <button
+            onClick={() => onEdit?.(id)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-line text-xs text-muted hover:text-accent-blue hover:border-accent-blue/60 cursor-pointer transition"
+          >
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+            </svg>
+            Edit
+          </button>
+        </div>
+        {schema.length === 0 ? (
+          <div className="text-xs text-muted">No parameters.</div>
+        ) : (
+          schema.map((spec) => (
+            <Info key={spec.name} label={spec.name} value={fmtVal(params[spec.name] ?? spec.default)} />
+          ))
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4 max-w-3xl">
+      <div className="rounded-xl border border-line bg-bg-panel/40 p-4">
+        <div className="text-sm font-semibold text-text mb-2">Run configuration</div>
+        <Info label="Symbol" value={symbol || "—"} />
+        <Info label="Timeframe" value={timeframe} />
+        <Info label="Range" value={rangeKey} />
+        <Info label="Window" value={slice?.stats?.first_time ? `${fmtDate(slice.stats.first_time)} → ${fmtDate(slice.stats.last_time)}` : "—"} />
+        <Info label="Starting capital" value={fmtUsd(riskConfig?.starting_capital)} />
+        <Info label="Fee (flat / %)" value={`${fmtUsd(riskConfig?.fee_flat)} / ${riskConfig?.fee_pct ?? "—"}`} />
+        <Info label="Slippage (bps)" value={riskConfig?.slippage_bps ?? "—"} />
+      </div>
+
+      {isPortfolio
+        ? active.map((s) => <div key={s.id}>{renderParams(s.id)}</div>)
+        : renderParams(selectedId)}
+    </div>
+  );
+}

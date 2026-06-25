@@ -279,7 +279,7 @@ class LiveRunner:
         self._peak = 100.0
         self._trades = 0
         self._wins = 0
-        self._open: Optional[dict] = None  # {side, entry_price, entry_time}
+        self._opens: list[dict] = []  # [{side, entry_price, entry_time}, ...] — pyramiding tranches
         self._state_path = (
             _LIVE_STATE_DIR / f"{strategy_id}_{symbol}_{timeframe}.json"
         )
@@ -295,7 +295,11 @@ class LiveRunner:
                 self._peak   = float(saved.get("peak",   100.0))
                 self._trades = int(saved.get("trades", 0))
                 self._wins   = int(saved.get("wins",   0))
-                self._open   = saved.get("open")
+                # New format: list of tranches. Back-compat: wrap an old single "open".
+                self._opens = saved.get("opens")
+                if self._opens is None:
+                    _old = saved.get("open")
+                    self._opens = [_old] if _old else []
                 log.info("[%s] live state loaded from %s", self.strategy_id, self._state_path)
         except Exception as e:
             log.warning("[%s] failed to load live state: %s", self.strategy_id, e)
@@ -310,7 +314,7 @@ class LiveRunner:
                     "peak":   self._peak,
                     "trades": self._trades,
                     "wins":   self._wins,
-                    "open":   self._open,
+                    "opens":  self._opens,
                 }, f)
         except Exception as e:
             log.warning("[%s] failed to save live state: %s", self.strategy_id, e)
@@ -322,42 +326,58 @@ class LiveRunner:
         self._sm.add_listener("live", self.symbol, self.timeframe, listener, broker=self.broker)
 
     def _on_candle(self, candle):
-        sig = self.strategy.on_candle(candle, self._state)
-        if sig is None:
+        out = self.strategy.on_candle(candle, self._state)
+        if out is None:
             return
-        _emit_signal(self.strategy_id, self.sid, sig, symbol=self.symbol, mode="live")
+        # on_candle may return one Signal or a list (pyramiding: a BUY per added
+        # tranche + a single EXIT that closes the whole stack).
+        sigs = out if isinstance(out, list) else [out]
+        if not sigs:
+            return
 
         # risk_pct is per-strategy (lives on each strategy's PARAM_SCHEMA).
         risk_pct = float(self.strategy.p.get("risk_pct", 3.0)) / 100.0
-        ts = int(sig.time)
-        trade_meta = None
 
-        if sig.kind == "entry":
-            self._open = {"side": sig.side, "entry_price": sig.price, "entry_time": ts}
-        elif sig.kind == "exit" and self._open is not None:
-            entry = self._open["entry_price"]
-            exit_p = sig.price
-            if self._open["side"] == "long":
-                pnl_pct = (exit_p - entry) / entry * risk_pct * 100.0
-            else:
-                pnl_pct = (entry - exit_p) / entry * risk_pct * 100.0
-            self._equity += pnl_pct
-            self._trades += 1
-            if pnl_pct > 0:
-                self._wins += 1
-            self._peak = max(self._peak, self._equity)
-            trade_meta = {
-                "side": self._open["side"], "entry_price": float(entry),
-                "exit_price": float(exit_p), "entry_time": int(self._open["entry_time"]),
-                "exit_time": ts, "pnl_pct": float(pnl_pct),
-            }
-            self._open = None
+        for sig in sigs:
+            _emit_signal(self.strategy_id, self.sid, sig, symbol=self.symbol, mode="live")
+            ts = int(sig.time)
 
-        dd = (self._equity - self._peak) / self._peak * 100.0 if self._peak > 0 else 0.0
-        _emit_equity(
-            self.strategy_id, self.sid, ts, self._equity, dd,
-            self._trades, self._wins, trade=trade_meta,
-        )
+            if sig.kind == "entry":
+                # Add a tranche; advance the equity curve with a no-trade tick.
+                self._opens.append({"side": sig.side, "entry_price": sig.price, "entry_time": ts})
+                dd = (self._equity - self._peak) / self._peak * 100.0 if self._peak > 0 else 0.0
+                _emit_equity(self.strategy_id, self.sid, ts, self._equity, dd,
+                             self._trades, self._wins, trade=None)
+            elif sig.kind == "exit" and self._opens:
+                # A shared exit closes ALL open tranches on this side. Book each as
+                # its own trade (mirrors the engine's per-tranche accounting).
+                still_open = []
+                for op in self._opens:
+                    if op["side"] != sig.side:
+                        still_open.append(op)
+                        continue
+                    entry = op["entry_price"]; exit_p = sig.price
+                    if op["side"] == "long":
+                        pnl_pct = (exit_p - entry) / entry * risk_pct * 100.0
+                    else:
+                        pnl_pct = (entry - exit_p) / entry * risk_pct * 100.0
+                    self._equity += pnl_pct
+                    self._trades += 1
+                    if pnl_pct > 0:
+                        self._wins += 1
+                    self._peak = max(self._peak, self._equity)
+                    dd = (self._equity - self._peak) / self._peak * 100.0 if self._peak > 0 else 0.0
+                    _emit_equity(
+                        self.strategy_id, self.sid, ts, self._equity, dd,
+                        self._trades, self._wins,
+                        trade={
+                            "side": op["side"], "entry_price": float(entry),
+                            "exit_price": float(exit_p), "entry_time": int(op["entry_time"]),
+                            "exit_time": ts, "pnl_pct": float(pnl_pct),
+                        },
+                    )
+                self._opens = still_open
+
         self._save_state()
 
     def stop(self):

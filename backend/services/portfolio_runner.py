@@ -578,6 +578,8 @@ def run_portfolio(specs: list[StrategySpec],
             ) if not s.sig_df.empty else [],
             "overlays": backtest_engine._build_overlays(s.strategy, s.sig_df, s.time_a)
                         if not s.sig_df.empty else [],
+            "regime_segments": backtest_engine._regime_segments(s.sig_df, s.strategy.p)
+                        if not s.sig_df.empty else {},
         }
 
     log.info("[portfolio] %d strategies, %d unified bars, %d aggregate trades, "

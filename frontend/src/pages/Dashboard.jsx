@@ -28,9 +28,7 @@ import {
 } from "../services/strategiesStore.js";
 import { setLast as setLastResult, getLast as getLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
-
-const COLOR_WIN  = "#22c55e";
-const COLOR_LOSS = "#ef4444";
+import { tradesToMarkers, makeMarker, COLOR_WIN, COLOR_LOSS } from "../services/chartMarkers.js";
 
 function DownloadIcon() {
   return (
@@ -43,27 +41,6 @@ function DownloadIcon() {
   );
 }
 
-function makeMarker(signal, win) {
-  const isEntry = signal.kind === "entry";
-  const long = signal.side === "long";
-  return {
-    time: signal.time,
-    position: isEntry ? (long ? "belowBar" : "aboveBar") : (long ? "aboveBar" : "belowBar"),
-    shape: isEntry ? (long ? "arrowUp" : "arrowDown") : "square",
-    color: win ? COLOR_WIN : COLOR_LOSS,
-    text: isEntry ? (long ? "L" : "S") : "X",
-    size: 1,
-  };
-}
-function tradesToMarkers(trades) {
-  const out = [];
-  for (const t of trades) {
-    const win = !!t.win || (t.pnl_dollars != null ? t.pnl_dollars >= 0 : false);
-    out.push(makeMarker({ kind: "entry", side: t.side, time: t.entry_time }, win));
-    out.push(makeMarker({ kind: "exit",  side: t.side, time: t.exit_time  }, win));
-  }
-  return out;
-}
 function dateStrToEpoch(s, endOfDay = false) {
   if (!s) return undefined;
   const [y, m, d] = s.split("-").map(Number);
@@ -94,6 +71,7 @@ function restoreFromCache(active, symbol, timeframe) {
   // Use the first active strategy's cached candles as the chart base.
   // Each subsequent strategy contributes its own overlays/markers/equity.
   let baseCandles = null;
+  let baseRegimeSegments = null;   // {five,adx,default} from the same strategy as baseCandles
   const overlaysByStrategy = {};
   const markersByStrategy  = {};
   const equityPoints       = {};
@@ -102,7 +80,10 @@ function restoreFromCache(active, symbol, timeframe) {
   for (const s of active) {
     const r = getLastResult(`${s.id}|${symbol}|${timeframe}`);
     if (!r) continue;
-    if (!baseCandles && r.candles?.length) baseCandles = r.candles;
+    if (!baseCandles && r.candles?.length) {
+      baseCandles = r.candles;
+      baseRegimeSegments = r.regime_segments || null;
+    }
     overlaysByStrategy[s.id] = r.overlays || [];
     markersByStrategy[s.id]  = tradesToMarkers(r.trades || []);
     equityPoints[s.id]       = (r.equity || []).map((e) => ({ time: e.time, value: e.value }));
@@ -117,7 +98,7 @@ function restoreFromCache(active, symbol, timeframe) {
 
   if (!baseCandles) return empty;
   return {
-    staticData: { candles: baseCandles, overlaysByStrategy, markersByStrategy },
+    staticData: { candles: baseCandles, overlaysByStrategy, markersByStrategy, regimeSegments: baseRegimeSegments },
     equityPoints,
     markersByStrategy,
     statsById,
@@ -329,18 +310,28 @@ export default function Dashboard() {
         }
         return { ...prev, [p.strategy_id]: arr };
       });
-      setStatsById((prev) => ({
-        ...prev,
-        [p.strategy_id]: {
-          ...(prev[p.strategy_id] || {}),
-          total_return_pct: valuePct - 100,
-          total_return_dollars: ((valuePct - 100) / 100) * STARTING,
-          trades: p.trades, win_rate: p.win_rate,
-          // p.drawdown is the CURRENT drawdown at this bar (≤ 0); the "Max DD"
-          // column needs the running minimum, not the instantaneous value.
-          max_drawdown_pct: Math.min(prev[p.strategy_id]?.max_drawdown_pct ?? 0, p.drawdown),
-        },
-      }));
+      setStatsById((prev) => {
+        const prevStats = prev[p.strategy_id] || {};
+        // Peak-relative drawdown (TradingView convention): track the running peak
+        // of equity-% and measure the drop against it, not against starting capital.
+        const peakValuePct = Math.max(prevStats._peakValuePct ?? valuePct, valuePct);
+        const ddPeak = peakValuePct > 0 ? (valuePct / peakValuePct - 1) * 100 : 0;
+        return {
+          ...prev,
+          [p.strategy_id]: {
+            ...prevStats,
+            total_return_pct: valuePct - 100,
+            total_return_dollars: ((valuePct - 100) / 100) * STARTING,
+            trades: p.trades, win_rate: p.win_rate,
+            _peakValuePct: peakValuePct,
+            // p.drawdown is the CURRENT (instantaneous) start-relative drawdown; keep
+            // the running minimum for detailed panels that show "% of starting capital".
+            max_drawdown_pct: Math.min(prevStats.max_drawdown_pct ?? 0, p.drawdown),
+            // Peak-relative running max — this is what the cards/KPIs display.
+            max_drawdown_pct_peak: Math.min(prevStats.max_drawdown_pct_peak ?? 0, ddPeak),
+          },
+        };
+      });
       const trade = p.trade;
       if (trade) {
         const win = trade.pnl_dollars != null
@@ -441,6 +432,7 @@ export default function Dashboard() {
       const markersByStrategyLocal = {};
       const equityLocal = {};
       const statsLocal = {};
+      let regimeSegments = null;   // {five,adx,default} from the primary (first) strategy
 
       for (const s of active) {
         const psd = portfolio.per_strategy?.[s.id];
@@ -448,6 +440,7 @@ export default function Dashboard() {
           console.warn("portfolio result missing strategy:", s.id);
           continue;
         }
+        if (!regimeSegments && psd.regime_segments) regimeSegments = psd.regime_segments;
         overlaysByStrategy[s.id] = psd.overlays || [];
         markersByStrategyLocal[s.id] = tradesToMarkers(psd.trades || []);
         equityLocal[s.id] = (psd.equity || []).map((e) => ({ time: e.time, value: e.value }));
@@ -467,6 +460,7 @@ export default function Dashboard() {
           params: psd.spec?.params || s.params,
           candles: psd.candles || [],
           overlays: psd.overlays || [],
+          regime_segments: psd.regime_segments || null,
           trades: psd.trades || [],
           equity: psd.equity || [],
           stats: psd.stats || {},
@@ -478,7 +472,7 @@ export default function Dashboard() {
       // Analytics page can render the polished portfolio view.
       setLastResult(`__portfolio__|${symbol}|${timeframe}`, portfolio);
 
-      setStaticData({ candles, overlaysByStrategy, markersByStrategy: markersByStrategyLocal });
+      setStaticData({ candles, overlaysByStrategy, markersByStrategy: markersByStrategyLocal, regimeSegments });
       setEquityPoints(equityLocal);
       setStatsById(statsLocal);
       setMarkersByStrategy(markersByStrategyLocal);
@@ -862,6 +856,7 @@ export default function Dashboard() {
               timeframe={timeframe}
               staticData={staticData}
               sessions={sessionsForChart}
+              regimeSegments={staticData?.regimeSegments || null}
               onMissingDataset={() => {
                 setStaticData(null);
                 getSymbols().then((d) => { setSymbolList(d.symbols); setDatasets(d.datasets || []); }).catch(() => {});

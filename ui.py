@@ -782,6 +782,25 @@ class App(tk.Tk):
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
 
     def _minimize(self):
+        """Minimize the borderless window.
+
+        overrideredirect(True) strips the native minimize path, so the old
+        approach toggled it off, iconify()'d, then rebound <Map> to flip it
+        back. But overrideredirect(False) itself queues a spurious <Map> that
+        fires the instant we return to the event loop — restoring the window
+        immediately. That race is why minimize "bounced" straight back.
+
+        On Windows, minimize the real top-level HWND via Win32 instead and
+        leave overrideredirect intact: restoring from the taskbar button just
+        un-minimizes (no title bar, no rebind, no bounce)."""
+        if sys.platform == "win32":
+            try:
+                hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+                ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+                return
+            except Exception:
+                pass
+        # Non-Windows fallback: temporarily restore decorations to iconify.
         self.overrideredirect(False)
         self.iconify()
         self.bind("<Map>", self._on_restore)

@@ -5,6 +5,24 @@ React frontend, with backtesting, walk-forward optimization, a "Market Lab" of r
 market-structure analyses, and live/paper strategy running across brokers (Binance via CCXT,
 Databento for CME futures, TradeStation).
 
+## How to work with me (read this first)
+
+- **I'm not an experienced quant.** I'm navigating this project as I go. Explain things in
+  plain, non-technical language. When a quant or finance term is genuinely needed (e.g. Sharpe,
+  walk-forward, slippage, drawdown), add a short one-line definition in plain words the first
+  time it comes up. Don't assume I already know the jargon.
+- **Tell me the plan in plain words before you edit.** Before making non-trivial changes,
+  describe what you're going to do in non-technical terms and let me approve it first. Don't
+  auto-edit straight into the code on bigger changes — walk me through it, then do it once I say go.
+  (Small obvious fixes are fine to just do.)
+- **You're always free to ask.** If something is unclear or there's a choice to make, ask me
+  rather than guessing. I'd rather answer a quick question than unwind a wrong assumption.
+- **Don't over-engineer.** Always look for the easiest path that still scales reasonably. Prefer
+  simple, readable solutions over clever or heavily-abstracted ones.
+- **This is for self-use validation only.** The project won't be used by many people — it's me
+  validating ideas for myself. Optimize for "works and I understand it," not for production
+  hardening, multi-user scale, or enterprise polish.
+
 ## Environment (important)
 
 - **Python 3.14** is the only interpreter installed (no venv). The full backend stack is

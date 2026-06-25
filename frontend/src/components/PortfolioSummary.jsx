@@ -51,8 +51,10 @@ export default function PortfolioSummary({ result, symbol, timeframe }) {
         <Kpi label="Total P&L"     value={fmtUsd(pnlUsd)}            valueClass={pnlColor} />
         <Kpi label="Return"        value={fmtPct(stats.total_return_pct)} valueClass={pnlColor} />
         <Kpi label="Sharpe"        value={fmtNum(stats.sharpe)} />
-        <Kpi label="Max DD"        value={stats.max_drawdown_pct != null
-                                          ? `${fmtNum(stats.max_drawdown_pct)}%` : "—"}
+        <Kpi label="Max DD"        value={stats.max_drawdown_pct_peak != null
+                                          ? `${fmtNum(stats.max_drawdown_pct_peak)}%`
+                                          : stats.max_drawdown_pct != null
+                                            ? `${fmtNum(stats.max_drawdown_pct)}%` : "—"}
              valueClass="text-loss" />
         <Kpi label="Trades"        value={fmtInt(stats.trades)} />
       </div>

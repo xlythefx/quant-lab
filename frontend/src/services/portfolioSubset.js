@@ -124,8 +124,10 @@ function computeStats(trades, final_equity, equity_curve, starting_capital) {
   const profit_factor = gross_loss > 0 ? gross_profit / gross_loss
                        : gross_profit > 0 ? null : 0;
 
-  // Sharpe from per-bar MTM equity returns.
-  let sharpe = 0;
+  // Sharpe from per-bar MTM equity returns. Stays null when it can't be measured
+  // (too few bars / zero variance) so the UI shows "no data" rather than a
+  // fabricated 0 — matches the backend, which returns None in that case.
+  let sharpe = null;
   if (equity_curve.length >= 3) {
     const eq = equity_curve.map((p) => p.equity);
     const rets = [];
@@ -208,13 +210,14 @@ function sideBlock(trades) {
 
 function inferBarsPerYear(times) {
   if (times.length < 2) return 0;
-  // Median gap (seconds) → bars per year.
-  const gaps = [];
-  for (let i = 1; i < times.length; i++) gaps.push(times[i] - times[i - 1]);
-  gaps.sort((a, b) => a - b);
-  const median = gaps[Math.floor(gaps.length / 2)];
-  if (!median || median <= 0) return 0;
-  return (365.25 * 24 * 3600) / median;
+  // MEAN bar interval → bars per year, matching the backend authority
+  // (quant_metrics.infer_bars_per_year, which uses np.diff(t).mean()).
+  // (n-1)*SECONDS_PER_YEAR / total_span == bars per *realized* year, so
+  // weekend/session gaps correctly lower the count. Using the median gap would
+  // assume continuous 24/7 trading and over-annualize on gappy futures data.
+  const span = times[times.length - 1] - times[0];
+  if (span <= 0) return 0;
+  return ((times.length - 1) * 365.25 * 24 * 3600) / span;
 }
 
 // ---------------------------------------------------------------------------

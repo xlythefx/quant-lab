@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Dashboard from "./pages/Dashboard.jsx";
+import DashboardV2 from "./pages/DashboardV2.jsx";
 import Downloads from "./pages/Downloads.jsx";
 import Strategies from "./pages/Strategies.jsx";
 import RiskSettings from "./pages/RiskSettings.jsx";
@@ -68,6 +69,15 @@ export default function App() {
       <div key="dashboard" className="page-enter" style={{ height: "100%", minHeight: "100vh" }}>
         <div className="page-ripple-overlay" aria-hidden="true" />
         <Dashboard />
+      </div>
+    );
+  }
+
+  if (view === "dashboardv2") {
+    return (
+      <div key="dashboardv2" className="page-enter" style={{ height: "100%", minHeight: "100vh" }}>
+        <div className="page-ripple-overlay" aria-hidden="true" />
+        <DashboardV2 />
       </div>
     );
   }

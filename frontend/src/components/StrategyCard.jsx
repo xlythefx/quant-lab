@@ -50,7 +50,13 @@ export default function StrategyCard({
         <span className={pnlColor}>{fmtPct(pnlPct)}</span>
       </div>
       <div className="flex items-center justify-between text-[10px] text-muted font-mono">
-        <span>dd {stats?.max_drawdown_pct != null ? `${fmtNum(stats.max_drawdown_pct)}%` : "—"}</span>
+        <span title="Worst peak-to-trough drawdown (% of running peak equity — TradingView convention)">
+          dd {stats?.max_drawdown_pct_peak != null
+                ? `${fmtNum(stats.max_drawdown_pct_peak)}%`
+                : stats?.max_drawdown_pct != null
+                  ? `${fmtNum(stats.max_drawdown_pct)}%`
+                  : "—"}
+        </span>
         <span>PF {stats?.profit_factor != null ? fmtNum(stats.profit_factor) : "—"}</span>
       </div>
     </div>

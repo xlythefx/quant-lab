@@ -21,10 +21,24 @@ from services import backtest_engine, event_bus
 
 log = logging.getLogger(__name__)
 
-# Risk-config keys we allow sweeping. Other keys (starting_capital, risk_pct,
-# pyramiding) wouldn't make sense as a "cost" sweep — they'd be a different
-# feature.
-_ALLOWED_DIMS = {"slippage_bps", "fee_pct", "fee_flat"}
+# Cost dims map to risk_config overrides (execution costs). Pyramiding is a
+# STRATEGY param (stacking depth) — not a cost, but useful to sweep here to
+# answer "what's the optimal stacking depth?". It's swept by overriding the
+# param itself, because the engine reads pyramiding from strategy.p (after the
+# 2026-06 engine fix), NOT from risk_config.
+_COST_DIMS  = {"slippage_bps", "fee_pct", "fee_flat"}
+_PARAM_DIMS = {"pyramiding"}
+_ALLOWED_DIMS = _COST_DIMS | _PARAM_DIMS
+
+# Per-dimension display units (used in the human-readable verdict).
+_DIM_UNIT = {"slippage_bps": " bps", "fee_pct": "%", "fee_flat": " $/trade", "pyramiding": ""}
+
+# Metric → (display label, viability threshold). "Survives" means metric > thresh.
+_METRIC_INFO = {
+    "sharpe":        ("Sharpe", 0.0),
+    "profit_factor": ("profit factor", 1.0),
+    "total_return":  ("total return", 0.0),
+}
 
 # Hard cap on sweep size. Each value is one full backtest; 50 is more than
 # enough to draw a smooth curve.
@@ -102,6 +116,99 @@ def _score_from_stats(stats: dict, metric: str) -> float:
     return float(v)
 
 
+def _fmt_val(dim: str, v: float) -> str:
+    if dim == "pyramiding":
+        return str(int(round(v)))
+    return f"{v:g}"
+
+
+def _fmt_metric(metric: str, mv: float) -> str:
+    if mv == float("inf"):
+        return "∞"
+    if metric == "total_return":
+        return f"{mv:.1f}%"
+    return f"{mv:.2f}"
+
+
+def _build_summary(results: list[dict], sweep_dim: str, metric: str) -> Optional[dict]:
+    """Distil the sweep into a structured verdict + a plain-English sentence:
+    for cost dims, where the edge survives / breaks; for pyramiding, the optimum.
+    """
+    rows = []
+    for r in results:
+        if not r.get("params"):
+            continue
+        val = float(next(iter(r["params"].values())))
+        rows.append((val, _score_from_stats(r["stats"], metric)))
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[0])
+
+    is_cost = sweep_dim in _COST_DIMS
+    label, threshold = _METRIC_INFO.get(metric, (metric, 0.0))
+    unit = _DIM_UNIT.get(sweep_dim, "")
+    fv = lambda v: _fmt_val(sweep_dim, v)
+    fm = lambda mv: _fmt_metric(metric, mv)
+
+    # Best = highest metric; tie → smallest value (cheapest cost / least stacking).
+    best_v, best_m = max(rows, key=lambda x: (x[1], -x[0]))
+    base_v, base_m = rows[0]
+    worst_v, worst_m = rows[-1]
+    crit = f"{label} > {'1' if metric == 'profit_factor' else '0'}"
+
+    all_viable = all(mv > threshold for _, mv in rows)
+    none_viable = all(mv <= threshold for _, mv in rows)
+    # Contiguous "survives up to" from the cheapest end; first break after it.
+    survives_up_to = None
+    breaks_at = None
+    for v, mv in rows:
+        if mv > threshold and breaks_at is None:
+            survives_up_to = v
+        elif mv <= threshold and breaks_at is None:
+            breaks_at = v
+    # Does the curve recover above the first break (non-monotonic)?
+    recovers = breaks_at is not None and any(
+        v > breaks_at and mv > threshold for v, mv in rows
+    )
+
+    summary = {
+        "sweep_dim": sweep_dim, "metric": metric, "metric_label": label,
+        "is_cost": is_cost, "criterion": crit, "unit": unit,
+        "best_value": best_v, "best_metric": best_m,
+        "baseline_value": base_v, "baseline_metric": base_m,
+        "worst_value": worst_v, "worst_metric": worst_m,
+        "survives_up_to": survives_up_to, "breaks_at": breaks_at,
+        "all_viable": all_viable, "none_viable": none_viable,
+        "recovers_after_break": recovers,
+    }
+
+    if is_cost:
+        if none_viable:
+            head = (f"⚠ Edge does NOT survive — even frictionless ({fv(base_v)}{unit}), "
+                    f"{label} is {fm(base_m)} (needs {crit}).")
+        elif all_viable:
+            head = (f"✓ Edge survives the entire range — at the harshest cost "
+                    f"({fv(worst_v)}{unit}) {label} is still {fm(worst_m)} ({crit}).")
+        else:
+            tail = " (then recovers at higher levels — non-monotonic, see table)" if recovers else ""
+            head = (f"Edge survives up to {fv(survives_up_to)}{unit}; breaks at "
+                    f"{fv(breaks_at)}{unit}, where {label} drops below {crit}{tail}.")
+        summary["text"] = (
+            f"{head} Best at {fv(best_v)}{unit} ({label} {fm(best_m)}); "
+            f"frictionless baseline {fv(base_v)}{unit} = {fm(base_m)}."
+        )
+    else:
+        txt = (f"Optimal {sweep_dim} = {fv(best_v)} ({label} {fm(best_m)}). "
+               f"No stacking ({fv(base_v)}) gives {label} {fm(base_m)}.")
+        if best_v > base_v:
+            txt += f" Stacking to {fv(best_v)} improves it."
+        if worst_v > best_v:
+            txt += (f" Beyond {fv(best_v)} it declines (at {fv(worst_v)} → {fm(worst_m)}) — "
+                    f"more stacking adds risk without improving {label}.")
+        summary["text"] = txt
+    return summary
+
+
 def _normalize_spec(spec: dict) -> dict:
     sweep_dim = str(spec.get("sweep_dim") or "").strip()
     if sweep_dim not in _ALLOWED_DIMS:
@@ -125,6 +232,11 @@ def _normalize_spec(spec: dict) -> dict:
         seen.add(num)
         values.append(num)
     values.sort()
+    if sweep_dim == "pyramiding":
+        # Stacking depth must be a positive integer; coerce + re-dedup.
+        values = sorted({float(int(round(v))) for v in values if v >= 1})
+        if not values:
+            raise ValueError("pyramiding sweep needs at least one value ≥ 1")
     if len(values) > MAX_SWEEP_VALUES:
         raise ValueError(
             f"sweep would produce {len(values)} runs (limit: {MAX_SWEEP_VALUES}). "
@@ -237,11 +349,19 @@ class CostSweepJob:
                 break
 
             self.run_idx = i
-            risk_overrides = {s["sweep_dim"]: float(value)}
+            # Route the swept dimension: cost dims → risk_config override;
+            # param dims (pyramiding) → override the strategy param itself,
+            # since the engine reads pyramiding from strategy.p, not risk_config.
+            if s["sweep_dim"] in _PARAM_DIMS:
+                run_params = {**s["params"], s["sweep_dim"]: int(round(value))}
+                risk_overrides = None
+            else:
+                run_params = s["params"]
+                risk_overrides = {s["sweep_dim"]: float(value)}
 
             result = backtest_engine.run(
                 s["strategy_id"], s["symbol"], s["timeframe"],
-                s["params"], start_time=s["start_time"], end_time=s["end_time"],
+                run_params, start_time=s["start_time"], end_time=s["end_time"],
                 risk_overrides=risk_overrides,
             )
             stats = result.get("stats") or {}
@@ -291,6 +411,7 @@ class CostSweepJob:
             "start_time":  s["start_time"],
             "end_time":    s["end_time"],
             "results":     self.results,
+            "summary":     _build_summary(self.results, s["sweep_dim"], s["metric"]),
             "total_runs":  self.total_runs,
             "completed_runs": self.run_idx,
             "elapsed_seconds": elapsed,

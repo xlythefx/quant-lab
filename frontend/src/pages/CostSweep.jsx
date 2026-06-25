@@ -24,9 +24,11 @@ const SWEEP_DIMS = [
   { id: "slippage_bps", label: "Slippage (bps)",   defaultValues: "0, 5, 10, 15, 20, 25, 30, 40, 50",
     description: "Basis points of slippage applied against you on every fill (both sides)." },
   { id: "fee_pct",      label: "Fee % per side",   defaultValues: "0, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2",
-    description: "Percent of notional per trade, each side. Typical maker ~0.02–0.05%, taker ~0.05–0.10%." },
+    description: "Percent of notional per trade, each side. Typical maker ~0.02–0.05%, taker ~0.05–0.10% (Binance taker w/ BNB ≈ 0.06)." },
   { id: "fee_flat",     label: "Fee flat ($/trade)", defaultValues: "0, 0.5, 1, 2, 5",
     description: "Flat dollars per trade, each side. Mostly relevant for tiny accounts." },
+  { id: "pyramiding",   label: "Pyramiding (depth)", defaultValues: "1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+    description: "Max stacked positions per side. Finds the optimal stacking depth — a STRATEGY dimension, not a cost. Each value is a full backtest at that depth." },
 ];
 
 const MAX_SWEEP = 50;
@@ -288,7 +290,7 @@ export default function CostSweep() {
       results: result.results,
       grid_params: [{
         name: result.sweep_dim,
-        type: "float",
+        type: result.sweep_dim === "pyramiding" ? "int" : "float",
         values: result.sweep_values,
       }],
       metric: result.metric,
@@ -367,6 +369,7 @@ export default function CostSweep() {
               schema={activeStrategy.schema}
               params={params}
               onChange={setParams}
+              hideName={sweepDim}
             />
           )}
 
@@ -377,7 +380,7 @@ export default function CostSweep() {
 
           {/* Sweep config */}
           <div className="space-y-3 pt-2 border-t border-line/40">
-            <div className="text-[11px] uppercase tracking-wider text-muted">Cost dimension to sweep</div>
+            <div className="text-[11px] uppercase tracking-wider text-muted">Dimension to sweep</div>
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
               <Field label="Sweep">
                 <select
@@ -392,6 +395,13 @@ export default function CostSweep() {
               </Field>
             </div>
             <div className="text-[11px] text-muted/80">{activeDim.description}</div>
+            {activeDim.id !== "pyramiding" && (
+              <div className="text-[11px] text-amber-300/80 leading-relaxed">
+                Only this cost varies. The others (fee %, slippage, flat fee) stay at your global
+                Risk Settings for every run — e.g. to include Binance's 0.06% fee while sweeping
+                slippage, set Fee % to 0.06 in Risk Settings first, otherwise these runs assume zero fees.
+              </div>
+            )}
             <ValueListInput
               text={sweepText}
               onChange={setSweepText}
@@ -432,6 +442,7 @@ export default function CostSweep() {
               {" "}across {result.total_runs} values
               {result.partial && <span className="text-amber-400"> · partial (cancelled)</span>}
             </div>
+            {result?.summary?.text && <VerdictPanel summary={result.summary} />}
             <GridResultsPanel result={shapedResult} />
           </div>
         )}
@@ -447,6 +458,29 @@ function Field({ label, children }) {
     <div className="flex items-center gap-2">
       <span className="text-xs uppercase tracking-wider text-muted">{label}</span>
       {children}
+    </div>
+  );
+}
+
+// Plain-English verdict: where the edge survives / what's the optimum. Tone
+// follows viability — red if no level works, amber if it breaks within range,
+// green if it survives the whole range (or for a parameter optimum).
+function VerdictPanel({ summary }) {
+  const tone = summary.none_viable
+    ? { border: "border-loss/40", bg: "bg-loss/8", text: "text-loss" }
+    : summary.is_cost && summary.breaks_at != null
+      ? { border: "border-amber-400/40", bg: "bg-amber-400/8", text: "text-amber-300" }
+      : { border: "border-profit/40", bg: "bg-profit/8", text: "text-profit" };
+  const unit = summary.unit || "";
+  return (
+    <div className={`rounded-lg border ${tone.border} ${tone.bg} px-4 py-3 space-y-1.5`}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] uppercase tracking-wider text-muted">Verdict</span>
+        <span className={`text-[11px] font-mono ${tone.text}`}>
+          best {summary.metric_label} {fmtNum(summary.best_metric)} @ {fmtNum(summary.best_value)}{unit}
+        </span>
+      </div>
+      <p className="text-sm text-text leading-relaxed">{summary.text}</p>
     </div>
   );
 }
@@ -572,8 +606,10 @@ function ProgressPanel({ jobState }) {
 // Reuses the value-editing UX from WalkForwardParamEditor's "fixed" branch.
 // ---------------------------------------------------------------------------
 
-function FixedParamEditor({ schema, params, onChange }) {
-  // Seed missing values from defaults on schema change.
+function FixedParamEditor({ schema, params, onChange, hideName }) {
+  // Seed missing values from defaults on schema change. (We still seed the
+  // swept param so it has a baseline if the user switches dimension; we just
+  // don't render a control for it below.)
   useEffect(() => {
     if (!schema) return;
     let touched = false;
@@ -592,11 +628,11 @@ function FixedParamEditor({ schema, params, onChange }) {
   const groups = useMemo(() => {
     const g = {};
     for (const s of schema || []) {
-      if (s.name === "risk_pct") continue;
+      if (s.name === "risk_pct" || s.name === hideName) continue;
       (g[s.group] ||= []).push(s);
     }
     return g;
-  }, [schema]);
+  }, [schema, hideName]);
 
   const setOne = (name, value) => onChange({ ...(params || {}), [name]: value });
 

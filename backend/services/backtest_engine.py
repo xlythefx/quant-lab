@@ -20,6 +20,7 @@ import pandas as pd
 
 from services import market_data, quant_metrics, risk_config, assets
 from services.strategy_registry import get_strategy_class
+from services.strategies.regime import _regime_labels, _regime_params, RegimeDetector
 
 log = logging.getLogger(__name__)
 
@@ -52,10 +53,69 @@ def _build_overlays(strategy, sig_df: pd.DataFrame, time_a) -> list[dict]:
         data = []
         for ti, val in zip(time_a, arr):
             if val is None or not math.isfinite(val):
+                # Whitespace point (time, no value): breaks the line series so a
+                # sparse overlay (e.g. an ATR stop drawn only during trades)
+                # doesn't connect across the gaps. Harmless for dense overlays.
+                data.append({"time": int(ti)})
                 continue
             data.append({"time": int(ti), "value": float(val)})
         overlays.append({**ov.to_dict(), "data": data})
     return overlays
+
+
+def _rle_segments(labels, time_a) -> list[dict]:
+    """Run-length-encode a per-bar label array into colored chart bands.
+    Returns [{regime, start_time, end_time, bars}] (market_lab.classify_regimes shape)."""
+    n = len(labels)
+    segments = []
+    seg_start = 0
+    for i in range(1, n + 1):
+        if i == n or labels[i] != labels[seg_start]:
+            segments.append({
+                "regime": str(labels[seg_start]),
+                "start_time": int(time_a[seg_start]),
+                "end_time": int(time_a[i - 1]),
+                "bars": int(i - seg_start),
+            })
+            seg_start = i
+    return segments
+
+
+def _regime_segments(sig_df: pd.DataFrame, params: dict) -> dict:
+    """Build the Dashboard chart's regime-band overlays, one set per lens.
+
+    Uses the SAME causal labelers and ADX params the strategy gates on, so the
+    bands you see == what the strategy allows. Two cheap lenses are computed here;
+    the slow HMM lens is fetched lazily by the frontend (market_lab.regime-hmm).
+
+    Returns {
+      "five":    [...segments...],   # 5-mood classifier (Trend↑/↓, High-Vol, Quiet, Choppy)
+      "adx":     [...segments...],   # binary ADX filter (Ranging vs Trending)
+      "default": "five" | "adx",     # which lens to show first (matches use_five_regime)
+    }, or {} for an empty frame.
+    """
+    if sig_df is None or sig_df.empty:
+        return {}
+    params = params or {}
+    period = params.get("regime_adx_period")
+    threshold = params.get("regime_adx_threshold")
+    time_a = sig_df["time"].to_numpy()
+
+    # 5-mood lens (shared causal labeler).
+    rp = _regime_params({"adx_period": period, "adx_trend_thresh": threshold})
+    five = _rle_segments(_regime_labels(sig_df, rp), time_a)
+
+    # Binary ADX lens: detect() is True when ranging (ADX below threshold).
+    rd = RegimeDetector(rp["adx_period"], rp["adx_trend_thresh"])
+    ranging = rd.detect(sig_df).to_numpy()
+    adx_labels = np.where(ranging, "Ranging", "Trending")
+    adx = _rle_segments(adx_labels, time_a)
+
+    return {
+        "five": five,
+        "adx": adx,
+        "default": "five" if params.get("use_five_regime") else "adx",
+    }
 
 
 def _hhmm_to_min(s: str) -> int:
@@ -167,9 +227,12 @@ def run(strategy_id: str, symbol: str, timeframe: str,
     )
     risk_frac = float(risk_pct_param) / 100.0
 
-    # Pyramiding is per-strategy (in PARAM_SCHEMA). Fall back to the global
-    # risk_config value if the strategy doesn't declare it.
-    pyramiding_param = strategy.p.get("pyramiding", rc.get("pyramiding", 1))
+    # Pyramiding is per-strategy (in PARAM_SCHEMA). Strategies that don't declare
+    # it default to 1 (no stacking) — this MUST match portfolio_runner.py so the
+    # two engines produce identical results. (Previously this fell back to the
+    # global risk_config["pyramiding"], which defaulted to 10 and silently
+    # over-stacked non-declaring strategies in WalkForward/Grid vs the Dashboard.)
+    pyramiding_param = strategy.p.get("pyramiding", 1)
     max_tranches = max(1, int(float(pyramiding_param)))
 
     # LOOK-AHEAD (diagnostic only): entries act on THIS bar's own signal instead
@@ -604,6 +667,7 @@ def run(strategy_id: str, symbol: str, timeframe: str,
         "params": strategy.p,                       # effective merged params
         "candles": _serialize_candles(sig_df[["time", "open", "high", "low", "close", "volume"]]),
         "overlays": _build_overlays(strategy, sig_df, time_a),
+        "regime_segments": _regime_segments(sig_df, strategy.p),
         "trades": trades_list,
         "equity": equity_curve,
         "stats": stats,

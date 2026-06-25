@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { createChart, CrosshairMode, LineStyle } from "lightweight-charts";
-import { getOHLCV, getBacktestSeed } from "../services/api.js";
+import { getOHLCV, getBacktestSeed, marketLabRegimeHmm } from "../services/api.js";
 import { subscribeCandles, socket } from "../services/socket.js";
 import { usePersistentState } from "../services/usePersistentState.js";
+import { REGIME_COLORS, ADX_REGIME_COLORS, buildRegimeColors } from "./marketlab/charts.jsx";
+
+// Regime lenses shown on the chart. 5-Mood and ADX ship with the backtest;
+// HMM is fetched lazily (Market Lab endpoint) the first time it's selected.
+const REGIME_LENSES = [
+  { key: "five", label: "5-Mood" },
+  { key: "adx",  label: "ADX" },
+  { key: "hmm",  label: "HMM" },
+];
 
 const MAX_BARS = 100000;
 const SEED_LIMIT = 5000;
@@ -34,6 +43,16 @@ function _hhmmToSec(s) {
   return Math.min(23, parseInt(m[1], 10)) * 3600 + Math.min(59, parseInt(m[2], 10)) * 60;
 }
 
+// #rrggbb -> rgba() at the given alpha, for soft regime bands.
+// Mirrors RegimeCandleChart._alpha so the Dashboard and Market Lab look the same.
+function _alpha(hex, a) {
+  if (!hex || hex[0] !== "#" || hex.length < 7) return `rgba(100,116,139,${a})`;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
 export default function TradingChart({
   mode, symbol, timeframe, speed, broker,
   onMissingDataset,
@@ -45,6 +64,7 @@ export default function TradingChart({
   staticData,        // { candles, overlaysByStrategy, markersByStrategy }
   // shared:
   sessions,          // {tokyo:{enabled,start,end}, london:..., ny_am:..., ny_pm:...}
+  regimeSegments = null, // { five:[...], adx:[...], default } — regime bands per lens (static mode)
 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -55,11 +75,18 @@ export default function TradingChart({
   // strategyId -> overlayKey -> lineSeries
   const indicatorSeriesRef = useRef({});
   const bandsLayerRef = useRef(null);     // overlay div for session bands
+  const regimeBandsLayerRef = useRef(null); // overlay div for regime (mood) bands
   // Live mirrors of session config + visibility. The scroll handlers are
   // subscribed once (in the [isStatic] effect) and would otherwise close over
   // stale prop/state values, blanking the bands on the first scroll.
   const sessionsRef = useRef(null);
   const showSessionsRef = useRef(true);
+  // Same idea for the regime bands. We mirror the ACTIVE lens's segments + color
+  // map so the scroll handlers redraw the currently-selected lens.
+  const activeRegimeSegsRef = useRef([]);
+  const activeRegimeColorsRef = useRef(REGIME_COLORS);
+  const showRegimesRef = useRef(false);
+  const hmmCacheRef = useRef(new Map());   // `${symbol}|${timeframe}` -> {segments, colors, labels}
 
   const [last, setLast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -67,6 +94,14 @@ export default function TradingChart({
   // User-controlled visibility of the session-highlight bands. Persisted so the
   // choice sticks across reloads. Defaults to on to preserve prior behaviour.
   const [showSessions, setShowSessions] = usePersistentState("ql.chart.showSessions", true);
+  // Regime (mood) bands. Default OFF — a scouting overlay you flip on to see which
+  // moods the trades land in, then decide which to allow in the strategy.
+  const [showRegimes, setShowRegimes] = usePersistentState("ql.chart.showRegimes", false);
+  // Which regime lens colors the bands: "five" | "adx" | "hmm". Reset to the
+  // strategy's default each run (see effect below); the user can override.
+  const [regimeLens, setRegimeLens] = useState("five");
+  // HMM is fetched on demand: { loading, error, segments, colors, labels }.
+  const [hmmState, setHmmState] = useState(null);
 
   const isStatic = !!staticData;
 
@@ -122,6 +157,42 @@ export default function TradingChart({
     }
   };
 
+  // Build regime bands: one translucent div per run-length-encoded segment, colored
+  // by the active lens's color map. Same div-over-timeScale idiom as the sessions.
+  const _renderRegimeBands = () => {
+    const layer = regimeBandsLayerRef.current;
+    const chart = chartRef.current;
+    if (!layer || !chart) return;
+    layer.innerHTML = "";
+    const segments = activeRegimeSegsRef.current;
+    const colors = activeRegimeColorsRef.current || {};
+    if (!segments || !segments.length || !showRegimesRef.current) return;
+
+    const ts = chart.timeScale();
+    const tr = ts.getVisibleRange();
+    if (!tr) return;
+    const fromSec = Math.floor(tr.from);
+    const toSec   = Math.ceil(tr.to);
+
+    for (const s of segments) {
+      if (s.end_time < fromSec || s.start_time > toSec) continue;
+      const xs = ts.timeToCoordinate(Math.max(s.start_time, fromSec));
+      const xe = ts.timeToCoordinate(Math.min(s.end_time, toSec));
+      if (xs == null || xe == null) continue;
+      const left = Math.min(xs, xe);
+      const width = Math.max(1, Math.abs(xe - xs));
+      const div = document.createElement("div");
+      div.style.position = "absolute";
+      div.style.top = "0";
+      div.style.bottom = "0";
+      div.style.left = `${left}px`;
+      div.style.width = `${width}px`;
+      div.style.background = _alpha(colors[s.regime], 0.14);
+      div.style.pointerEvents = "none";
+      layer.appendChild(div);
+    }
+  };
+
   useEffect(() => {
     seriesRef.current?.applyOptions({ priceFormat: _priceFormat(symbol) });
   }, [symbol]);
@@ -133,6 +204,59 @@ export default function TradingChart({
     showSessionsRef.current = showSessions;
     _renderSessionBands();
   }, [sessions, showSessions]);
+
+  // Each new run, reset the lens to the strategy's default ("five" if it gates on
+  // the 5-mood engine, else "adx"). Within a run the user can override via buttons.
+  useEffect(() => {
+    if (regimeSegments?.default) setRegimeLens(regimeSegments.default);
+  }, [regimeSegments]);
+
+  // Lazy HMM: fetch (and cache) the Market Lab HMM only when its lens is selected.
+  // The fit is slow on a cold cache (~45s) — we show a spinner meanwhile.
+  useEffect(() => {
+    if (!showRegimes || regimeLens !== "hmm") return;
+    const candles = staticData?.candles;
+    if (!candles || !candles.length) return;
+    const startT = candles[0].time;
+    const endT = candles[candles.length - 1].time;
+    const key = `${symbol}|${timeframe}|${startT}|${endT}`;
+    if (hmmCacheRef.current.has(key)) { setHmmState(hmmCacheRef.current.get(key)); return; }
+    let cancelled = false;
+    setHmmState({ loading: true });
+    marketLabRegimeHmm({
+      symbol, timeframe,
+      start_time: startT,
+      end_time: endT,
+      params: {},
+    }).then((data) => {
+      if (cancelled) return;
+      const labels = data?.meta?.labels || [];
+      const method = data?.meta?.method || {};
+      const result = {
+        loading: false, segments: data?.segments || [], colors: buildRegimeColors(labels), labels,
+        capped: !!method.capped, analyzedBars: method.analyzed_bars,
+      };
+      hmmCacheRef.current.set(key, result);
+      setHmmState(result);
+    }).catch((e) => {
+      if (!cancelled) setHmmState({ loading: false, error: e?.message || "HMM failed" });
+    });
+    return () => { cancelled = true; };
+  }, [regimeLens, showRegimes, symbol, timeframe, staticData]);
+
+  // Mirror the ACTIVE lens's segments + colors into refs, then redraw. Runs on any
+  // change to the lens, the band data, the HMM result, or the on/off toggle.
+  useEffect(() => {
+    let segs = [];
+    let colors = REGIME_COLORS;
+    if (regimeLens === "adx")      { segs = regimeSegments?.adx || [];  colors = ADX_REGIME_COLORS; }
+    else if (regimeLens === "hmm") { segs = hmmState?.segments || [];   colors = hmmState?.colors || {}; }
+    else                           { segs = regimeSegments?.five || []; colors = REGIME_COLORS; }
+    activeRegimeSegsRef.current = segs;
+    activeRegimeColorsRef.current = colors;
+    showRegimesRef.current = showRegimes;
+    _renderRegimeBands();
+  }, [regimeLens, regimeSegments, hmmState, showRegimes]);
 
   const _removeStrategyOverlays = (strategyId) => {
     const chart = chartRef.current;
@@ -198,8 +322,9 @@ export default function TradingChart({
       if (!lr || lastSeriesIndexRef.current == null) return;
       userScrolledBackRef.current = lr.to < lastSeriesIndexRef.current - 3;
       _renderSessionBands();
+      _renderRegimeBands();
     };
-    const handleVisibleTimeRange = () => _renderSessionBands();
+    const handleVisibleTimeRange = () => { _renderSessionBands(); _renderRegimeBands(); };
     ts.subscribeVisibleLogicalRangeChange(handleVisibleRange);
     ts.subscribeVisibleTimeRangeChange(handleVisibleTimeRange);
 
@@ -286,6 +411,7 @@ export default function TradingChart({
       });
     }
     _renderSessionBands();
+    _renderRegimeBands();
   }, [isStatic, staticData, sessions]);
 
   // ============================================================
@@ -466,9 +592,23 @@ export default function TradingChart({
     try { series.setMarkers(merged); } catch {}
   }, [isStatic, markersByStrategy]);
 
+  // Regime overlay availability + legend entries for the active lens.
+  const hasRegimeData = !!(regimeSegments && (regimeSegments.five?.length || regimeSegments.adx?.length));
+  const legendEntries = (() => {
+    if (regimeLens === "adx") return Object.entries(ADX_REGIME_COLORS);
+    if (regimeLens === "hmm") {
+      const cols = hmmState?.colors || {};
+      const labs = hmmState?.labels?.length ? hmmState.labels : Object.keys(cols);
+      return labs.map((l) => [l, cols[l]]);
+    }
+    return Object.entries(REGIME_COLORS);
+  })();
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
+      {/* Regime (mood) bands — one z-index below sessions so a tinted session still reads. */}
+      <div ref={regimeBandsLayerRef} className="absolute inset-0 pointer-events-none z-[4]" />
       {/* Session bands overlay — rendered imperatively, positioned by chart timeScale. */}
       <div ref={bandsLayerRef} className="absolute inset-0 pointer-events-none z-[5]" />
 
@@ -490,19 +630,76 @@ export default function TradingChart({
         )}
       </div>
 
-      {sessions && (
-        <button
-          type="button"
-          onClick={() => setShowSessions((v) => !v)}
-          title={showSessions ? "Hide session highlight bands" : "Show session highlight bands"}
-          className={`absolute top-3 right-3 z-10 px-2 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-md border transition-colors ${
-            showSessions
-              ? "bg-accent-violet/20 text-accent-violet border-accent-violet/40"
-              : "bg-bg-elev/60 text-muted border-line hover:text-text"
-          }`}
-        >
-          Sessions {showSessions ? "on" : "off"}
-        </button>
+      <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+        {hasRegimeData && (
+          <button
+            type="button"
+            onClick={() => setShowRegimes((v) => !v)}
+            title={showRegimes ? "Hide regime (mood) bands" : "Show regime (mood) bands"}
+            className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-md border transition-colors ${
+              showRegimes
+                ? "bg-accent-cyan/20 text-accent-cyan border-accent-cyan/40"
+                : "bg-bg-elev/60 text-muted border-line hover:text-text"
+            }`}
+          >
+            Regimes {showRegimes ? "on" : "off"}
+          </button>
+        )}
+        {sessions && (
+          <button
+            type="button"
+            onClick={() => setShowSessions((v) => !v)}
+            title={showSessions ? "Hide session highlight bands" : "Show session highlight bands"}
+            className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-md border transition-colors ${
+              showSessions
+                ? "bg-accent-violet/20 text-accent-violet border-accent-violet/40"
+                : "bg-bg-elev/60 text-muted border-line hover:text-text"
+            }`}
+          >
+            Sessions {showSessions ? "on" : "off"}
+          </button>
+        )}
+      </div>
+
+      {/* Regime lens selector + color legend (only while the bands are showing). */}
+      {showRegimes && hasRegimeData && (
+        <div className="absolute top-12 right-3 z-10 w-44 rounded-md border border-line bg-bg-elev/85 backdrop-blur px-2.5 py-2 text-[10px]">
+          <div className="flex items-center gap-1 mb-2">
+            {REGIME_LENSES.map((L) => (
+              <button
+                key={L.key}
+                type="button"
+                onClick={() => setRegimeLens(L.key)}
+                className={`flex-1 px-1.5 py-1 font-semibold uppercase tracking-wider rounded transition-colors ${
+                  regimeLens === L.key
+                    ? "bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/40"
+                    : "bg-bg/40 text-muted border border-line hover:text-text"
+                }`}
+              >
+                {L.label}
+              </button>
+            ))}
+          </div>
+          {regimeLens === "hmm" && hmmState?.loading ? (
+            <div className="text-muted py-1">fitting HMM… (~45s first run)</div>
+          ) : regimeLens === "hmm" && hmmState?.error ? (
+            <div className="text-red-400 py-1">HMM failed: {hmmState.error}</div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {legendEntries.map(([label, color]) => (
+                <div key={label} className="flex items-center gap-1.5">
+                  <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: color || "#64748b" }} />
+                  <span className="text-text/80 truncate" title={label}>{label}</span>
+                </div>
+              ))}
+              {regimeLens === "hmm" && hmmState?.capped && (
+                <div className="text-muted/70 mt-1 leading-snug">
+                  Recent {hmmState.analyzedBars?.toLocaleString?.() || hmmState.analyzedBars} bars only (HMM speed cap).
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {loading && (
