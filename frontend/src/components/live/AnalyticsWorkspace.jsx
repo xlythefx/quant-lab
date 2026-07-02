@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Panel from "./Panel.jsx";
 import EquityCurve from "./EquityCurve.jsx";
 import { useEnterStagger, useDrawProgress } from "./animations.js";
-import { getLiveAnalytics, getLiveJournal, getDeploymentExpectation } from "./liveApi.js";
+import { getLiveAnalytics, getLiveJournal, getDeploymentExpectation, getLiveClosedPositions } from "./liveApi.js";
 import { onLiveSignal, onAlertDispatched } from "./liveChannels.js";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtRatio } from "../../services/format.js";
 
@@ -31,7 +31,7 @@ function holdLabel(min) {
  * 8 stat cards, cumulative equity curve (progressive draw), breakdown with
  * drill-down, and a live-vs-expectation compare per deployment.
  */
-export default function AnalyticsWorkspace({ deployments = [] }) {
+export default function AnalyticsWorkspace({ deployments = [], account = "demo" }) {
   const ref = useRef(null);
   useEnterStagger("analytics", ref);
   const [period, setPeriod] = useState("ALL");
@@ -144,15 +144,16 @@ export default function AnalyticsWorkspace({ deployments = [] }) {
       </Panel>
 
       {/* Live vs expectation */}
-      <ExpectationCompare deployments={deployments} />
+      <ExpectationCompare deployments={deployments} account={account} />
     </div>
   );
 }
 
-function ExpectationCompare({ deployments }) {
+function ExpectationCompare({ deployments, account }) {
   const [sel, setSel] = useState("");
   const [expected, setExpected] = useState(null);
   const [liveStats, setLiveStats] = useState(null);
+  const [broker, setBroker] = useState(null); // broker ACTUALS from WAMP
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -160,11 +161,12 @@ function ExpectationCompare({ deployments }) {
 
   const run = async () => {
     if (!dep) return;
-    setBusy(true); setErr(null); setExpected(null); setLiveStats(null);
+    setBusy(true); setErr(null); setExpected(null); setLiveStats(null); setBroker(null);
     try {
-      const [expRes, rows] = await Promise.all([
+      const [expRes, rows, closedRes] = await Promise.all([
         getDeploymentExpectation(dep.name),
         getLiveJournal({}),
+        getLiveClosedPositions(account, 300).catch(() => null),
       ]);
       if (!expRes.ok) throw new Error(expRes.error || "expectation failed");
       setExpected(expRes.expected);
@@ -178,16 +180,32 @@ function ExpectationCompare({ deployments }) {
         avg_pnl_pct: mine.length ? mine.reduce((s, r) => s + (r.pnl_pct || 0), 0) / mine.length : null,
         profit_factor: gl > 0 ? gp / gl : (gp > 0 ? null : 0),
       });
+      // Broker ACTUAL realized P&L (WAMP *_pastpositions, matched by the
+      // strategy alias the webhook sends) — the ground truth over our estimate.
+      if (closedRes?.ok) {
+        const actual = (closedRes.rows || []).filter(
+          (c) => (c.strategy || "").toLowerCase() === (dep.strategy_alias || "").toLowerCase()
+              && c.symbol?.toUpperCase() === dep.symbol?.toUpperCase());
+        if (actual.length) {
+          const awins = actual.filter((c) => (c.realized_pnl || 0) > 0).length;
+          setBroker({
+            n: actual.length,
+            win_rate: awins / actual.length,
+            net: actual.reduce((s, c) => s + (c.realized_pnl || 0), 0),
+          });
+        }
+      }
     } catch (e) {
       setErr(e?.response?.data?.error || e.message);
     } finally { setBusy(false); }
   };
 
-  const Row = ({ label, live, exp }) => (
+  const Row = ({ label, live, exp, act }) => (
     <tr>
       <td className="lt-muted">{label}</td>
       <td className="num">{live}</td>
       <td className="num lt-muted">{exp}</td>
+      <td className="num lt-cyan">{act ?? "—"}</td>
     </tr>
   );
 
@@ -210,23 +228,33 @@ function ExpectationCompare({ deployments }) {
         <div className="lt-empty">
           Pick a deployment and COMPARE — runs the same strategy + params through the backtest engine
           and puts it next to the live results, so you can see whether reality is tracking the test.
-          Broker-actual P&L takes over once reconciliation (phase 09) matches trades.
+          The BROKER column is the ACTUAL realized P&L from WAMP when trades match by alias.
         </div>
       ) : (
-        <table className="lt-table" style={{ maxWidth: 560 }}>
+        <table className="lt-table" style={{ maxWidth: 680 }}>
           <thead>
-            <tr><th>METRIC</th><th className="num">LIVE ({liveStats?.n ?? 0} trades)</th><th className="num">BACKTEST ({fmtInt(expected.trades)} trades)</th></tr>
+            <tr>
+              <th>METRIC</th>
+              <th className="num">LIVE EST ({liveStats?.n ?? 0} trades)</th>
+              <th className="num">BACKTEST ({fmtInt(expected.trades)} trades)</th>
+              <th className="num">BROKER ACTUAL {broker ? `(${broker.n})` : ""}</th>
+            </tr>
           </thead>
           <tbody>
             <Row label="WIN RATE"
                  live={liveStats?.win_rate != null ? fmtPct(liveStats.win_rate * 100, false) : "—"}
-                 exp={expected.win_rate != null ? fmtPct(expected.win_rate * 100, false) : "—"} />
+                 exp={expected.win_rate != null ? fmtPct(expected.win_rate * 100, false) : "—"}
+                 act={broker ? fmtPct(broker.win_rate * 100, false) : null} />
             <Row label="PROFIT FACTOR"
                  live={liveStats?.profit_factor == null ? "∞" : fmtRatio(liveStats.profit_factor)}
                  exp={expected.profit_factor == null ? "∞" : fmtRatio(expected.profit_factor)} />
             <Row label="AVG TRADE %"
                  live={liveStats?.avg_pnl_pct != null ? fmtPct(liveStats.avg_pnl_pct) : "—"}
                  exp={expected.avg_pnl_pct != null ? fmtPct(expected.avg_pnl_pct) : "—"} />
+            <Row label="NET P&L"
+                 live="est (journal)"
+                 exp="—"
+                 act={broker ? `${broker.net >= 0 ? "+" : ""}${fmtUsd(broker.net)}` : null} />
             <Row label="MAX DD (PEAK)"
                  live="— (needs more history)"
                  exp={expected.max_drawdown_pct_peak != null ? fmtPct(expected.max_drawdown_pct_peak, false) : "—"} />

@@ -15,7 +15,7 @@ import AlertsView from "../../components/live/AlertsView.jsx";
 import { setKillSwitch } from "../../components/live/liveApi.js";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
 import { useEnterStagger } from "../../components/live/animations.js";
-import { useGateway, useInstruments, useDeployments } from "../../components/live/hooks.js";
+import { useGateway, useInstruments, useDeployments, usePositionsRisk } from "../../components/live/hooks.js";
 import { exitLive } from "../../services/appMode.js";
 
 /** Backtest → live handoff: read + clear the deploy prefill left by the
@@ -63,7 +63,7 @@ function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, onGoTradi
       />
     );
   }
-  if (ws === "analytics") return <AnalyticsWorkspace deployments={deploy.deployments} />;
+  if (ws === "analytics") return <AnalyticsWorkspace deployments={deploy.deployments} account={account} />;
   if (ws === "blotter") return <BlotterWorkspace orderEntry={{ symbol }} />;
   if (ws === "markets") return <MarketsWorkspace onSymbol={(s) => { onSymbol(s); onGoTrading?.(); }} />;
   if (ws === "risk") return <RiskWorkspace account={account} />;
@@ -92,6 +92,15 @@ function TerminalInner() {
   const deploy = useDeployments();
   const runningCount = deploy.deployments.filter((d) => d.status === "RUNNING").length;
   const [prefill, setPrefill] = useState(() => takeDeployPrefill());
+  const [account, setAccount] = useState(() => {
+    try { return localStorage.getItem("ql.live_account") === "live" ? "live" : "demo"; } catch { return "demo"; }
+  });
+  useEffect(() => { try { localStorage.setItem("ql.live_account", account); } catch { /* ignore */ } }, [account]);
+
+  // Top-bar equity / day P&L: only shown when REAL (WAMP reachable) — a
+  // simulated number in the headline would be misleading.
+  const { risk, simulated: riskSim } = usePositionsRisk(account);
+  const headline = !riskSim && risk?.cards ? risk.cards : null;
 
   // Backtest handoff: if the research side left a prefill, open Strategies.
   useEffect(() => {
@@ -129,8 +138,8 @@ function TerminalInner() {
     <div className="live-terminal">
       <LeftRail active={view === "workspaces" ? ws : null} onSelect={selectWs} onCommand={() => setPaletteOpen(true)} />
       <TopBar
-        equity={null}
-        dayPnl={null}
+        equity={headline?.equity ?? null}
+        dayPnl={headline?.dayPnl ?? null}
         bellCount={runningCount}
         alertsActive={view === "alerts"}
         onBell={() => setView(view === "alerts" ? "workspaces" : "alerts")}
@@ -139,11 +148,13 @@ function TerminalInner() {
         onToggleDataMode={toggleDataMode}
         killed={deploy.killswitch}
         onToggleKill={toggleKill}
+        account={account}
+        onAccount={setAccount}
       />
       <WorkspaceTabs active={view === "workspaces" ? ws : null} onSelect={selectWs} onCommand={() => setPaletteOpen(true)} />
       <div className="lt-content">
         {view === "alerts"
-          ? <AlertsView />
+          ? <AlertsView account={account} />
           : (
             <WorkspaceHost
               ws={ws}
@@ -153,13 +164,13 @@ function TerminalInner() {
               onTimeframe={setTimeframe}
               onGoTrading={() => selectWs("trading")}
               deploy={deploy}
-              account="demo"
+              account={account}
               prefill={prefill}
               onPrefillConsumed={() => setPrefill(null)}
             />
           )}
       </div>
-      <StatusFooter gateway={gateway} dayPnl={null} />
+      <StatusFooter gateway={gateway} dayPnl={headline?.dayPnl ?? null} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}

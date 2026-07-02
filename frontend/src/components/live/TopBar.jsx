@@ -19,6 +19,7 @@ export function useUtcClock() {
 export default function TopBar({
   equity, dayPnl, bellCount, alertsActive, onBell, onExitLive,
   dataMode, onToggleDataMode, killed, onToggleKill,
+  account, onAccount,
 }) {
   const clock = useUtcClock();
   const pnlCls = dayPnl == null ? "lt-muted" : dayPnl >= 0 ? "lt-green" : "lt-red";
@@ -27,6 +28,16 @@ export default function TopBar({
       <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
         <div className="lt-wordmark"><b>XlytheAI</b> <span>Terminal</span></div>
         <div className="lt-venue-chip">● BINANCE</div>
+        {onAccount && (
+          <button
+            className="lt-topbtn"
+            style={account === "live" ? { color: "var(--lt-red)", borderColor: "rgba(255,77,109,0.5)" } : { color: "var(--lt-cyan)", borderColor: "rgba(34,211,238,0.5)" }}
+            title="Which account the Positions/Risk/Reconciliation panels read (Demo = fake money)"
+            onClick={() => onAccount(account === "live" ? "demo" : "live")}
+          >
+            ACCT: {String(account || "demo").toUpperCase()}
+          </button>
+        )}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 26 }}>

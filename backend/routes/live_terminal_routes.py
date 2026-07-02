@@ -354,6 +354,64 @@ def analytics():
         return jsonify({"error": str(e)}), 500
 
 
+# ===========================================================================
+# Phase 09 — REAL positions / risk / reconciliation (read-only from the
+# sinegu-api WAMP MySQL). {ok:false} on any WAMP trouble → the UI falls back
+# to the labeled SIMULATED placeholder instead of hard-breaking.
+# ===========================================================================
+
+def _account_arg() -> str:
+    return "live" if (request.args.get("account") or "demo").lower() == "live" else "demo"
+
+
+@live_bp.get("/positions")
+def live_positions():
+    from services.live import wamp_positions
+    try:
+        return jsonify({"ok": True, "source": "sinegu-api",
+                        "rows": wamp_positions.get_open_positions(_account_arg())})
+    except wamp_positions.WampUnavailable as e:
+        return jsonify({"ok": False, "error": f"WAMP unreachable: {e}", "rows": []})
+
+
+@live_bp.get("/positions/closed")
+def live_positions_closed():
+    from services.live import wamp_positions
+    try:
+        limit = validate_limit(request.args.get("limit"), default=100, maximum=1000)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    try:
+        return jsonify({"ok": True, "source": "sinegu-api",
+                        "rows": wamp_positions.get_closed_positions(_account_arg(), limit)})
+    except wamp_positions.WampUnavailable as e:
+        return jsonify({"ok": False, "error": f"WAMP unreachable: {e}", "rows": []})
+
+
+@live_bp.get("/risk")
+def live_risk():
+    from services.live import wamp_positions
+    try:
+        out = wamp_positions.get_risk(_account_arg())
+        out["ok"] = True
+        out["source"] = "sinegu-api"
+        return jsonify(out)
+    except wamp_positions.WampUnavailable as e:
+        return jsonify({"ok": False, "error": f"WAMP unreachable: {e}"})
+
+
+@live_bp.get("/reconciliation")
+def live_reconciliation():
+    from services.live import wamp_positions
+    alerts = [a for a in live_store.get_alerts_history(200) if not a.get("test")]
+    try:
+        return jsonify({"ok": True, **wamp_positions.reconcile(alerts, _account_arg())})
+    except wamp_positions.WampUnavailable as e:
+        return jsonify({"ok": False, "error": f"WAMP unreachable: {e}",
+                        "alerts": [{**a, "recon": "wamp_down"} for a in alerts],
+                        "positions_without_signal": [], "counts": {}})
+
+
 @live_bp.get("/deployments/<path:name>/expectation")
 def deployment_expectation(name):
     """Live vs expectation: run the SAME strategy+params through the backtest

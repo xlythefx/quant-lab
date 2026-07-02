@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Panel from "./Panel.jsx";
 import ParamForm from "./ParamForm.jsx";
 import { useEnterStagger } from "./animations.js";
-import { getAlertsHistory, deleteAlertsHistory, getActivityLog } from "./liveApi.js";
+import { getAlertsHistory, deleteAlertsHistory, getActivityLog, getLiveReconciliation } from "./liveApi.js";
 import { getLiveAlerts, saveLiveAlerts, testLiveAlert, getStrategies, getSymbols } from "../../services/api.js";
 import { onAlertDispatched, onLiveSignal } from "./liveChannels.js";
 import { fmtNum } from "../../services/format.js";
@@ -38,10 +38,11 @@ function ts(t) {
  *   ACTIVITY — the black box: armed/paused/killed/fired/sent/blocked
  * The old #livealerts page keeps working untouched until cutover (10).
  */
-export default function AlertsView() {
+export default function AlertsView({ account = "demo" }) {
   const ref = useRef(null);
   useEnterStagger("alerts", ref);
   const [tab, setTab] = useState("rules");
+  const [recon, setRecon] = useState(null);
   const [rules, setRules] = useState([]);
   const [strategies, setStrategies] = useState([]);
   const [symbols, setSymbols] = useState([]);
@@ -121,10 +122,16 @@ export default function AlertsView() {
     return true;
   }), [history, histFilter, histStatus]);
 
+  useEffect(() => {
+    if (tab !== "recon") return;
+    getLiveReconciliation(account).then(setRecon).catch(() => setRecon({ ok: false, alerts: [] }));
+  }, [tab, account]);
+
   const TABS = [
     ["rules", `RULES (${rules.length})`],
     ["history", `FIRED HISTORY (${history.length})`],
     ["activity", "ACTIVITY LOG"],
+    ["recon", "RECONCILIATION"],
   ];
 
   return (
@@ -288,6 +295,83 @@ export default function AlertsView() {
               </table>
             )}
           </>
+        )}
+
+        {/* ---- RECONCILIATION (fired alerts vs real broker positions) ---- */}
+        {tab === "recon" && (
+          !recon ? (
+            <div className="lt-empty">Checking fired alerts against the broker's real positions (WAMP)…</div>
+          ) : !recon.ok ? (
+            <div className="lt-warn-banner" style={{ position: "static" }}>
+              ⚠ WAMP unreachable — reconciliation unavailable. {recon.error || ""}
+            </div>
+          ) : (
+            <>
+              <div className="lt-mono" style={{ display: "flex", gap: 16, padding: "8px 10px", fontSize: 10, borderBottom: "1px solid var(--lt-row)" }}>
+                <span>ACCOUNT <b className={account === "live" ? "lt-red" : "lt-cyan"}>{account.toUpperCase()}</b></span>
+                <span className="lt-green">MATCHED {recon.counts?.matched ?? 0}</span>
+                <span className={recon.counts?.flagged ? "lt-red" : "lt-muted"}>FLAGGED {recon.counts?.flagged ?? 0}</span>
+                <span className={recon.counts?.orphans ? "lt-amber" : "lt-muted"}>POSITIONS W/O SIGNAL {recon.counts?.orphans ?? 0}</span>
+                <button className="lt-btn small" style={{ marginLeft: "auto" }}
+                        onClick={() => getLiveReconciliation(account).then(setRecon).catch(() => {})}>
+                  REFRESH
+                </button>
+              </div>
+              {(recon.alerts || []).length === 0 ? (
+                <div className="lt-empty">No fired alerts to reconcile yet</div>
+              ) : (
+                <table className="lt-table">
+                  <thead>
+                    <tr><th>TIME (UTC)</th><th>RULE</th><th>SYMBOL</th><th>ACTION</th><th>WEBHOOK</th><th>BROKER RESULT</th></tr>
+                  </thead>
+                  <tbody>
+                    {recon.alerts.map((a) => {
+                      const label = {
+                        matched: ["MATCHED — position confirmed", "lt-green"],
+                        fired_no_position: ["⚠ FIRED BUT NO POSITION", "lt-red"],
+                        webhook_failed: ["⚠ WEBHOOK FAILED — never reached broker", "lt-red"],
+                        dry_run: ["dry-run (not sent)", "lt-dim"],
+                        unknown_action: ["unknown action", "lt-muted"],
+                        wamp_down: ["WAMP down", "lt-muted"],
+                      }[a.recon] || [a.recon, "lt-muted"];
+                      return (
+                        <tr key={a.id} style={a.recon === "fired_no_position" ? { background: "rgba(255,77,109,0.06)" } : {}}>
+                          <td className="lt-muted">{ts(a.ts)}</td>
+                          <td style={{ fontWeight: 600 }}>{a.rule_name}</td>
+                          <td>{a.symbol}</td>
+                          <td className={a.action === "BUY" || a.action === "EXIT_SHORT" ? "lt-green" : "lt-red"}>{a.action}</td>
+                          <td className={a.ok ? "lt-green" : "lt-red"}>{a.ok ? "sent" : "failed"}</td>
+                          <td className={label[1]} style={{ fontWeight: 600 }}>{label[0]}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+              {(recon.positions_without_signal || []).length > 0 && (
+                <>
+                  <div className="lt-panel-title" style={{ padding: "8px 10px", borderTop: "1px solid var(--lt-border)" }}>
+                    Open positions with no matching signal (opened outside QuantLab?)
+                  </div>
+                  <table className="lt-table">
+                    <thead><tr><th>BROKER</th><th>SYMBOL</th><th>SIDE</th><th className="num">SIZE</th><th className="num">ENTRY</th><th className="num">uPNL</th></tr></thead>
+                    <tbody>
+                      {recon.positions_without_signal.map((p, i) => (
+                        <tr key={i}>
+                          <td className="lt-muted">{p.broker}</td>
+                          <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                          <td className={p.side === "LONG" ? "lt-green" : "lt-red"}>{p.side}</td>
+                          <td className="num">{fmtNum(p.size)}</td>
+                          <td className="num lt-muted">{fmtNum(p.entry)}</td>
+                          <td className={`num ${p.upnl >= 0 ? "lt-green" : "lt-red"}`}>{fmtNum(p.upnl)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+            </>
+          )
         )}
 
         {/* ---- ACTIVITY LOG ---- */}

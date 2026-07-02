@@ -1,6 +1,6 @@
 # 09 — Real positions, risk & broker reconciliation (WAMP read)
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 05 (deployments fire), 06 (webhooks + activity log), 03 (channels).
 
@@ -23,23 +23,23 @@ QuantLab (see 06). If WAMP is down, these panels fall back to SIMULATED (labeled
 
 ## Checklist
 
-- [ ] Backend: read-only connection to the WAMP `sinegu-api` MySQL (host/db/creds in
+- [x] Backend: read-only connection to the WAMP `sinegu-api` MySQL (host/db/creds in
       backend config/secrets — never in the frontend).
-- [ ] `GET /api/live/positions` — open positions for the selected Demo/Live account
+- [x] `GET /api/live/positions` — open positions for the selected Demo/Live account
       (from `binance_positions` / `ig_positions`, scoped by that account's api_key).
-- [ ] `GET /api/live/positions/closed` — closed positions (the `*_pastpositions` tables).
-- [ ] `GET /api/live/risk` — derive the risk cards from real positions (equity, day P&L,
+- [x] `GET /api/live/positions/closed` — closed positions (the `*_pastpositions` tables).
+- [x] `GET /api/live/risk` — derive the risk cards from real positions (equity, day P&L,
       gross exposure, net delta, margin used, free margin). Mark VaR / maint-margin
       honestly as derived-or-SIMULATED where we don't have a real number.
-- [ ] Positions panel (Trading + Risk): real open positions with live unrealized P&L.
-- [ ] Reconciliation (item 9): for each fired alert in the activity log (06), check
+- [x] Positions panel (Trading + Risk): real open positions with live unrealized P&L.
+- [x] Reconciliation (item 9): for each fired alert in the activity log (06), check
       whether a matching real position opened/closed in WAMP. Show a per-alert status
       (matched / fired-but-no-position / position-without-signal) and flag mismatches.
-- [ ] Feed real outcomes into the live-vs-expectation compare (07): use
+- [x] Feed real outcomes into the live-vs-expectation compare (07): use
       `binance_pastpositions.realized_pnl` as the ACTUAL result, not just our own guess.
-- [ ] Fallback: when WAMP is unreachable, panels render the SIMULATED placeholder with a
+- [x] Fallback: when WAMP is unreachable, panels render the SIMULATED placeholder with a
       clear label — never a hard error.
-- [ ] Account scoping: everything filters by the selected Demo/Live account.
+- [x] Account scoping: everything filters by the selected Demo/Live account.
 
 ## Done when
 
