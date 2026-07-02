@@ -72,6 +72,29 @@ scripts/pull_databento.py     # bulk CME futures downloader
 ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat)
 ```
 
+## Live Terminal (new live dashboard — plans/01–10, built Jul 02, 2026)
+
+- **Go Live** (button in both research navbars) hard-flips the app into the Live
+  Terminal; **EXIT LIVE** flips back. Mode persists (`ql.app_mode`). The terminal is a
+  pristine separate UI: `frontend/src/pages/live/LiveTerminal.jsx` +
+  `frontend/src/components/live/` under a scoped `.live-terminal` theme — it never
+  imports backtest components and vice versa (see plans/EXECUTION-NOTES.md).
+- **The daemon is the engine.** The terminal is a view/control over the SAME live-alert
+  pipeline: rules in `data/live_alerts.json`, headless runners in `alerts_daemon`,
+  webhooks via `live_alerter`. A "deployment" == an alert rule (+ `account` demo|live
+  field). Live-only backend: `backend/services/live/` (live_engine = kill switch /
+  idempotency / journal, live_store = SQLite `data/live_terminal.db` (gitignored),
+  live_analytics, wamp_positions, orderbook_hub, live_feed) + `routes/live_terminal_routes.py`
+  (`/api/live/*`).
+- **Safety:** global DISARM ALL blocks every webhook POST; deploy modal confirms before
+  arming (Demo default; Live shows a red warning); test signals default to dry-run;
+  a (rule, bar, action) fires at most once; `pyramiding` locked to 1 live (parity).
+- **Positions / Risk / Reconciliation** read the WAMP `sinegu_db` READ-ONLY
+  (`WAMP_DB_*` in backend/.env, defaults localhost/root/''/sinegu_db) and fall back to
+  labeled SIMULATED when WAMP is down. Alerts are stored in QuantLab only.
+- **Old `#livealerts` page stays fully working** until the cutover soak completes
+  (plans/10) — don't remove it before then.
+
 ## Data
 
 - `market_data.load_parquet(symbol, timeframe, broker=None)` returns a DataFrame with columns

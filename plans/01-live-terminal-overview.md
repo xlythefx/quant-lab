@@ -1,6 +1,6 @@
 # 01 — Live Terminal: overview & north-star
 
-**Status:** ⬜ Todo (anchor doc — not "executed"; it frames the phase files 02–10)
+**Status:** ✅ Done (anchor doc; phases 02–09 built Jul 02, 2026, 10 in soak)
 **Created:** Jul 01, 2026
 
 ## Goal
@@ -126,8 +126,8 @@ Suggested execution order: 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 �
 
 ## Still to confirm while executing
 
-- [ ] Webhook targets/secrets storage — reuse existing config + secrets, never in frontend.
-- [ ] Single global socket vs per-channel — reuse existing `event_bus` rooms (simplest).
+- [x] Webhook targets/secrets storage — resolved: rules keep URL+secret in data/live_alerts.json (server-side); the terminal deployment view exposes only masked hints.
+- [x] Single global socket vs per-channel — resolved: reused event_bus + Socket.IO rooms (candle rooms, ob_{symbol} rooms, global gateway/live_signal events).
 
 ## Done when
 
