@@ -1,6 +1,6 @@
 # 03 — Realtime plumbing (live channels + REST snapshots)
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 02 (shell to render into). Backend + a thin frontend hook.
 
@@ -21,17 +21,17 @@ snapshot endpoints for initial paint. Keep it lightweight (self-use scale).
 
 ## Checklist
 
-- [ ] Decide channel transport: reuse `event_bus.emit(channel, payload, to=room)`; room = `f"{venue}:{symbol}"` for market channels, a global room for account channels.
-- [ ] Backend: a small live feed service that, for a subscribed (venue, symbol, tf), polls/streams Binance via CCXT and emits `ticker` (≤1–2/s) and `candles` (on close/partial).
-- [ ] Backend: `gateway` heartbeat emit (~0.5 Hz) with `{latencyMs, session, feed}` (session from UTC hour; latency best-effort).
-- [ ] Connection + broker health: surface feed status (OK/DEGRADED) and webhook-delivery health; a dropped price feed or a failed webhook POST must raise a loud, obvious warning — never fail silently.
-- [ ] Auto-reconnect + re-subscribe the selected instrument on socket drop; on Binance stream reconnect, backfill via a REST snapshot before resuming so the chart/book aren't stale.
-- [ ] Backend REST snapshots (match handoff shapes): `GET /api/live/candles`, `/api/live/ticker`, `/api/live/instruments` (Binance symbols we have). Keep field names `{t,o,h,l,c,v}` etc.
-- [ ] Frontend: `useLiveChannel(channel, {venue, symbol})` hook — subscribes on mount, unsubscribes on unmount / symbol switch; returns latest snapshot.
-- [ ] Frontend: `subscribe/unsubscribe` messages so the backend only streams the selected instrument.
-- [ ] Throttle/coalesce high-rate emits server-side to the handoff cadences (don't flood).
-- [ ] First instruments: **BTCUSDT** and **LTCUSDT** (Binance) — seed `/api/live/instruments` with these.
-- [ ] Sanity check: open Trading shell, watch `ticker`/`candles` update in console.
+- [x] Decide channel transport: reuse `event_bus.emit(channel, payload, to=room)`; room = `f"{venue}:{symbol}"` for market channels, a global room for account channels.
+- [x] Backend: a small live feed service that, for a subscribed (venue, symbol, tf), polls/streams Binance via CCXT and emits `ticker` (≤1–2/s) and `candles` (on close/partial).
+- [x] Backend: `gateway` heartbeat emit (~0.5 Hz) with `{latencyMs, session, feed}` (session from UTC hour; latency best-effort).
+- [x] Connection + broker health: surface feed status (OK/DEGRADED) and webhook-delivery health; a dropped price feed or a failed webhook POST must raise a loud, obvious warning — never fail silently.
+- [x] Auto-reconnect + re-subscribe the selected instrument on socket drop; on Binance stream reconnect, backfill via a REST snapshot before resuming so the chart/book aren't stale.
+- [x] Backend REST snapshots (match handoff shapes): `GET /api/live/candles`, `/api/live/ticker`, `/api/live/instruments` (Binance symbols we have). Keep field names `{t,o,h,l,c,v}` etc.
+- [x] Frontend: `useLiveChannel(channel, {venue, symbol})` hook — subscribes on mount, unsubscribes on unmount / symbol switch; returns latest snapshot.
+- [x] Frontend: `subscribe/unsubscribe` messages so the backend only streams the selected instrument.
+- [x] Throttle/coalesce high-rate emits server-side to the handoff cadences (don't flood).
+- [x] First instruments: **BTCUSDT** and **LTCUSDT** (Binance) — seed `/api/live/instruments` with these.
+- [x] Sanity check: open Trading shell, watch `ticker`/`candles` update in console.
 
 ## Done when
 

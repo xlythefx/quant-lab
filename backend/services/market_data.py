@@ -161,6 +161,28 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 500) -> List[Dict]:
     return _ohlcv_to_records(rows)
 
 
+def fetch_ticker(symbol: str) -> Dict:
+    """24h ticker snapshot via CCXT REST (Live Terminal price header).
+    Returns {price, changePct, high, low, vol, ts} — the live tick between
+    refreshes comes from the kline stream, this fills the 24h stats."""
+    pair = _to_ccxt_symbol(symbol)
+    try:
+        t = _exchange.fetch_ticker(pair)
+    except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+        log.error("fetch_ticker failed for %s: %s", symbol, e)
+        raise
+    return {
+        "symbol": symbol,
+        "price": float(t.get("last") or 0.0),
+        "changePct": float(t.get("percentage") or 0.0),
+        "high": float(t.get("high") or 0.0),
+        "low": float(t.get("low") or 0.0),
+        "vol": float(t.get("baseVolume") or 0.0),
+        "quoteVol": float(t.get("quoteVolume") or 0.0),
+        "ts": int((t.get("timestamp") or time.time() * 1000) // 1000),
+    }
+
+
 def parquet_path(symbol: str, timeframe: str, broker: str = BROKER_DEFAULT) -> str:
     bdir = _broker_dir(broker)
     os.makedirs(bdir, exist_ok=True)

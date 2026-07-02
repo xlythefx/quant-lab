@@ -30,7 +30,7 @@ top-level Go Live mode switch · Binance feed. Design docs in [design-handoff/](
 
 - ⬜ **01** — [Live Terminal: overview & north-star](01-live-terminal-overview.md) · the map for 02–10
 - ✅ **02** — [App shell + Go Live mode switch](02-app-shell-and-go-live.md) · frontend skeleton, tokens, nav
-- ⬜ **03** — [Realtime plumbing](03-realtime-plumbing.md) · live channels on Socket.IO + REST snapshots
+- ✅ **03** — [Realtime plumbing](03-realtime-plumbing.md) · live channels on Socket.IO + REST snapshots
 - ⬜ **04** — [Trading workspace](04-trading-workspace.md) · chart + live price + signals (book/tape SIMULATED)
 - ⬜ **05** — [Strategies & Deployments](05-strategies-deployments.md) · wire to the live alerter; deploy/pause/kill
 - ⬜ **06** — [Alerts & webhooks](06-alerts-and-webhooks.md) · re-home LiveAlerts; broker webhook + test-signal

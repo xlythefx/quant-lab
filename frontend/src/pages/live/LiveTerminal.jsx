@@ -8,6 +8,7 @@ import Panel from "../../components/live/Panel.jsx";
 import CommandPalette from "../../components/live/CommandPalette.jsx";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
 import { useEnterStagger } from "../../components/live/animations.js";
+import { useGateway, useInstruments } from "../../components/live/hooks.js";
 import { exitLive } from "../../services/appMode.js";
 
 /**
@@ -51,6 +52,8 @@ function TerminalInner() {
   const [view, setView] = useState("workspaces"); // "workspaces" | "alerts"
   const [paletteOpen, setPaletteOpen] = useState(false);
   const { dataMode, toggleDataMode } = useDataMode();
+  const gateway = useGateway();
+  const { instruments } = useInstruments();
 
   // Stubs until later phases wire them: equity/dayPnl (09), bell count (05), kill switch (06).
   const [killed, setKilled] = useState(false);
@@ -97,13 +100,13 @@ function TerminalInner() {
           )
           : <WorkspaceHost ws={ws} />}
       </div>
-      <StatusFooter gateway={null} dayPnl={null} />
+      <StatusFooter gateway={gateway} dayPnl={null} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onWorkspace={selectWs}
         onAlerts={() => setView("alerts")}
-        symbols={[]}
+        symbols={instruments.map((i) => i.symbol)}
       />
     </div>
   );
