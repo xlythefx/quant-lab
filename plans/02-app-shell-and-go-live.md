@@ -1,6 +1,6 @@
 # 02 — App shell + Go Live mode switch
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 01 (overview). No backend needed — pure frontend skeleton.
 
@@ -20,17 +20,17 @@ tokens — no live data yet, just the frame + navigation.
 
 ## Checklist
 
-- [ ] Add an app-level `mode` state ("research" | "live"), persisted (localStorage), read in [App.jsx](../frontend/src/App.jsx).
-- [ ] **Hard flip:** in "live" mode render ONLY the terminal shell (backtest rail/pages hidden); in "research" mode render the app as today. The existing `LiveAlerts` / live alerter stay untouched in research mode — additive, nothing removed.
-- [ ] Add a **Go Live / Exit Live** switch that's always visible (top bar in both worlds); flips `mode`.
-- [ ] Create `frontend/src/pages/live/LiveTerminal.jsx` — the shell: 52px left rail, 54px top bar, 32px workspace tabs, content area, 24px footer (grid per 01 tokens).
-- [ ] Scope the handoff palette (bg `#0a0a0f`, panel `#0f0f17`, border `#1e1e2e`, green/red/amber/cyan/purple) as CSS vars under a `.live-terminal` root class — do NOT touch the global theme.
-- [ ] Left rail: 6 workspace icons (Trading, Markets, Risk, Blotter, Strategies, Analytics) + brand diamond + bottom search/⌘K icon. Active = green.
-- [ ] Top bar: wordmark + venue chip (● BINANCE), ACCOUNT EQUITY / DAY P&L blocks (static stubs for now), blinking LIVE dot, UTC clock (client-side, 1s), bell w/ badge (stub 0).
-- [ ] Workspace tab strip: 6 tabs, active = white + 2px amber underline; content swaps by active workspace (empty panels for now).
-- [ ] Footer: `● GATEWAY … · LATENCY … · FEED OK · SESSION …` (static) + clock + version.
-- [ ] Each workspace renders an empty labeled panel ("Trading — coming in 04", etc.) so navigation works end-to-end.
-- [ ] Verify `vite build` passes.
+- [x] Add an app-level `mode` state ("research" | "live"), persisted (localStorage), read in [App.jsx](../frontend/src/App.jsx).
+- [x] **Hard flip:** in "live" mode render ONLY the terminal shell (backtest rail/pages hidden); in "research" mode render the app as today. The existing `LiveAlerts` / live alerter stay untouched in research mode — additive, nothing removed.
+- [x] Add a **Go Live / Exit Live** switch that's always visible (top bar in both worlds); flips `mode`.
+- [x] Create `frontend/src/pages/live/LiveTerminal.jsx` — the shell: 52px left rail, 54px top bar, 32px workspace tabs, content area, 24px footer (grid per 01 tokens).
+- [x] Scope the handoff palette (bg `#0a0a0f`, panel `#0f0f17`, border `#1e1e2e`, green/red/amber/cyan/purple) as CSS vars under a `.live-terminal` root class — do NOT touch the global theme.
+- [x] Left rail: 6 workspace icons (Trading, Markets, Risk, Blotter, Strategies, Analytics) + brand diamond + bottom search/⌘K icon. Active = green.
+- [x] Top bar: wordmark + venue chip (● BINANCE), ACCOUNT EQUITY / DAY P&L blocks (static stubs for now), blinking LIVE dot, UTC clock (client-side, 1s), bell w/ badge (stub 0).
+- [x] Workspace tab strip: 6 tabs, active = white + 2px amber underline; content swaps by active workspace (empty panels for now).
+- [x] Footer: `● GATEWAY … · LATENCY … · FEED OK · SESSION …` (static) + clock + version.
+- [x] Each workspace renders an empty labeled panel ("Trading — coming in 04", etc.) so navigation works end-to-end.
+- [x] Verify `vite build` passes.
 
 ## Done when
 

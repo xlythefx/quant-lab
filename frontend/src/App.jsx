@@ -16,7 +16,9 @@ import LiveAlerts from "./pages/LiveAlerts.jsx";
 import ReportImport from "./pages/ReportImport.jsx";
 import Landing from "./pages/Landing.jsx";
 import Login from "./pages/Login.jsx";
+import LiveTerminal from "./pages/live/LiveTerminal.jsx";
 import { isAuthenticated } from "./services/auth.js";
+import { getAppMode, onAppModeChange } from "./services/appMode.js";
 
 const PUBLIC = new Set(["", "landing", "login"]);
 
@@ -28,6 +30,7 @@ function getView() {
 
 export default function App() {
   const [view, setView] = useState(getView());
+  const [appMode, setAppModeState] = useState(getAppMode());
 
   useEffect(() => {
     const onHash = () => setView(getView());
@@ -35,12 +38,21 @@ export default function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  useEffect(() => onAppModeChange(() => setAppModeState(getAppMode())), []);
+
   const authed = isAuthenticated();
 
   // Unauthenticated user trying to reach a protected route → login.
   if (!authed && !PUBLIC.has(view)) {
     window.location.hash = "#login";
     return <Login />;
+  }
+
+  // Hard flip: live mode fully swaps the app to the Live Terminal shell.
+  // The backtest world (incl. the existing #livealerts) is untouched and one
+  // click away via Exit Live. Terminal sits behind the same login.
+  if (authed && appMode === "live") {
+    return <LiveTerminal />;
   }
 
   // Authenticated user landing on public pages → go to Dashboard V2 (default).

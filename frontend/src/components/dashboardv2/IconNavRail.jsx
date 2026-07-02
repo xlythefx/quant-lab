@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { socket } from "../../services/socket.js";
 import { logout } from "../../services/auth.js";
+import { goLive } from "../../services/appMode.js";
 import LiveClock from "../LiveClock.jsx";
 import BrandAtom from "../BrandAtom.jsx";
 
@@ -56,6 +57,14 @@ export default function IconNavRail({ view = "dashboardv2" }) {
 
       {/* bottom cluster */}
       <div className="mt-auto flex flex-col items-center gap-2 pt-2">
+        <button
+          onClick={goLive}
+          title="Go Live — switch to the Live Terminal"
+          className="group relative w-10 h-10 flex items-center justify-center rounded-lg border border-[#00d4a1]/40 text-[#00d4a1] hover:bg-[#00d4a1]/10 transition"
+        >
+          <span className="w-2 h-2 rounded-full bg-[#00d4a1] animate-pulse" />
+          <Tooltip>Go Live</Tooltip>
+        </button>
         <ConnDot connected={connected} />
         <ClockButton />
         <RailButton label="Sign Out" tone="loss" onClick={() => { logout(); window.location.hash = "#landing"; }} icon={IconLogout} />

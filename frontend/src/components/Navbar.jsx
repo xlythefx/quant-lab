@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { socket } from "../services/socket.js";
 import LiveClock from "./LiveClock.jsx";
 import { logout } from "../services/auth.js";
+import { goLive } from "../services/appMode.js";
 import BrandAtom from "./BrandAtom.jsx";
 
 // Grouped under the "Validation" dropdown to keep the top bar uncluttered.
@@ -52,6 +53,14 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
         {onModeChange && (
           <ModeToggleInline mode={mode} onChange={onModeChange} />
         )}
+        <button
+          onClick={goLive}
+          title="Switch to the Live Terminal"
+          className="px-3 py-1 rounded-md border border-[#00d4a1]/50 text-[#00d4a1] hover:bg-[#00d4a1]/10 text-xs font-semibold tracking-wider transition flex items-center gap-1.5"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-[#00d4a1] animate-pulse" />
+          GO LIVE
+        </button>
         <LiveClock />
         <div className="flex items-center gap-2 text-xs text-muted">
           <span
