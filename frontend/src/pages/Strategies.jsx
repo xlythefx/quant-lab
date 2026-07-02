@@ -19,6 +19,10 @@ const KIND_FILTERS = [
   { key: "archived", label: "Archived" },
 ];
 
+// UI-only hide list: these strategies stay registered and runnable in the
+// backend, but are hidden from this picker for now. Remove an id to show it.
+const HIDDEN_IDS = new Set(["pivot_breakout", "rsi2_reversion"]);
+
 export default function Strategies() {
   const [strategies, setStrategies] = useState([]);
   const [error, setError] = useState(null);
@@ -35,6 +39,7 @@ export default function Strategies() {
   // "Available" (default) and the OHLC/HLC kind filters hide archived strategies;
   // "Archived" lists only archived; "All" shows everything including archived.
   const shown = strategies.filter((s) => {
+    if (HIDDEN_IDS.has(s.id)) return false;
     const archived = !!s.archived;
     if (kindFilter === "archived") return archived;
     if (kindFilter === "all") return true;
@@ -70,6 +75,23 @@ export default function Strategies() {
             ))}
           </div>
         </header>
+
+        <a
+          href="#strategysandbox"
+          className="flex items-center justify-between rounded-xl border border-accent-violet/30
+                     bg-accent-violet/5 px-5 py-4 hover:bg-accent-violet/10 transition group"
+        >
+          <div>
+            <div className="text-base font-semibold flex items-center gap-2">
+              <span>✨</span> Design a strategy with AI
+            </div>
+            <div className="text-sm text-muted mt-0.5">
+              Describe an idea in plain English — the AI Builder writes, back-tests, and tweaks a
+              real strategy with you (BTCUSDT &amp; ES).
+            </div>
+          </div>
+          <span className="text-accent-violet group-hover:translate-x-0.5 transition">Open Sandbox →</span>
+        </a>
 
         {error && (
           <div className="rounded-md border border-loss/40 bg-loss/10 px-4 py-3 text-sm text-loss">{error}</div>

@@ -34,9 +34,19 @@ export function startingCapital(r, riskConfig) {
 }
 
 // ---- range pills -> backtest window -----------------------------------------
-// MAX → no window (let the backend use the full dataset). Otherwise end at the
-// dataset's last bar and start N years earlier, clamped to the first bar.
-export function rangeToWindow(rangeKey, bounds) {
+// MAX → no window (let the backend use the full dataset). CUSTOM → the user's
+// picked start/end (clamped to the dataset). Otherwise end at the dataset's last
+// bar and start N years earlier, clamped to the first bar.
+export function rangeToWindow(rangeKey, bounds, customRange) {
+  if (rangeKey === "CUSTOM") {
+    let start = customRange?.start ? dateStrToEpoch(customRange.start) : undefined;
+    let end = customRange?.end ? dateStrToEpoch(customRange.end, true) : undefined;
+    if (bounds) {
+      if (start != null && bounds.firstTime != null) start = Math.max(start, bounds.firstTime);
+      if (end != null && bounds.lastTime != null) end = Math.min(end, bounds.lastTime);
+    }
+    return { start_time: start, end_time: end };
+  }
   if (rangeKey === "MAX" || !bounds || !bounds.lastTime) {
     return { start_time: undefined, end_time: undefined };
   }
@@ -45,6 +55,22 @@ export function rangeToWindow(rangeKey, bounds) {
   const end = bounds.lastTime;
   const start = Math.max(bounds.firstTime ?? 0, end - Math.floor(years * SECONDS_PER_YEAR));
   return { start_time: start, end_time: end };
+}
+
+// Concrete {start_time, end_time} epochs a selection covers, for DISPLAY (the
+// "?" hint). Unlike rangeToWindow, MAX resolves to the dataset's full span
+// rather than `undefined`, and CUSTOM falls back to the dataset edges for any
+// side the user hasn't picked. Returns null when the span can't be known yet.
+export function resolveWindowDates(rangeKey, bounds, customRange) {
+  if (rangeKey === "CUSTOM") {
+    const start = customRange?.start ? dateStrToEpoch(customRange.start) : bounds?.firstTime;
+    const end = customRange?.end ? dateStrToEpoch(customRange.end, true) : bounds?.lastTime;
+    return start != null && end != null ? { start_time: start, end_time: end } : null;
+  }
+  if (!bounds || bounds.firstTime == null || bounds.lastTime == null) return null;
+  if (rangeKey === "MAX") return { start_time: bounds.firstTime, end_time: bounds.lastTime };
+  const w = rangeToWindow(rangeKey, bounds);
+  return w.start_time != null && w.end_time != null ? w : null;
 }
 
 // ---- default-param resolution (mirrors Dashboard.jsx timeframe-defaults merge)

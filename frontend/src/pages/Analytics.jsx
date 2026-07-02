@@ -687,6 +687,8 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
   const avgTradesPerMonth = a.monthly_returns?.length > 0
     ? s.trades / a.monthly_returns.length
     : null;
+  const totalCostDollars = (a.commission_dollars || 0) + (a.slippage_dollars || 0);
+  const costDragPct = s.gross_profit ? (totalCostDollars / s.gross_profit) * 100 : null;
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -707,8 +709,8 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
       <KpiCard title="Trades"            value={fmtInt(s.trades)} sub={`avg ${fmtUsd(s.avg_pnl_dollars)}`} />
 
       {/* ── Risk cards ────────────────────────────────────────────────── */}
-      <KpiCard title="Max Drawdown"      value={fmtPct(s.max_drawdown_pct, false)}
-               sub={`${fmtUsd(s.max_drawdown_dollars)} · % of starting capital${s.max_drawdown_pct_peak != null ? ` · peak-rel ${fmtNum(Math.abs(s.max_drawdown_pct_peak))}%` : ""}`}
+      <KpiCard title="Max Drawdown"      value={fmtPct(s.max_drawdown_pct_peak != null ? -Math.abs(s.max_drawdown_pct_peak) : s.max_drawdown_pct, false)}
+               sub={`${fmtUsd(s.max_drawdown_dollars)} · peak-to-trough${s.max_drawdown_pct != null ? ` · ${fmtNum(Math.abs(s.max_drawdown_pct))}% of start capital` : ""}`}
                positive={false} />
       <KpiCard title="Max DD Duration"   value={fmtBarsDuration(a.max_drawdown_duration_bars, result.timeframe)} sub="time underwater" />
       <KpiCard title="Exposure"          value={`${fmtNum(a.exposure_pct)}%`} sub="bars in position" />
@@ -725,6 +727,10 @@ function OverviewTab({ result, portfolioResult, filteredPerStrategy }) {
       <KpiCard title="Gross Profit"      value={fmtUsd(s.gross_profit)} sub="sum of winning trades" positive />
       <KpiCard title="Gross Loss"        value={fmtUsd(-s.gross_loss)} sub="sum of losing trades" positive={false} />
       <KpiCard title="Commission"        value={fmtUsd(a.commission_dollars)} sub="total fees paid" />
+      <KpiCard title="Slippage"          value={fmtUsd(a.slippage_dollars)} sub="total slippage paid" />
+      <KpiCard title="Total Cost"        value={fmtUsd(totalCostDollars)}
+               sub={costDragPct != null ? `${fmtNum(costDragPct)}% of gross profit` : "fees + slippage"}
+               positive={false} />
 
       {/* ── Activity & context cards ──────────────────────────────────── */}
       <KpiCard title="Trading Days"      value={fmtInt(a.trading_days)} sub="days with at least 1 trade" />
@@ -1630,7 +1636,7 @@ function TTestTab({ result }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
         <KpiCard title="T-statistic" value={di.t_stat != null ? fmtNum(di.t_stat) : "—"}
                  sub="higher = stronger evidence of edge"
                  positive={(di.t_stat ?? 0) > 0} />
@@ -1642,6 +1648,9 @@ function TTestTab({ result }) {
         <KpiCard title="Mean trade" value={fmtUsd(ts?.expectancy_dollars)}
                  sub={ts?.expectancy_R != null ? `${fmtNum(ts.expectancy_R)} R per trade` : "expectancy per trade"}
                  positive={(ts?.expectancy_dollars ?? 0) >= 0} />
+        <KpiCard title="Prob. of ruin" value={di.prob_ruin != null ? fmtPct(di.prob_ruin * 100, false) : "—"}
+                 sub="simplified gambler's-ruin estimate"
+                 positive={di.prob_ruin != null ? di.prob_ruin < 0.05 : null} />
       </div>
 
       {pLog != null && (

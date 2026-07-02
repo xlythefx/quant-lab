@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from services import (backtest_engine, market_data, quant_metrics, risk_config,
-                      assets, portfolio_correlation)
+                      assets, portfolio_correlation, event_bus)
 from services.strategy_registry import get_strategy_class
 
 log = logging.getLogger(__name__)
@@ -283,7 +283,8 @@ def run_portfolio(specs: list[StrategySpec],
                   start_time: Optional[int] = None,
                   end_time: Optional[int] = None,
                   risk_overrides: Optional[dict] = None,
-                  df_by_spec: Optional[dict] = None) -> dict:
+                  df_by_spec: Optional[dict] = None,
+                  sid: Optional[str] = None) -> dict:
     """Walk 1..N strategies through a single shared cash pool.
 
     Same-bar conflicts resolved by `spec.priority` (low number wins). When a
@@ -298,6 +299,11 @@ def run_portfolio(specs: list[StrategySpec],
     """
     if not specs:
         raise ValueError("at least one StrategySpec is required")
+
+    # Live progress → the requesting client's socket (no-op when sid is absent).
+    def _emit(payload):
+        if sid:
+            event_bus.emit("backtest_progress", payload, to=sid)
 
     rc = risk_config.get()
     if risk_overrides:
@@ -314,9 +320,19 @@ def run_portfolio(specs: list[StrategySpec],
 
     # Materialize each stream: load (or inject) parquet, run vectorized signals.
     streams: list[_Stream] = []
-    for orig_idx, spec in ordered:
+    n_specs = len(ordered)
+    for _i, (orig_idx, spec) in enumerate(ordered):
         cls = get_strategy_class(spec.strategy_id)
         strategy = cls(spec.params or {})
+        # Announce which strategy we're computing (and whether it's the slow HMM
+        # path), and hand the strategy a sid so its HMM fit can stream sub-progress.
+        _sparams = spec.params or {}
+        _is_hmm = bool(_sparams.get("use_regime")) and _sparams.get("regime_method") == "hmm"
+        _label = getattr(getattr(strategy, "META", None), "name", None) or spec.strategy_id
+        _emit({"stage": "strategy", "index": _i + 1, "total": n_specs,
+               "label": _label, "symbol": spec.symbol, "hmm": _is_hmm})
+        if sid:
+            strategy._progress = {"sid": sid, "label": _label, "index": _i + 1, "total": n_specs}
         injected = df_by_spec.get(orig_idx) if df_by_spec else None
         df = injected.copy() if injected is not None else market_data.load_parquet(spec.symbol, spec.timeframe, broker=spec.broker)
         if start_time is not None:
@@ -359,6 +375,8 @@ def run_portfolio(specs: list[StrategySpec],
     timeline = np.array(sorted(all_ts), dtype=np.int64)
 
     state = PortfolioState(starting_capital=starting_capital, cash=starting_capital)
+
+    _emit({"stage": "simulate", "total_bars": int(len(timeline))})
 
     # ---- Walk ----------------------------------------------------------
     for ts in timeline:
@@ -487,6 +505,8 @@ def run_portfolio(specs: list[StrategySpec],
     aggregate_trades.sort(key=lambda t: t["entry_time"])
 
     final_equity = state.equity_curve[-1]["equity"] if state.equity_curve else starting_capital
+
+    _emit({"stage": "stats"})
 
     # Aggregate stats use the existing engine helpers — feed the merged
     # trades and the portfolio equity curve.

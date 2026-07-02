@@ -30,6 +30,7 @@ from routes.monte_carlo_routes import monte_carlo_bp
 from routes.market_lab_routes import market_lab_bp
 from routes.model_bench_routes import model_bench_bp
 from routes.ai_routes import ai_bp
+from routes.strategy_builder_routes import strategy_builder_bp
 from routes.live_alerts_routes import live_alerts_bp
 from routes.presets_routes import presets_bp
 from routes.skills_routes import skills_bp
@@ -65,6 +66,7 @@ def create_app():
     app.register_blueprint(market_lab_bp)
     app.register_blueprint(model_bench_bp)
     app.register_blueprint(ai_bp)
+    app.register_blueprint(strategy_builder_bp)
     app.register_blueprint(live_alerts_bp)
     app.register_blueprint(presets_bp)
     app.register_blueprint(skills_bp)

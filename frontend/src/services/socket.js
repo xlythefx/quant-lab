@@ -148,7 +148,7 @@ export function clearAllStrategySubscriptions() {
  *   onCancelled({job_id})
  *   onError({job_id, message})
  */
-export function subscribeWalkForward({ onProgress, onWindowDone, onComplete, onCancelled, onError } = {}) {
+export function subscribeWalkForward({ onProgress, onWindowDone, onComplete, onCancelled, onError, onResources } = {}) {
   const wrap = (fn) => (fn ? (p) => fn(p) : null);
   const h = {
     wf_progress:    wrap(onProgress),
@@ -156,6 +156,30 @@ export function subscribeWalkForward({ onProgress, onWindowDone, onComplete, onC
     wf_complete:    wrap(onComplete),
     wf_cancelled:   wrap(onCancelled),
     wf_error:       wrap(onError),
+    wf_resources:   wrap(onResources),
+  };
+  for (const [evt, fn] of Object.entries(h)) {
+    if (fn) socket.on(evt, fn);
+  }
+  return () => {
+    for (const [evt, fn] of Object.entries(h)) {
+      if (fn) socket.off(evt, fn);
+    }
+  };
+}
+
+/**
+ * Subscribe to multi-seed robustness job events. Returns an unsubscribe fn.
+ *   onProgress({seed_idx, n_seeds, window_idx, total_windows, cpu_percent, ...})
+ *   onComplete({result})  onCancelled({})  onError({message})
+ */
+export function subscribeWalkForwardRobustness({ onProgress, onComplete, onCancelled, onError } = {}) {
+  const wrap = (fn) => (fn ? (p) => fn(p) : null);
+  const h = {
+    rb_progress:  wrap(onProgress),
+    rb_complete:  wrap(onComplete),
+    rb_cancelled: wrap(onCancelled),
+    rb_error:     wrap(onError),
   };
   for (const [evt, fn] of Object.entries(h)) {
     if (fn) socket.on(evt, fn);

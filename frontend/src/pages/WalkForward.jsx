@@ -11,16 +11,18 @@ import CostAssumptions from "../components/CostAssumptions.jsx";
 import {
   getSymbols, getStrategies,
   startWalkForward, cancelWalkForward, getWalkForwardStatus, getWalkForwardLastResult,
+  startWalkForwardRobustness, cancelWalkForwardRobustness,
+  getWalkForwardRobustnessStatus, getWalkForwardRobustnessLastResult,
   aiSuggestWalkForward, aiAnalyzeWalkForwardSection, aiChatWalkForward,
 } from "../services/api.js";
-import { subscribeWalkForward } from "../services/socket.js";
+import { subscribeWalkForward, subscribeWalkForwardRobustness } from "../services/socket.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
-import { fmtUsd, fmtNum, fmtPct, fmtInt } from "../services/format.js";
+import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../services/format.js";
 import { TabBar } from "../components/analytics/primitives.jsx";
 import {
   Field, NumInput, BudgetHint,
-  ProgressPanel,
+  ProgressPanel, RobustnessProgress, RobustnessResults,
   WFVerdict, Kpi,
   BestParamRankings, TopCombinations, WindowRankings, WindowHeatmap,
   PnlHeatmapGrid, SessionsEditor,
@@ -44,6 +46,7 @@ const TABS = [
   { id: "parameters", label: "Parameters" },
   { id: "optuna",     label: "Optuna" },
   { id: "robustness", label: "Robustness" },
+  { id: "seedcheck",  label: "Seed Check" },
   { id: "regime",     label: "Regime" },
   { id: "ai",         label: "AI Analysis" },
 ];
@@ -110,7 +113,7 @@ function WindowScheduleHint({ dataset, isBars, oosBars, embargoBars = 0 }) {
           Stitched out-of-sample coverage
         </div>
         <div className="text-sm font-mono text-text">
-          {fmtDate(sched.oosStart)} → {fmtDate(sched.last)}
+          {fmtDateLong(sched.oosStart)} → {fmtDateLong(sched.last)}
           <span className="text-muted text-xs"> · {humanizeSpan(sched.last - sched.oosStart)}</span>
         </div>
         <div className="text-[11px] text-muted/80 mt-0.5">
@@ -125,17 +128,17 @@ function WindowScheduleHint({ dataset, isBars, oosBars, embargoBars = 0 }) {
         <div>
           <span className="text-accent-blue">Train (IS)</span>
           <span className="text-muted"> · {humanizeSpan(sched.isSpan)}</span>
-          <div className="text-text">{fmtDate(sched.first)} → {fmtDate(sched.isEnd)}</div>
+          <div className="text-text">{fmtDateLong(sched.first)} → {fmtDateLong(sched.isEnd)}</div>
         </div>
         <div>
           <span className="text-accent-cyan">Test (OOS)</span>
           <span className="text-muted"> · {humanizeSpan(sched.oosSpan)}</span>
-          <div className="text-text">{fmtDate(sched.oosStart)} → {fmtDate(sched.oosEnd)}</div>
+          <div className="text-text">{fmtDateLong(sched.oosStart)} → {fmtDateLong(sched.oosEnd)}</div>
         </div>
       </div>
       <div className="text-[11px] text-muted/80 mt-2">
         IS is a <span className="text-text">rolling</span> {humanizeSpan(sched.isSpan)} window — each step it slides forward
-        by {oosBars} bars and re-optimizes, so window&nbsp;#{sched.nWindows} trains on late data and tests through {fmtDate(sched.last)}.
+        by {oosBars} bars and re-optimizes, so window&nbsp;#{sched.nWindows} trains on late data and tests through {fmtDateLong(sched.last)}.
         Want one fixed "train early, test recent" split instead? Use the <span className="text-text">Live-Test Holdout</span> preset.
       </div>
     </div>
@@ -195,6 +198,10 @@ export default function WalkForward() {
   const [jobState, setJobState] = useState({ state: "idle" });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  // Multi-seed robustness (Seed Check tab) — separate job from the single run.
+  const [nSeeds, setNSeeds] = usePersistentState("ql.wf.n_seeds", 5);
+  const [rbState, setRbState] = useState({ state: "idle" });
+  const [rbResult, setRbResult] = useState(null);
   const liveWindows = useRef([]);
   const mainRef = useRef(null);
   const progressRef = useRef(null);
@@ -309,6 +316,14 @@ export default function WalkForward() {
     getWalkForwardLastResult().then((r) => {
       if (r) setResult(r);
     }).catch(() => {});
+    // Robustness job + last result
+    getWalkForwardRobustnessStatus().then((st) => {
+      setRbState(st || { state: "idle" });
+      if (st?.state === "idle" && st?.result) setRbResult(st.result);
+    }).catch(() => {});
+    getWalkForwardRobustnessLastResult().then((r) => {
+      if (r) setRbResult(r);
+    }).catch(() => {});
   }, []);
 
   // ---- socket subscription --------------------------------------------
@@ -330,6 +345,17 @@ export default function WalkForward() {
         liveWindows.current = [...liveWindows.current, p.window];
         setJobState((prev) => ({ ...(prev || {}), windows: [...liveWindows.current] }));
       },
+      onResources: (p) => {
+        setJobState((prev) => ({
+          ...(prev || {}),
+          cpu_percent: p.cpu_percent,
+          cpu_percent_percore: p.cpu_percent_percore,
+          active_workers: p.active_workers,
+          n_workers: p.n_workers,
+          elapsed_seconds: p.elapsed_seconds,
+          eta_seconds: p.eta_seconds,
+        }));
+      },
       onComplete: (p) => {
         setResult(p.result);
         setJobState((prev) => ({ ...(prev || {}), state: "done", windows: liveWindows.current }));
@@ -342,7 +368,20 @@ export default function WalkForward() {
         setJobState((prev) => ({ ...(prev || {}), state: "error" }));
       },
     });
-    return unsub;
+    const unsubRb = subscribeWalkForwardRobustness({
+      onProgress: (p) => setRbState((prev) => ({ ...(prev || {}), ...p, state: "running" })),
+      onComplete: (p) => {
+        setRbResult(p.result);
+        setRbState((prev) => ({ ...(prev || {}), state: "done" }));
+      },
+      onCancelled: () => setRbState((prev) => ({ ...(prev || {}), state: "cancelled" })),
+      onError: (p) => {
+        setError(p.message || "robustness error");
+        setRbState((prev) => ({ ...(prev || {}), state: "error" }));
+      },
+    });
+    const _unsubBoth = () => { unsub(); unsubRb(); };
+    return _unsubBoth;
   }, []);
 
   const activeStrategy = useMemo(
@@ -397,6 +436,47 @@ export default function WalkForward() {
     try { await cancelWalkForward(); } catch {}
   };
 
+  // ---- Multi-seed robustness (Seed Check tab) --------------------------
+  const rbRunning = rbState?.state === "running" || rbState?.state === "starting";
+
+  const onStartRobustness = async () => {
+    setError(null);
+    setRbResult(null);
+    setRbState({ state: "starting" });
+    try {
+      const sessions_cfg = Object.fromEntries(
+        (sessions || [])
+          .filter((s) => s.name && s.enabled)
+          .map((s) => [s.name, { enabled: true, start: s.start, end: s.end }])
+      );
+      await startWalkForwardRobustness({
+        strategy_id: strategyId,
+        symbol,
+        timeframe,
+        start_time: dateStrToEpoch(range.start),
+        end_time:   dateStrToEpoch(range.end, true),
+        base_params: baseParams,
+        search_space: searchSpace,
+        is_bars: isBars,
+        oos_bars: oosBars,
+        n_trials: nTrials,
+        n_workers: nWorkers,
+        metric,
+        embargo_bars: embargoBars,
+        purge_radius: purgeRadius,
+        sessions_cfg: Object.keys(sessions_cfg).length > 0 ? sessions_cfg : null,
+        n_seeds: nSeeds,
+      });
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message);
+      setRbState({ state: "idle" });
+    }
+  };
+
+  const onCancelRobustness = async () => {
+    try { await cancelWalkForwardRobustness(); } catch {}
+  };
+
   const onOpenInAnalytics = () => {
     if (!result) return;
     const k = wfKey(result);
@@ -446,7 +526,11 @@ export default function WalkForward() {
   };
 
   const tabs = useMemo(
-    () => TABS.map((t) => ({ ...t, disabled: t.id !== "setup" && !result })),
+    () => TABS.map((t) => ({
+      ...t,
+      // Seed Check has its own run, so it's available without a single-run result.
+      disabled: t.id !== "setup" && t.id !== "seedcheck" && !result,
+    })),
     [result],
   );
 
@@ -520,6 +604,11 @@ export default function WalkForward() {
               <ProgressPanel jobState={jobState} />
             </div>
           )}
+          {(rbRunning || rbState?.state === "cancelled") && (
+            <div ref={progressRef}>
+              <RobustnessProgress rbState={rbState} />
+            </div>
+          )}
 
           <TabBar tabs={tabs} active={tab} onSelect={onTab} />
 
@@ -529,10 +618,20 @@ export default function WalkForward() {
           {tab === "parameters" && result && <ParametersTab result={result} />}
           {tab === "optuna"     && result && <OptunaTab     result={result} />}
           {tab === "robustness" && result && <RobustnessTab result={result} />}
+          {tab === "seedcheck"  && (
+            <SeedCheckTab
+              nSeeds={nSeeds} setNSeeds={setNSeeds}
+              onRun={onStartRobustness} onCancel={onCancelRobustness}
+              rbState={rbState} rbResult={rbResult}
+              disabled={running || rbRunning}
+              hasSearchSpace={(searchSpace || []).length > 0}
+              summary={`${strategyId || "—"} · ${symbol || "—"} ${timeframe} · IS=${isBars}/OOS=${oosBars} · ${nTrials} trials × ${nWorkers} workers`}
+            />
+          )}
           {tab === "regime"     && result && <RegimeTab     result={result} />}
           {tab === "ai"         && result && <AITab         result={result} />}
 
-          {!result && tab !== "setup" && (
+          {!result && tab !== "setup" && tab !== "seedcheck" && (
             <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
               <div className="text-base text-text mb-1">No walk-forward result loaded</div>
               <div className="text-xs">Configure and start a run on the Setup tab.</div>
@@ -591,21 +690,21 @@ function SetupTab({
   onStart, onCancel,
 }) {
   return (
-    <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-4">
-      <div className="text-[11px] uppercase tracking-wider text-muted">Setup</div>
+    <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-5">
 
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <div className={running ? "opacity-50 pointer-events-none" : ""}>
+      {/* ── Data Source ──────────────────────────────────────────────── */}
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Data Source</div>
+        <div className={`grid grid-cols-1 sm:grid-cols-3 gap-3 ${running ? "opacity-50 pointer-events-none" : ""}`}>
           <SymbolSelector value={symbol} options={symbols} datasets={datasets} onChange={setSymbol} />
-        </div>
-        <div className={running ? "opacity-50 pointer-events-none" : ""}>
           <TimeframeSelector value={timeframe} onChange={setTimeframe} available={tfsForSymbol} />
-        </div>
-        <div className={running ? "opacity-50 pointer-events-none" : ""}>
           <DateRangePicker start={range.start} end={range.end} onChange={setRange} />
         </div>
       </div>
 
+      <div className="border-t border-line/40" />
+
+      {/* ── Test Presets ─────────────────────────────────────────────── */}
       <WalkForwardPresetPicker
         dataset={currentDataset}
         timeframe={timeframe}
@@ -613,17 +712,22 @@ function SetupTab({
         disabled={running}
       />
 
-      <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 p-3 flex items-start gap-3">
-        <div className="flex-1">
-          <div className="text-[10px] uppercase tracking-wider text-accent-blue">AI Suggest · Claude Haiku 4.5</div>
-          <div className="text-xs text-muted mt-0.5">
+      <div className="border-t border-line/40" />
+
+      {/* ── AI Suggest ───────────────────────────────────────────────── */}
+      <div className="rounded-lg border border-accent-blue/25 bg-accent-blue/5 px-4 py-3 flex items-center gap-4">
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] uppercase tracking-wider text-accent-blue font-semibold mb-1">
+            AI Suggest · Claude Haiku 4.5
+          </div>
+          <div className="text-xs text-muted leading-relaxed">
             {currentDataset
-              ? <>Have <span className="text-text font-mono">{currentDataset.rows.toLocaleString()}</span> bars · ~{((currentDataset.last_time - currentDataset.first_time) / 86400 / 365).toFixed(1)} years of {symbol} {timeframe}. Claude will pick IS / OOS / trials / metric.</>
+              ? <>Have <span className="text-text font-mono font-semibold">{fmtInt(currentDataset.rows)}</span> bars · ~{((currentDataset.last_time - currentDataset.first_time) / 86400 / 365).toFixed(1)} years of {symbol} {timeframe}. Claude will pick IS / OOS / trials / metric.</>
               : <>Pick a symbol + timeframe with downloaded data, then click for an AI-tuned config.</>}
           </div>
           {aiSuggestError && <div className="text-xs text-loss font-mono mt-1.5">{aiSuggestError}</div>}
           {aiSuggestResult && (
-            <div className="text-xs text-text mt-2 leading-relaxed">
+            <div className="text-xs text-text mt-1.5 leading-relaxed">
               <span className="text-accent-blue">▸</span> {aiSuggestResult.rationale}
               {aiSuggestResult.expected_windows != null && (
                 <span className="text-muted font-mono"> · ~{aiSuggestResult.expected_windows} windows</span>
@@ -634,47 +738,52 @@ function SetupTab({
         <button
           onClick={onAiSuggest}
           disabled={aiSuggestLoading || !currentDataset || !strategyId}
-          className="shrink-0 px-4 py-2 rounded-md bg-accent-grad text-white text-xs font-semibold disabled:opacity-40"
+          className="shrink-0 px-4 py-2 rounded-md bg-accent-grad text-white text-xs font-semibold disabled:opacity-40 cursor-pointer"
         >
           {aiSuggestLoading ? "Thinking…" : (aiSuggestResult ? "Re-suggest" : "AI Suggest")}
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <Field label="Strategy">
-          <select
-            value={strategyId}
-            onChange={(e) => setStrategyId(e.target.value)}
-            className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
-          >
-            {strategies.length === 0 && <option value="">— loading —</option>}
-            {strategies.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
-            ))}
-          </select>
-        </Field>
+      <div className="border-t border-line/40" />
 
-        <Field label="IS bars">
-          <NumInput value={isBars} onChange={setIsBars} min={10} disabled={running} />
-        </Field>
-        <Field label="OOS bars">
-          <NumInput value={oosBars} onChange={setOosBars} min={1} disabled={running} />
-        </Field>
-        <Field label="Trials / window">
-          <NumInput value={nTrials} onChange={setNTrials} min={1} disabled={running} />
-        </Field>
-        <Field label="Metric">
-          <select
-            value={metric}
-            onChange={(e) => setMetric(e.target.value)}
-            disabled={running}
-            className="px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue disabled:opacity-50"
-          >
-            {METRICS.map((m) => (
-              <option key={m.id} value={m.id}>{m.label}</option>
-            ))}
-          </select>
-        </Field>
+      {/* ── Optimization Parameters ──────────────────────────────────── */}
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Optimization</div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+          <Field label="Strategy">
+            <select
+              value={strategyId}
+              onChange={(e) => setStrategyId(e.target.value)}
+              className="w-full px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue"
+            >
+              {strategies.length === 0 && <option value="">— loading —</option>}
+              {strategies.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="IS bars">
+            <NumInput value={isBars} onChange={setIsBars} min={10} disabled={running} />
+          </Field>
+          <Field label="OOS bars">
+            <NumInput value={oosBars} onChange={setOosBars} min={1} disabled={running} />
+          </Field>
+          <Field label="Trials / window">
+            <NumInput value={nTrials} onChange={setNTrials} min={1} disabled={running} />
+          </Field>
+          <Field label="Metric">
+            <select
+              value={metric}
+              onChange={(e) => setMetric(e.target.value)}
+              disabled={running}
+              className="w-full px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue disabled:opacity-50"
+            >
+              {METRICS.map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+          </Field>
+        </div>
       </div>
 
       <WindowScheduleHint
@@ -684,9 +793,12 @@ function SetupTab({
         embargoBars={embargoBars}
       />
 
-      <div className="flex items-center gap-3">
-        <Field label={`Workers (CPUs)`}>
-          <div className="flex items-center gap-3 min-w-[280px]">
+      <div className="border-t border-line/40" />
+
+      {/* ── Workers + Rigor ──────────────────────────────────────────── */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <Field label="Workers (CPUs)">
+          <div className="flex items-center gap-3">
             <input
               type="range"
               min={1}
@@ -694,42 +806,42 @@ function SetupTab({
               step={1}
               value={Math.min(nWorkers, maxWorkers)}
               onChange={(e) => setNWorkers(parseInt(e.target.value, 10) || 1)}
-              className="w-44 accent-accent-blue"
+              className="flex-1 accent-accent-blue"
               disabled={running}
-              title="Parallel Optuna trials per window. 1 = sequential and fully reproducible (same seed → same result). >1 is faster but non-deterministic."
+              title="Number of walk-forward windows optimized in parallel, each on its own CPU core."
             />
-            <span className="font-mono text-sm tabular-nums w-12 text-right">
+            <span className="font-mono text-sm tabular-nums w-14 text-right shrink-0">
               {nWorkers} / {maxWorkers}
             </span>
           </div>
+          <div className="text-[11px] text-muted/70 mt-1">
+            Parallel windows, one per CPU core. Reproducible at any count.
+          </div>
         </Field>
-        <span className="text-[11px] text-muted/70">
-          Parallel Optuna trials per window. 1 = sequential (stable, reproducible).
-          {nWorkers > 1 && <> <span className="text-amber-400">·  results non-deterministic above 1.</span></>}
-        </span>
+        <div className="space-y-2">
+          <div className="text-[11px] uppercase tracking-wider text-muted">Rigor (optional)</div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Embargo bars">
+              <NumInput value={embargoBars} onChange={setEmbargoBars} min={0} />
+            </Field>
+            <Field label="Purge radius">
+              <NumInput value={purgeRadius} onChange={setPurgeRadius} min={0} />
+            </Field>
+          </div>
+          <div className="text-[11px] text-muted/70">
+            Embargo = bars skipped between IS and OOS. Purge = bars trimmed off IS right edge.
+          </div>
+        </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-3 pt-2 border-t border-line/40">
-        <div className="text-[11px] uppercase tracking-wider text-muted">Rigor (optional)</div>
-        <Field label="Embargo bars">
-          <NumInput value={embargoBars} onChange={setEmbargoBars} min={0} />
-        </Field>
-        <Field label="Purge radius">
-          <NumInput value={purgeRadius} onChange={setPurgeRadius} min={0} />
-        </Field>
-        <span className="text-[11px] text-muted/70 max-w-md">
-          Embargo = bars skipped between IS and OOS (prevents leakage from straddling indicators).
-          Purge = bars trimmed off the right edge of IS (purged CV).
-        </span>
-      </div>
       {embargoBars >= oosBars && (
         <div className="text-loss text-[11px] bg-loss/10 border border-loss/30 rounded px-2 py-1">
-          ⚠ Embargo bars must be less than OOS bars ({oosBars}).
+          Embargo bars must be less than OOS bars ({fmtInt(oosBars)}).
         </div>
       )}
       {purgeRadius >= isBars && (
         <div className="text-loss text-[11px] bg-loss/10 border border-loss/30 rounded px-2 py-1">
-          ⚠ Purge radius must be less than IS bars ({isBars}).
+          Purge radius must be less than IS bars ({fmtInt(isBars)}).
         </div>
       )}
 
@@ -755,11 +867,11 @@ function SetupTab({
         </div>
       )}
 
-      <div className="flex items-center justify-end gap-3 pt-2">
+      <div className="flex items-center justify-end gap-3 pt-2 border-t border-line/40">
         {running ? (
           <button
             onClick={onCancel}
-            className="px-4 py-2 rounded-md bg-loss/15 text-loss border border-loss/40 text-sm font-semibold"
+            className="px-5 py-2 rounded-md bg-loss/15 text-loss border border-loss/40 text-sm font-semibold cursor-pointer"
           >
             Cancel
           </button>
@@ -767,7 +879,7 @@ function SetupTab({
           <button
             onClick={onStart}
             disabled={!symbol || !strategyId || embargoBars >= oosBars || purgeRadius >= isBars}
-            className="px-4 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-40"
+            className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-40 cursor-pointer"
           >
             Start Walk-Forward
           </button>
@@ -1687,6 +1799,49 @@ function OptunaParamScatter({ windows, paramName }) {
 // ---------------------------------------------------------------------------
 // ROBUSTNESS — robustness KPI tiles (C.5 adds the fan chart)
 // ---------------------------------------------------------------------------
+
+function SeedCheckTab({ nSeeds, setNSeeds, onRun, onCancel, rbState, rbResult, disabled, hasSearchSpace, summary }) {
+  const running = rbState?.state === "running" || rbState?.state === "starting";
+  return (
+    <div className="space-y-5">
+      <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-3">
+        <div>
+          <h2 className="text-lg font-semibold">Seed Check — multi-seed robustness</h2>
+          <p className="text-sm text-muted mt-1">
+            Re-runs your current Walk-Forward setup across several optimizer seeds. Each seed
+            makes the optimizer explore a different path — if results cluster, the edge is real;
+            if they scatter or flip sign, it was likely luck from one seed (overfitting). Each
+            seed uses all your CPU cores; seeds run back-to-back.
+          </p>
+        </div>
+        <div className="text-xs font-mono text-muted">uses your Setup config: {summary}</div>
+        {!hasSearchSpace && (
+          <div className="rounded-md border border-amber-400/40 bg-amber-400/5 px-3 py-2 text-xs text-amber-400">
+            Add at least one parameter to the search space on the Setup tab — robustness needs something to optimize.
+          </div>
+        )}
+        <div className="flex items-center gap-3">
+          <Field label="Seeds">
+            <NumInput value={nSeeds} onChange={setNSeeds} min={2} max={50} />
+          </Field>
+          {running ? (
+            <button onClick={onCancel}
+              className="px-4 py-2 rounded-md text-sm font-semibold border border-loss/50 text-loss hover:bg-loss/10 transition">
+              Cancel
+            </button>
+          ) : (
+            <button onClick={onRun} disabled={disabled || !hasSearchSpace}
+              className="px-4 py-2 rounded-md text-sm font-semibold bg-accent-grad text-white disabled:opacity-40 disabled:cursor-not-allowed">
+              Run robustness ({nSeeds} seeds)
+            </button>
+          )}
+        </div>
+      </section>
+
+      {rbResult && <RobustnessResults rbResult={rbResult} />}
+    </div>
+  );
+}
 
 function RobustnessTab({ result }) {
   const rob = result?.analytics?.advanced?.robustness || result?.analytics?.robustness || {};

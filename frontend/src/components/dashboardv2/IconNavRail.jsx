@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { socket } from "../../services/socket.js";
 import { logout } from "../../services/auth.js";
 import LiveClock from "../LiveClock.jsx";
+import BrandAtom from "../BrandAtom.jsx";
 
 /**
  * Dashboard V2-only navigation: a thin far-left icon rail that replaces the
@@ -41,7 +42,9 @@ export default function IconNavRail({ view = "dashboardv2" }) {
   return (
     <nav className="w-16 shrink-0 flex flex-col items-center border-r border-line bg-bg-panel/60 backdrop-blur py-3 gap-1">
       {/* logo */}
-      <div className="w-9 h-9 rounded-lg bg-accent-grad mb-2" title="Quantlab" />
+      <div className="w-9 h-9 flex items-center justify-center mb-2" title="Quantlab">
+        <BrandAtom size={34} />
+      </div>
 
       {/* primary nav (split so Validation flyout slots in after Dashboard V2) */}
       <RailLink {...PRIMARY[0]} active={view === PRIMARY[0].view} />

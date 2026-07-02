@@ -67,9 +67,13 @@ def run_backtest_portfolio():
     except (TypeError, ValueError) as e:
         return jsonify({"error": f"invalid request: {e}"}), 400
 
+    # Socket id of the requesting client (optional) — lets the runner stream live
+    # progress (stage + HMM refit %) back to just this client while the run blocks.
+    client_sid = body.get("sid") or None
+
     try:
         result = portfolio_runner.run_portfolio(specs, start_time=start_time,
-                                                end_time=end_time)
+                                                end_time=end_time, sid=client_sid)
     except KeyError as e:
         return jsonify({"error": str(e)}), 404
     except FileNotFoundError as e:

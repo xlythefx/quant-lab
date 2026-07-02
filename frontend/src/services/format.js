@@ -50,3 +50,21 @@ export function fmtDate(epochSec) {
   if (!_isNum(epochSec)) return "—";
   return new Date(epochSec * 1000).toISOString().slice(0, 10);
 }
+
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Human-readable UTC date from epoch seconds, e.g. "Feb 03, 2026". */
+export function fmtDateLong(epochSec) {
+  if (!_isNum(epochSec)) return "—";
+  const d = new Date(epochSec * 1000);
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${MONTHS_SHORT[d.getUTCMonth()]} ${day}, ${d.getUTCFullYear()}`;
+}
+
+/** Human-readable date from "YYYY-MM-DD" string, e.g. "Feb 03, 2026". */
+export function fmtDateStr(dateStr) {
+  if (!dateStr) return "—";
+  const [y, m, d] = dateStr.split("-");
+  if (!y || !m || !d) return dateStr;
+  return `${MONTHS_SHORT[parseInt(m, 10) - 1]} ${d.padStart(2, "0")}, ${y}`;
+}

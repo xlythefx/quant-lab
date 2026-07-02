@@ -23,6 +23,17 @@ Databento for CME futures, TradeStation).
   validating ideas for myself. Optimize for "works and I understand it," not for production
   hardening, multi-user scale, or enterprise polish.
 
+## Display formatting (always follow these)
+
+- **Dates** — always display as `Mon DD, YYYY` (e.g. `Feb 03, 2021`). Never bare ISO (`2021-02-03`).
+  - From epoch seconds → `fmtDateLong(epochSec)` in `frontend/src/services/format.js`
+  - From `"YYYY-MM-DD"` string → `fmtDateStr(dateStr)` in the same file
+  - Date ranges: `Feb 03, 2021 – May 19, 2026` (en-dash, no hyphens)
+- **Numbers** — always comma-separated with 2 decimal places: `132,312.00`, `1,231.00`
+  - Plain numbers → `fmtNum(v)` · integers (bar counts, trades) → `fmtInt(v)` · USD → `fmtUsd(v)`
+  - Never use raw `.toLocaleString()`, `.toFixed()`, or bare template literals for displayed numbers
+- **Percentages** — `+3.46%` / `-1.20%` via `fmtPct(v)` (sign forced) or `fmtPct(v, false)` (unsigned)
+
 ## Environment (important)
 
 - **Python 3.14** is the only interpreter installed (no venv). The full backend stack is

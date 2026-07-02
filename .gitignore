@@ -38,3 +38,9 @@ nginx_eu_current.conf
 
 # External data pulled from VPS / other machines
 external-data/
+
+# Generated graphify knowledge-graph output (large, regenerated locally)
+graphify-out/
+
+# Obsidian editor config (vault notes themselves are kept)
+.obsidian/

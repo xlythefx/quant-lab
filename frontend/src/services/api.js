@@ -102,9 +102,11 @@ export async function runBacktest({ strategy_id, symbol, timeframe, params, star
  *           stats, analytics, per_strategy: {sid: {trades, equity, stats,
  *           analytics, candles, overlays, spec}}}`.
  */
-export async function runPortfolioBacktest({ strategies, start_time, end_time }) {
+export async function runPortfolioBacktest({ strategies, start_time, end_time, sid }) {
+  // `sid` (socket id) lets the backend stream live stage/HMM-refit progress back
+  // to just this client while the (blocking) run computes. Optional.
   const { data } = await api.post("/api/backtest/portfolio", {
-    strategies, start_time, end_time,
+    strategies, start_time, end_time, sid,
   }, { timeout: 900_000 });
   return data;
 }
@@ -140,6 +142,27 @@ export async function getWalkForwardStatus() {
 
 export async function getWalkForwardLastResult() {
   const { data } = await api.get("/api/walkforward/last_result");
+  return data.result;
+}
+
+// Multi-seed robustness — run the same WFA config across N optimizer seeds.
+export async function startWalkForwardRobustness(spec) {
+  const { data } = await api.post("/api/walkforward/robustness/start", spec);
+  return data; // {job_id, seeds, ok}
+}
+
+export async function cancelWalkForwardRobustness() {
+  const { data } = await api.post("/api/walkforward/robustness/cancel");
+  return data; // {ok}
+}
+
+export async function getWalkForwardRobustnessStatus() {
+  const { data } = await api.get("/api/walkforward/robustness/status");
+  return data;
+}
+
+export async function getWalkForwardRobustnessLastResult() {
+  const { data } = await api.get("/api/walkforward/robustness/last_result");
   return data.result;
 }
 
@@ -356,6 +379,85 @@ export async function aiSuggestWalkForward(meta) {
   const { data } = await api.post("/api/ai/suggest/walkforward",
     meta, { timeout: 180_000 });
   return data; // {suggestion: {is_bars, oos_bars, n_trials, metric, rationale, expected_windows}, ...}
+}
+
+// ---------------------------------------------------------------------------
+// AI Strategy Builder (SSE streaming, tool-using chat behind the Sandbox)
+// ---------------------------------------------------------------------------
+
+/**
+ * Stream one strategy-builder turn. POSTs the conversation + context and reads
+ * the text/event-stream response, dispatching parsed events to `handlers`:
+ *   onToken({text})            streaming assistant text
+ *   onProposal({tool_use_id, name, input})  mutating tool awaiting approval
+ *   onBacktest({result})       full backtest payload for the chart
+ *   onToolRan({name, summary}) a safe tool finished
+ *   onStrategiesChanged()      a file changed — refresh strategy lists
+ *   onState({messages})        updated opaque message array to persist + resend
+ *   onDone({awaiting_approval?})  turn finished
+ *   onError({message})
+ *   onClose()                  stream closed (always fires last)
+ * Returns an AbortController so the caller can cancel.
+ */
+export function streamStrategyBuilder(payload, handlers = {}) {
+  const controller = new AbortController();
+  (async () => {
+    try {
+      const res = await fetch(`${baseURL}/api/strategy-builder/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        let msg = `HTTP ${res.status}`;
+        try { const j = await res.json(); msg = j.error || msg; } catch { /* ignore */ }
+        handlers.onError?.({ message: msg });
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {   // SSE frames split on blank line
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          _dispatchSse(frame, handlers);
+        }
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") handlers.onError?.({ message: e.message });
+    } finally {
+      handlers.onClose?.();
+    }
+  })();
+  return controller;
+}
+
+function _dispatchSse(frame, handlers) {
+  let event = "message";
+  const dataLines = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (!dataLines.length) return;
+  let data;
+  try { data = JSON.parse(dataLines.join("\n")); } catch { return; }
+  ({
+    token: handlers.onToken,
+    proposal: handlers.onProposal,
+    backtest_result: handlers.onBacktest,
+    tool_ran: handlers.onToolRan,
+    strategies_changed: handlers.onStrategiesChanged,
+    state: handlers.onState,
+    done: handlers.onDone,
+    error: handlers.onError,
+  })[event]?.(data);
 }
 
 // ---------------------------------------------------------------------------

@@ -21,9 +21,10 @@ class ParamType(str, Enum):
     INT = "int"
     FLOAT = "float"
     BOOL = "bool"
+    SELECT = "select"       # single-choice dropdown; see ParamSpec.options
     SESSIONS = "sessions"   # multi-checkbox: tokyo / london / ny_am / ny_pm
     SIDES = "sides"         # multi-checkbox: long / short
-    REGIMES = "regimes"     # multi-checkbox: the 5 regime labels (allow entries in checked regimes)
+    REGIMES = "regimes"     # multi-checkbox: the regime/mood labels (allow entries in checked ones)
 
 
 @dataclass
@@ -36,6 +37,8 @@ class ParamSpec:
     step: Optional[float] = None
     group: str = "General"
     description: str = ""
+    # For SELECT: the choices, as a list of {"value": ..., "label": ...} dicts.
+    options: Optional[list] = None
 
     def to_dict(self) -> dict:
         return {
@@ -47,6 +50,7 @@ class ParamSpec:
             "step": self.step,
             "group": self.group,
             "description": self.description,
+            "options": self.options,
         }
 
 

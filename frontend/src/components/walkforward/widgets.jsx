@@ -64,6 +64,47 @@ export function ProgressBar({ label, pct }) {
   );
 }
 
+// "372" -> "6:12", "3725" -> "1h 2m"
+export function fmtDur(s) {
+  if (s == null || !Number.isFinite(s)) return "—";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}:${String(ss).padStart(2, "0")}`;
+}
+
+// Per-core utilization bars + an overall CPU readout. `percore` is a list of %.
+export function CpuMeter({ cpu = 0, percore = [], active = 0, workers = 0 }) {
+  const barColor = (v) => (v >= 85 ? "bg-loss" : v >= 50 ? "bg-amber-400" : "bg-accent-blue");
+  return (
+    <div className="rounded-lg border border-line bg-bg-elev/40 p-3 space-y-2">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="uppercase tracking-wider text-muted">CPU</span>
+        <span className="font-mono text-text">
+          {Math.round(cpu)}%
+          {workers > 0 && (
+            <span className="text-muted"> · {active}/{workers} worker{workers === 1 ? "" : "s"} busy</span>
+          )}
+        </span>
+      </div>
+      {/* overall */}
+      <div className="h-1.5 rounded bg-bg-elev/60 overflow-hidden">
+        <div className={`h-full transition-all ${barColor(cpu)}`} style={{ width: `${Math.min(100, cpu)}%` }} />
+      </div>
+      {/* per-core */}
+      {percore.length > 0 && (
+        <div className="flex items-end gap-0.5 h-9 pt-1">
+          {percore.map((c, i) => (
+            <div key={i} className="flex-1 bg-bg-elev/60 rounded-sm overflow-hidden flex items-end" title={`core ${i}: ${Math.round(c)}%`}>
+              <div className={`w-full rounded-sm ${barColor(c)}`} style={{ height: `${Math.max(3, Math.min(100, c))}%` }} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ProgressPanel({ jobState }) {
   const { window_idx = 0, total_windows = 0, trial_idx = 0, n_trials = 0 } = jobState || {};
   const wPct = total_windows ? (window_idx / total_windows) * 100 : 0;
@@ -76,13 +117,26 @@ export function ProgressPanel({ jobState }) {
         <div className="text-[11px] uppercase tracking-wider text-muted">
           {cancelled ? "Cancelled" : "Running"}
         </div>
-        <div className="text-xs font-mono text-muted">
-          job {jobState?.job_id || "—"}
-          {jobState?.eta_seconds != null && (
-            <> · ETA {Math.round(jobState.eta_seconds)}s</>
-          )}
-        </div>
+        <div className="text-xs font-mono text-muted">job {jobState?.job_id || "—"}</div>
       </div>
+
+      {/* Elapsed / ETA / workers strip */}
+      <div className="flex items-center gap-4 text-xs font-mono">
+        <span className="text-muted">elapsed <span className="text-text">{fmtDur(jobState?.elapsed_seconds)}</span></span>
+        <span className="text-muted">ETA <span className="text-text">{fmtDur(jobState?.eta_seconds)}</span></span>
+        {jobState?.n_workers > 0 && (
+          <span className="text-muted ml-auto">
+            {jobState?.active_workers ?? 0}/{jobState.n_workers} cores
+          </span>
+        )}
+      </div>
+
+      <CpuMeter
+        cpu={jobState?.cpu_percent}
+        percore={jobState?.cpu_percent_percore || []}
+        active={jobState?.active_workers}
+        workers={jobState?.n_workers}
+      />
 
       <div className="space-y-2">
         <ProgressBar label={`Window ${window_idx} / ${total_windows}`} pct={wPct} />
@@ -108,6 +162,100 @@ export function ProgressPanel({ jobState }) {
         </details>
       )}
     </section>
+  );
+}
+
+// -- Multi-seed robustness (Seed Check tab) -----------------------------------
+
+export function RobustnessProgress({ rbState }) {
+  const { seed_idx = 0, n_seeds = 0, window_idx = 0, total_windows = 0 } = rbState || {};
+  const cancelled = rbState?.state === "cancelled";
+  const wFrac = total_windows ? window_idx / total_windows : 0;
+  const seedPct = n_seeds ? (((Math.max(0, seed_idx - 1)) + wFrac) / n_seeds) * 100 : 0;
+  const wPct = total_windows ? wFrac * 100 : 0;
+  return (
+    <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] uppercase tracking-wider text-muted">
+          {cancelled ? "Cancelled" : "Robustness running"}
+        </div>
+        <div className="text-xs font-mono text-muted">job {rbState?.job_id || "—"}</div>
+      </div>
+      <div className="flex items-center gap-4 text-xs font-mono">
+        <span className="text-muted">elapsed <span className="text-text">{fmtDur(rbState?.elapsed_seconds)}</span></span>
+        <span className="text-muted">ETA <span className="text-text">{fmtDur(rbState?.eta_seconds)}</span></span>
+        {rbState?.n_workers > 0 && (
+          <span className="text-muted ml-auto">{rbState?.active_workers ?? 0}/{rbState.n_workers} cores</span>
+        )}
+      </div>
+      <CpuMeter cpu={rbState?.cpu_percent} percore={rbState?.cpu_percent_percore || []}
+                active={rbState?.active_workers} workers={rbState?.n_workers} />
+      <div className="space-y-2">
+        <ProgressBar label={`Seed ${seed_idx} / ${n_seeds}`} pct={seedPct} />
+        <ProgressBar label={`Window ${window_idx} / ${total_windows} (current seed)`} pct={wPct} />
+      </div>
+    </section>
+  );
+}
+
+const VERDICT_TONE = {
+  robust: { box: "border-accent-cyan/40 bg-accent-cyan/5", text: "text-accent-cyan", label: "Robust" },
+  mixed:  { box: "border-amber-400/40 bg-amber-400/5", text: "text-amber-400", label: "Mixed" },
+  weak:   { box: "border-amber-400/40 bg-amber-400/5", text: "text-amber-400", label: "Weak" },
+  fragile:{ box: "border-loss/40 bg-loss/10", text: "text-loss", label: "Fragile" },
+  inconclusive: { box: "border-line bg-bg-elev/40", text: "text-muted", label: "Inconclusive" },
+};
+
+function SummaryStat({ label, s, fmt }) {
+  if (!s) return null;
+  return (
+    <div className="rounded-lg border border-line bg-bg-elev/40 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-muted/70">{label}</div>
+      <div className="text-sm font-mono text-text">{fmt(s.median)}</div>
+      <div className="text-[10px] font-mono text-muted">
+        {fmt(s.min)} … {fmt(s.max)} · σ {fmt(s.std)}
+      </div>
+    </div>
+  );
+}
+
+export function RobustnessResults({ rbResult }) {
+  const { per_seed = [], summary = {}, verdict = {} } = rbResult || {};
+  const tone = VERDICT_TONE[verdict.label] || VERDICT_TONE.inconclusive;
+  const pctF = (v) => (v == null ? "—" : fmtPct(v));
+  const numF = (v) => (v == null ? "—" : fmtNum(v));
+  return (
+    <div className="space-y-4">
+      <div className={`rounded-xl border p-4 ${tone.box}`}>
+        <div className={`text-xs uppercase tracking-wider font-semibold ${tone.text}`}>
+          {tone.label} · {per_seed.length} seed{per_seed.length === 1 ? "" : "s"}
+        </div>
+        <div className="text-sm text-text mt-1">{verdict.text}</div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <SummaryStat label="Return % (median)" s={summary.total_return_pct} fmt={pctF} />
+        <SummaryStat label="Sharpe (median)" s={summary.sharpe} fmt={numF} />
+        <SummaryStat label="Max DD % (median)" s={summary.max_drawdown_pct} fmt={pctF} />
+        <SummaryStat label="Trades (median)" s={summary.trades} fmt={(v) => fmtInt(Math.round(v ?? 0))} />
+      </div>
+
+      <div className="rounded-xl border border-line bg-bg-panel/40 overflow-hidden">
+        <div className="grid grid-cols-5 gap-2 px-3 py-2 text-[10px] uppercase tracking-wider text-muted/70 border-b border-line">
+          <span>Seed</span><span className="text-right">Return %</span><span className="text-right">Sharpe</span>
+          <span className="text-right">Max DD %</span><span className="text-right">Trades</span>
+        </div>
+        {per_seed.map((p) => (
+          <div key={p.seed} className="grid grid-cols-5 gap-2 px-3 py-1.5 text-xs font-mono border-b border-line/30 last:border-b-0">
+            <span className="text-muted">#{p.seed}</span>
+            <span className={`text-right ${(p.total_return_pct ?? 0) >= 0 ? "text-profit" : "text-loss"}`}>{pctF(p.total_return_pct)}</span>
+            <span className="text-right text-text">{numF(p.sharpe)}</span>
+            <span className="text-right text-loss">{pctF(p.max_drawdown_pct)}</span>
+            <span className="text-right text-text">{fmtInt(p.trades)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

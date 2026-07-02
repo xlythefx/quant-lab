@@ -3,12 +3,20 @@ import TimePickerModal from "./TimePickerModal.jsx";
 import { getTz, convertUtcHHmm, tzShort } from "../services/timezone.js";
 import { getPresets, savePresets as apiSavePresets } from "../services/api.js";
 
+// Friendly labels for the canonical trading sessions. Strategies may declare
+// their own session keys (e.g. a single "asia" / "entry" window) — those render
+// with a title-cased fallback label via `sessionLabel()` below.
 const SESSION_LABELS = {
   tokyo:  "Tokyo",
   london: "London",
   ny_am:  "NY morning",
   ny_pm:  "NY afternoon",
 };
+
+// Label for a session key: canonical name if known, else title-cased key
+// (e.g. "asia" → "Asia", "ny_am" → "Ny am").
+const sessionLabel = (key) =>
+  SESSION_LABELS[key] || key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
 export default function StrategyEditor({
   open, schema, params, onChange, onClose, onApply, onResetDefaults, onSaveAsDefault, color,
@@ -69,6 +77,17 @@ export default function StrategyEditor({
     setDraft(next);
     onChange?.(next);
   };
+
+  // Regime group: "use_regime" is the master switch; the method (adx/five/hmm)
+  // decides which "allowed ..." set is relevant. Grey out the knobs when the
+  // master is off, and hide the allowed-set that doesn't match the method.
+  const regimeOff = (schema || []).some((s) => s.name === "use_regime") && !draft.use_regime;
+  const regimeMethod = draft.regime_method ?? (draft.use_five_regime ? "five" : "adx");
+  const REGIME_DEP = ["regime_method", "regime_adx_period", "regime_adx_threshold", "allowed_regimes", "allowed_hmm_moods"];
+  const regimeDisabled = (name) => regimeOff && REGIME_DEP.includes(name);
+  const regimeHidden = (name) =>
+    (name === "allowed_regimes" && regimeMethod !== "five") ||
+    (name === "allowed_hmm_moods" && regimeMethod !== "hmm");
 
   const applyPreset = (name) => {
     // Check user presets first, then built-ins
@@ -179,10 +198,19 @@ export default function StrategyEditor({
         {Object.entries(groups).map(([group, specs]) => (
           <section key={group}>
             <h4 className="text-[11px] uppercase tracking-wider text-muted mb-2">{group}</h4>
+            {group === "Regime" && regimeOff && (
+              <div className="text-[11px] text-amber-400/90 mb-2">Turn on “use regime” to enable the regime filter.</div>
+            )}
             <div className="space-y-3">
-              {specs.map((spec) => (
-                <ParamInput key={spec.name} spec={spec} value={draft[spec.name]} onChange={setField} />
-              ))}
+              {specs.map((spec) => {
+                if (regimeHidden(spec.name)) return null;       // hide the allowed-set that doesn't match the method
+                const disabled = regimeDisabled(spec.name);     // grey out regime knobs when the master switch is off
+                return (
+                  <div key={spec.name} className={disabled ? "opacity-40 pointer-events-none" : ""}>
+                    <ParamInput spec={spec} value={draft[spec.name]} onChange={setField} />
+                  </div>
+                );
+              })}
             </div>
           </section>
         ))}
@@ -294,6 +322,26 @@ function ParamInput({ spec, value, onChange }) {
       <Row label={spec.name} hint={spec.description}>
         <Toggle checked={!!v} onChange={(b) => onChange(spec.name, b)} />
       </Row>
+    );
+  }
+  if (spec.type === "select") {
+    const opts = spec.options || [];
+    return (
+      <div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-muted">{spec.name}</span>
+          <select
+            value={v ?? spec.default}
+            onChange={(e) => onChange(spec.name, e.target.value)}
+            className="px-2 py-1 rounded-md bg-bg-elev border border-line font-mono text-xs focus:outline-none focus:border-accent-blue text-text"
+          >
+            {opts.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        {spec.description && <div className="text-[11px] text-muted mt-1">{spec.description}</div>}
+      </div>
     );
   }
   if (spec.type === "sessions") {
@@ -453,11 +501,18 @@ function SessionsField({ spec, value, onChange }) {
 
   const userIsSpecial = tz === "Etc/UTC" || tz === "America/New_York" || tz === "Asia/Manila";
 
+  // Render the session windows the strategy actually declares (spec.default's
+  // keys — the same set the backend merges against), not a fixed list. A
+  // single-window strategy shows one row; VWMA still shows its four.
+  const sessionKeys = Object.keys(spec.default || {});
+  const keys = sessionKeys.length ? sessionKeys : Object.keys(SESSION_LABELS);
+
   return (
     <div>
       {spec.description && <div className="text-[11px] text-muted mb-2">{spec.description}</div>}
       <div className="space-y-2">
-        {Object.entries(SESSION_LABELS).map(([key, label]) => {
+        {keys.map((key) => {
+          const label = sessionLabel(key);
           const cfg = cfgFor(key);
           const setSub = (patch) => onChange(spec.name, { ...v, [key]: { ...cfg, ...patch } });
           return (

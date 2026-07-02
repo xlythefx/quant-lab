@@ -18,22 +18,36 @@ export const ADX_REGIME_COLORS = {
   "Trending": "#ef4444",
 };
 
-// Palette for HMM regimes (dynamic auto-named states). Ordered bear→bull to match
-// the backend's canonical state order (ascending mean trend).
+// HMM moods → semantic color. Fixed taxonomy (bearish reds, bullish greens,
+// ranging slate); "Undecided" (low confidence) and "Warmup" (pre-fit) are dim grey.
+export const HMM_MOOD_COLORS = {
+  "Bearish Volatile": "#dc2626",
+  "Bearish Normal":   "#f87171",
+  "Ranging":          "#94a3b8",
+  "Bullish Normal":   "#4ade80",
+  "Bullish Volatile": "#16a34a",
+  "Undecided":        "#64748b",
+};
+
+// Fallback palette for any HMM label outside the fixed taxonomy (e.g. a custom
+// state count that produces an unexpected name) — assigned in order.
 export const HMM_PALETTE = ["#ef4444", "#f59e0b", "#a78bfa", "#38bdf8", "#22c55e", "#14b8a6"];
 
 /**
- * Build a {label -> color} map for a regime label set. Known deterministic labels
- * keep their semantic color; unknown (HMM) labels are assigned from HMM_PALETTE in
- * order; "Warmup" is always slate grey. Pass the result as RegimeRibbon's `colors`.
+ * Build a {label -> color} map for a regime label set. Deterministic rule labels
+ * keep their semantic color (REGIME_COLORS); HMM moods get their fixed semantic
+ * color (HMM_MOOD_COLORS); anything else falls back to HMM_PALETTE in order.
+ * "Undecided" and "Warmup" are always grey. Pass as RegimeRibbon's `colors`.
  */
 export function buildRegimeColors(labels = []) {
   const map = {};
   let pi = 0;
   for (const lab of labels) {
     if (REGIME_COLORS[lab]) map[lab] = REGIME_COLORS[lab];
+    else if (HMM_MOOD_COLORS[lab]) map[lab] = HMM_MOOD_COLORS[lab];
     else map[lab] = HMM_PALETTE[pi++ % HMM_PALETTE.length];
   }
+  map["Undecided"] = HMM_MOOD_COLORS["Undecided"];
   map["Warmup"] = "#475569";
   return map;
 }

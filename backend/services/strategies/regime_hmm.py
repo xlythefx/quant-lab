@@ -44,7 +44,7 @@ def hmm_params(params: dict) -> dict:
             return default
 
     return {
-        "n_states": max(2, min(6, _g("n_states", 4, int))),
+        "n_states": max(2, min(6, _g("n_states", 5, int))),
         "trend_window": _g("trend_window", 36, int),
         "rv_window": _g("rv_window", 20, int),
         "hurst_window": _g("hurst_window", 250, int),
@@ -54,6 +54,14 @@ def hmm_params(params: dict) -> dict:
         "expanding": bool(p.get("expanding", False)),
         "seed": _g("seed", 42, int),
         "n_iter": _g("n_iter", 25, int),       # low: refits warm-start from prev model
+        # --- mood naming (display only; does not affect the fit) ---
+        # A state is "Ranging" when its directional drift is weak relative to its
+        # noise: |trend / rv| < ranging_ratio. Both are ~%/bar so the ratio is
+        # scale-free across symbols/timeframes.
+        "ranging_ratio": max(0.0, _g("ranging_ratio", 0.10, float)),
+        # A bar is "Undecided" when the filtered-posterior confidence in its
+        # best state is below this. 0 disables it.
+        "undecided_below": min(1.0, max(0.0, _g("undecided_below", 0.5, float))),
     }
 
 
@@ -228,13 +236,31 @@ def _order_states(means_scaled):
     return np.lexsort((means_scaled[:, 1], means_scaled[:, 0]))   # by trend, then vol
 
 
-def _human_label(mean, vol_terciles):
-    ret, rv, hurst = float(mean[0]), float(mean[1]), float(mean[2])
-    lo, hi = vol_terciles
-    direction = "Bull" if ret > 0 else "Bear" if ret < 0 else "Flat"
-    risk = "Volatile" if rv >= hi else "Calm" if rv <= lo else "Normal"
-    persist = "trending" if hurst > 0.55 else "mean-rev" if hurst < 0.45 else "noisy"
-    return f"{direction}/{risk} ({persist})"
+# Fixed, human-readable mood taxonomy. Two states that land in the same bucket
+# are MERGED into one mood (see causal_hmm_labels) — no "#1/#2" suffixes. Listed
+# bearish -> ranging -> bullish so legends read in a sensible order.
+ORDER = [
+    "Bearish Volatile", "Bearish Normal", "Ranging",
+    "Bullish Normal", "Bullish Volatile",
+]
+
+
+def _mood_label(mean, rv_median, ranging_ratio):
+    """Name one state from its RAW per-state feature means.
+
+    Direction comes from a drift-to-noise ratio r = trend / rv (both ~%/bar, so
+    r is scale-free): |r| < ranging_ratio -> "Ranging", else Bullish/Bearish by
+    sign. Volatility is a 2-level split vs the cross-state median rv. "Ranging"
+    carries no volatility qualifier. Hurst is intentionally NOT used (its R/S
+    estimate is biased high, which made every state read "trending").
+    """
+    trend, rv = float(mean[0]), float(mean[1])
+    r = trend / rv if rv > 1e-9 else 0.0
+    if abs(r) < ranging_ratio:
+        return "Ranging"
+    direction = "Bullish" if trend > 0 else "Bearish"
+    risk = "Volatile" if rv >= rv_median else "Normal"
+    return f"{direction} {risk}"
 
 
 def _fit_canonical(X_scaled, k, seed, n_iter, init=None, reg=1e-6):
@@ -275,12 +301,18 @@ def _emit_point(x, active):
 # --------------------------------------------------------------------------- #
 # Public: causal labels
 # --------------------------------------------------------------------------- #
-def causal_hmm_labels(df, params=None) -> dict:
+def causal_hmm_labels(df, params=None, on_progress=None) -> dict:
     """Causal per-bar HMM regime labels for the given OHLC DataFrame.
 
-    Returns dict: times, close (aligned arrays), labels (str per bar; warmup bars
-    -> "Warmup"), confidence (max filtered posterior), state_labels (ordered k human
-    labels), state_means (k,3), pct_time (k,), n_refits, params.
+    Returns dict: times, close (aligned arrays), labels (str per bar; pre-fit bars
+    -> "Warmup", low-confidence bars -> "Undecided"), confidence (max filtered
+    posterior), state_labels (the distinct merged moods present, canonically
+    ordered — may be fewer than n_states), state_means (len(state_labels), 3) and
+    pct_time (len(state_labels),) aligned 1:1 with state_labels, n_refits, params.
+
+    on_progress(done, total): optional callback fired after each rolling refit so
+    callers can report progress during the (slow) fit. `total` is an estimate of
+    the number of refits. Pure otherwise (no I/O); the model still self-learns.
     """
     p = hmm_params(params)
     k = p["n_states"]
@@ -291,6 +323,10 @@ def causal_hmm_labels(df, params=None) -> dict:
             f"insufficient data for causal HMM: {n} usable bars after feature warmup "
             f"(need >= warmup+refit_every). Widen the date range or lower warmup/windows."
         )
+
+    # Estimated total refits, for the progress callback (the loop refits every
+    # `refit_every` bars starting at `warmup`).
+    total_refits = max(1, 1 + (n - 1 - p["warmup"]) // p["refit_every"]) if n > p["warmup"] else 1
 
     states = np.full(n, -1, dtype=int)
     conf = np.full(n, np.nan)
@@ -313,6 +349,11 @@ def causal_hmm_labels(df, params=None) -> dict:
             sc_mean, sc_std = mu, sd
             n_refits += 1
             next_refit = i + p["refit_every"]
+            if on_progress is not None:
+                try:
+                    on_progress(n_refits, total_refits)
+                except Exception:
+                    pass  # progress reporting must never break the fit
         if active is None:
             continue
         x = (F[i] - sc_mean) / sc_std
@@ -328,29 +369,53 @@ def causal_hmm_labels(df, params=None) -> dict:
         conf[i] = float(pr.max())
         states[i] = int(np.argmax(pr))
 
-    # --- per-state signatures + human labels (over labeled bars) ---
+    # --- per-state signatures (over labeled bars) ---
     labeled = states >= 0
     total = int(labeled.sum())
+    counts = np.zeros(k, dtype=int)
     means = np.zeros((k, F.shape[1]))
     pct = np.zeros(k)
     for s in range(k):
         m = states == s
-        pct[s] = m.sum() / total if total else 0.0
+        counts[s] = int(m.sum())
+        pct[s] = counts[s] / total if total else 0.0
         if m.any():
             means[s] = F[m].mean(axis=0)
-    lo, hi = np.percentile(means[:, 1], [33.3, 66.7])
-    state_labels = [_human_label(means[s], (lo, hi)) for s in range(k)]
 
-    # Disambiguate duplicate labels (e.g. two "Bear/Volatile") with an index suffix.
-    seen = {}
+    # --- name each state, then MERGE states sharing a mood into one bucket ---
+    # Drift/vol naming uses the cross-state median rv as the Normal|Volatile split.
+    rv_median = float(np.median(means[:, 1])) if k else 0.0
+    per_state_name = [_mood_label(means[s], rv_median, p["ranging_ratio"]) for s in range(k)]
+
+    # Aggregate per mood: bar-count-weighted means, summed pct (exact — shared
+    # denominator `total`). Empty buckets (0 bars) are dropped so a never-visited
+    # state can't pollute the legend. Output is canonically ordered + aligned 1:1.
+    bucket_bars = {}
+    bucket_msum = {}
+    bucket_pct = {}
     for s in range(k):
-        base = state_labels[s]
-        if state_labels.count(base) > 1:
-            seen[base] = seen.get(base, 0) + 1
-            state_labels[s] = f"{base} #{seen[base]}"
+        name = per_state_name[s]
+        bucket_bars[name] = bucket_bars.get(name, 0) + counts[s]
+        bucket_msum[name] = bucket_msum.get(name, np.zeros(F.shape[1])) + counts[s] * means[s]
+        bucket_pct[name] = bucket_pct.get(name, 0.0) + pct[s]
 
+    state_labels = [name for name in ORDER if bucket_bars.get(name, 0) > 0]
+    state_means = np.array(
+        [bucket_msum[name] / bucket_bars[name] for name in state_labels]
+    ) if state_labels else np.zeros((0, F.shape[1]))
+    pct_time = np.array([bucket_pct[name] for name in state_labels])
+
+    # Per-bar labels carry the merged mood name (or "Warmup" before the first fit).
     per_bar = np.array(
-        [state_labels[s] if s >= 0 else "Warmup" for s in states], dtype=object)
+        [per_state_name[s] if s >= 0 else "Warmup" for s in states], dtype=object)
+
+    # "Undecided" overlay: low-confidence bars. Applied to the per-bar labels ONLY
+    # (never to `states`), so per-state stats are computed exactly as before — the
+    # same way "Warmup" is excluded. Disabled when undecided_below == 0.
+    ub = p["undecided_below"]
+    if ub > 0:
+        und = (states >= 0) & (conf < ub)
+        per_bar[und] = "Undecided"
 
     return {
         "times": times,
@@ -358,8 +423,8 @@ def causal_hmm_labels(df, params=None) -> dict:
         "labels": per_bar,
         "confidence": conf,
         "state_labels": state_labels,
-        "state_means": means,
-        "pct_time": pct,
+        "state_means": state_means,
+        "pct_time": pct_time,
         "n_refits": n_refits,
         "params": p,
     }

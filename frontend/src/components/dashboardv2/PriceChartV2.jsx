@@ -16,23 +16,27 @@ import { tradesToMarkers } from "../../services/chartMarkers.js";
 export default function PriceChartV2({
   result, selectedId, active, symbol, timeframe, broker, portfolioId,
 }) {
-  const staticData = useMemo(() => {
-    if (!result) return null;
+  const { staticData, regimeSegments } = useMemo(() => {
+    if (!result) return { staticData: null, regimeSegments: null };
     const isPortfolio = selectedId === portfolioId;
     const ids = isPortfolio ? active.map((s) => s.id) : [selectedId];
 
     const overlaysByStrategy = {};
     const markersByStrategy = {};
     let candles = null;
+    // Regime bands {five, adx, default} from the selected strategy (or the first
+    // regime-aware strategy when the Portfolio aggregate is selected) — mirrors v1.
+    let regimeSegments = null;
     for (const id of ids) {
       const psd = result.per_strategy?.[id];
       if (!psd) continue;
       if (!candles && psd.candles?.length) candles = psd.candles;
+      if (!regimeSegments && psd.regime_segments) regimeSegments = psd.regime_segments;
       overlaysByStrategy[id] = psd.overlays || [];
       markersByStrategy[id] = tradesToMarkers(psd.trades || []);
     }
-    if (!candles) return null;
-    return { candles, overlaysByStrategy, markersByStrategy };
+    if (!candles) return { staticData: null, regimeSegments: null };
+    return { staticData: { candles, overlaysByStrategy, markersByStrategy }, regimeSegments };
   }, [result, selectedId, active, portfolioId]);
 
   // Session highlight bands only make sense for a single, non-24/7 strategy.
@@ -59,6 +63,7 @@ export default function PriceChartV2({
       broker={broker || undefined}
       staticData={staticData}
       sessions={sessions}
+      regimeSegments={regimeSegments}
     />
   );
 }

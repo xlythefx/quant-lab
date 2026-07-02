@@ -3,6 +3,7 @@ import Dashboard from "./pages/Dashboard.jsx";
 import DashboardV2 from "./pages/DashboardV2.jsx";
 import Downloads from "./pages/Downloads.jsx";
 import Strategies from "./pages/Strategies.jsx";
+import StrategySandbox from "./pages/StrategySandbox.jsx";
 import RiskSettings from "./pages/RiskSettings.jsx";
 import Analytics from "./pages/Analytics.jsx";
 import WalkForward from "./pages/WalkForward.jsx";
@@ -42,9 +43,9 @@ export default function App() {
     return <Login />;
   }
 
-  // Authenticated user landing on public pages → go to dashboard.
+  // Authenticated user landing on public pages → go to Dashboard V2 (default).
   if (authed && PUBLIC.has(view)) {
-    window.location.hash = "#dashboard";
+    window.location.hash = "#dashboardv2";
     return null;
   }
 
@@ -52,6 +53,7 @@ export default function App() {
   if (view === "login")   return <Login />;
   if (view === "downloads")   return <Downloads />;
   if (view === "strategies")  return <Strategies />;
+  if (view === "strategysandbox") return <StrategySandbox />;
   if (view === "settings")    return <RiskSettings />;
   if (view === "analytics")   return <Analytics />;
   if (view === "walkforward")  return <WalkForward />;

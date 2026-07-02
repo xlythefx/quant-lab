@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import SidebarStrategyCard from "./SidebarStrategyCard.jsx";
+import BrandAtom from "../BrandAtom.jsx";
 
 export const PORTFOLIO_ID = "__portfolio__";
 
@@ -28,7 +29,10 @@ export default function StrategySidebar({
   return (
     <aside className="w-72 shrink-0 border-r border-line bg-bg-panel/40 flex flex-col h-full">
       <div className="px-4 py-3 border-b border-line flex items-center justify-between">
-        <span className="text-[10px] uppercase tracking-widest text-muted">Strategies</span>
+        <div className="flex items-center gap-2">
+          <BrandAtom size={16} />
+          <span className="text-[10px] uppercase tracking-widest text-muted">Strategies</span>
+        </div>
         <span className="text-[10px] font-mono text-muted">{active.length}</span>
       </div>
 

@@ -99,12 +99,14 @@ const REGIME_KNOBS = [
 
 // Causal Gaussian-HMM regime engine (data-driven alternative to the rule tree).
 const HMM_DEFAULTS = {
-  n_states: 4, trend_window: 36, rv_window: 20, hurst_window: 250,
+  n_states: 5, trend_window: 36, rv_window: 20, hurst_window: 250,
   train_window: 4380, refit_every: 1080, warmup: 2160, fwd_horizon: 1, edge_horizon: 10,
-  max_bars: 15000,
+  max_bars: 15000, ranging_ratio: 0.10, undecided_below: 0.5,
 };
 const HMM_KNOBS = [
   { key: "n_states", label: "States", min: 2, max: 6, step: 1 },
+  { key: "ranging_ratio", label: "Ranging band", min: 0, max: 0.5, step: 0.02, fmt: pct2 },
+  { key: "undecided_below", label: "Undecided <", min: 0, max: 0.9, step: 0.05, fmt: pct2 },
   { key: "trend_window", label: "Trend window", min: 5, max: 120, step: 1 },
   { key: "rv_window", label: "Vol window", min: 5, max: 60, step: 1 },
   { key: "hurst_window", label: "Hurst window", min: 50, max: 1000, step: 10 },
@@ -148,7 +150,9 @@ export default function MarketLab() {
   const [scanParams, setScanParams] = usePersistentState("ql.mlab.scan", SCAN_DEFAULTS);
   const [fadeParams, setFadeParams] = usePersistentState("ql.mlab.fade", FADESAFE_DEFAULTS);
   const [regimeParams, setRegimeParams] = usePersistentState("ql.mlab.regimeparams", REGIME_DEFAULTS);
-  const [hmmParams, setHmmParams] = usePersistentState("ql.mlab.hmmparams", HMM_DEFAULTS);
+  // v2 key: the mood taxonomy + new defaults (5 states, ranging/undecided knobs)
+  // changed the param shape, so start fresh rather than inherit a stale n_states:4.
+  const [hmmParams, setHmmParams] = usePersistentState("ql.mlab.hmmparams.v2", HMM_DEFAULTS);
   const [featureParams, setFeatureParams] = usePersistentState("ql.mlab.features", FEATURE_DEFAULTS);
   const [patternParams, setPatternParams] = usePersistentState("ql.mlab.patterns", PATTERN_DEFAULTS);
   const [simParams, setSimParams] = usePersistentState("ql.mlab.sim", SIM_DEFAULTS);
@@ -484,7 +488,7 @@ function HmmRegimeTab({ data, loading }) {
       <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 px-4 py-2.5 text-[11px] text-muted">
         <span className="text-accent-blue font-medium">Causal Gaussian HMM</span>
         {` — ${method.n_states} states, re-fit ${method.n_refits}× on a ${method.train_window}-bar trailing window every ${method.refit_every} bars. `}
-        {`First ~${method.warmup_bars} bars are unlabeled warmup. Labels come from the filtered posterior (forward pass only — no look-ahead), so the forward-return stats below are honest. State names are auto-derived from each state's trend / volatility / Hurst signature.`}
+        {`First ~${method.warmup_bars} bars are warmup${method.undecided_bars ? `, ${fmtInt(method.undecided_bars)} bars Undecided (low confidence)` : ""}. Labels come from the filtered posterior (forward pass only — no look-ahead), so the forward-return stats below are honest. Each state is named from its drift-to-noise ratio (Bullish / Bearish / Ranging) and volatility; states that land on the same name are merged into one mood.`}
       </div>
 
       {method.capped && (
@@ -529,7 +533,7 @@ function HmmRegimeTab({ data, loading }) {
           </tbody>
         </table>
         <p className="text-[11px] text-muted mt-2">
-          Hurst &gt; 0.5 = persistent/trending, &lt; 0.5 = mean-reverting. States are ordered bear→bull by mean trend.
+          Moods are named from trend &amp; volatility and ordered bearish→ranging→bullish. Hurst is shown for reference only (it no longer names states — its R/S estimate is biased high).
         </p>
       </Card>
 

@@ -30,7 +30,7 @@ export default function Login() {
     <div className="relative h-screen w-screen overflow-hidden bg-bg flex items-center justify-center">
 
       {loading && (
-        <LoadingScreen onDone={() => { window.location.hash = "#dashboard"; }} />
+        <LoadingScreen onDone={() => { window.location.hash = "#dashboardv2"; }} />
       )}
 
       {/* Animated orbs — same as landing */}

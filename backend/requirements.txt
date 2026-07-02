@@ -24,3 +24,4 @@ h2>=4.1.0
 yfinance>=0.2.40
 databento>=0.34          # CME futures historical/live data (GLBX.MDP3)
 sqlalchemy>=2.0
+psutil>=5.9              # CPU/utilization sampling for the walk-forward run monitor

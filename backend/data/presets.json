@@ -46,5 +46,44 @@
       "pyramiding": 10,
       "risk_pct": 10
     }
+  },
+  "asia_range_breakout": {
+    "DEFAULT": {
+      "asia_session": {
+        "asia": {
+          "enabled": true,
+          "end": "04:00",
+          "start": "00:00"
+        },
+        "tokyo": {
+          "enabled": true,
+          "start": "00:00",
+          "end": "04:00"
+        }
+      },
+      "entry_session": {
+        "entry": {
+          "enabled": true,
+          "end": "08:00",
+          "start": "05:00"
+        },
+        "tokyo": {
+          "enabled": true,
+          "start": "05:00",
+          "end": "09:00"
+        }
+      },
+      "depth_measure": "atr",
+      "vol_length": 14,
+      "break_depth": 0.5,
+      "atr_mult": 5,
+      "sides": {
+        "long": true,
+        "short": false
+      },
+      "risk_pct": 3,
+      "contracts": 1,
+      "pyramiding": 1
+    }
   }
 }

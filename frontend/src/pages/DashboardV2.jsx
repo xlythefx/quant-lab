@@ -17,10 +17,12 @@ import {
 } from "../services/strategiesStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
-import { fmtUsd, fmtNum, fmtPct, fmtRatio, fmtDate, fmtTime } from "../services/format.js";
+import { socket } from "../services/socket.js";
+import { ProgressBar } from "../components/walkforward/widgets.jsx";
+import { fmtUsd, fmtNum, fmtInt, fmtPct, fmtRatio, fmtDate, fmtDateLong, fmtTime } from "../services/format.js";
 import {
-  startingCapital, rangeToWindow, resolveDefaultParams, annualizedVol,
-  underwaterSeries, monthlyReturnsGrid, bestWorstMonth, statusPill, interpretation,
+  startingCapital, rangeToWindow, resolveWindowDates, epochToDateStr, resolveDefaultParams,
+  annualizedVol, underwaterSeries, monthlyReturnsGrid, bestWorstMonth, statusPill, interpretation,
 } from "../components/dashboardv2/metrics.js";
 
 const ASSET_LABELS = {
@@ -35,6 +37,11 @@ const AGG_ID = "__agg__";
 // Shared toolbar field-cell styling so Asset / Symbol / Timeframe read as one
 // uniform segmented control (vs. the shared selectors' mismatched labels).
 const SELECT_CLS = "bg-transparent text-sm font-mono text-text leading-none focus:outline-none cursor-pointer";
+// Native <select> popups use the browser default (white) background unless the
+// OPTIONS carry an OPAQUE color — the transparent select alone isn't enough, so
+// light option text ends up on white. Give every <option> a solid dark bg +
+// light text so the open dropdown is readable on the dark theme.
+const OPTION_CLS = "bg-bg-panel text-text";
 
 function Field({ label, children }) {
   return (
@@ -65,6 +72,8 @@ export default function DashboardV2() {
   const [broker, setBroker]       = usePersistentState("ql.dash.broker", "");
   const [timeframe, setTimeframe] = usePersistentState("ql.dash.timeframe", "15m");
   const [rangeKey, setRangeKey]   = usePersistentState("ql.dv2.range", "MAX");
+  // Custom date window (used when rangeKey === "CUSTOM"); "YYYY-MM-DD" strings.
+  const [customRange, setCustomRange] = usePersistentState("ql.dv2.customRange", { start: "", end: "" });
   const [scale, setScale]         = usePersistentState("ql.dv2.scale", "linear");
   const [tab, setTab]             = usePersistentState("ql.dv2.tab", "performance");
   const [selectedId, setSelectedId] = usePersistentState("ql.dv2.selected", PORTFOLIO_ID);
@@ -78,6 +87,8 @@ export default function DashboardV2() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [lastRun, setLastRun] = useState(0);
+  const [progress, setProgress] = useState(null);  // latest backtest_progress payload
+  const [elapsed, setElapsed] = useState(0);        // ms since the current run started
   const [editingId, setEditingId] = useState(null);
   // {strategyId, params} when the look-ahead-vs-reality comparison modal is open.
   const [laCompare, setLaCompare] = useState(null);
@@ -107,6 +118,19 @@ export default function DashboardV2() {
     [datasets, symbol, timeframe, broker],
   );
   const datasetExists = !!selectedDataset;
+  // Dataset edges drive every range computation (window for the run, "?" hint,
+  // and custom-input min/max).
+  const bounds = useMemo(
+    () => (selectedDataset ? { firstTime: selectedDataset.first_time, lastTime: selectedDataset.last_time } : null),
+    [selectedDataset],
+  );
+  // Seed the custom window with the dataset's full span the first time the user
+  // switches to Custom (so the inputs start full, not empty).
+  useEffect(() => {
+    if (rangeKey === "CUSTOM" && bounds && !customRange.start && !customRange.end) {
+      setCustomRange({ start: epochToDateStr(bounds.firstTime), end: epochToDateStr(bounds.lastTime) });
+    }
+  }, [rangeKey, bounds]); // eslint-disable-line react-hooks/exhaustive-deps
   const assetClass = selectedDataset?.asset_class
     || datasets.find((d) => d.symbol === symbol && (!broker || d.broker === broker))?.asset_class
     || "crypto";
@@ -174,16 +198,19 @@ export default function DashboardV2() {
     }
     const myReq = ++inflightRef.current;
     setError(null);
+    setProgress(null);
     setLoading(true);
-    const bounds = selectedDataset ? { firstTime: selectedDataset.first_time, lastTime: selectedDataset.last_time } : null;
-    const { start_time, end_time } = rangeToWindow(rangeKey, bounds);
+    // Live stage/HMM-refit progress streamed from the backend to this client.
+    const onProg = (pl) => { if (myReq === inflightRef.current) setProgress(pl); };
+    socket.on("backtest_progress", onProg);
+    const { start_time, end_time } = rangeToWindow(rangeKey, bounds, customRange);
     try {
       const portfolio = await runPortfolioBacktest({
         strategies: list.map((s, i) => ({
           strategy_id: s.id, symbol, timeframe,
           params: s.params, priority: i + 1, broker: broker || undefined,
         })),
-        start_time, end_time,
+        start_time, end_time, sid: socket.id,
       });
       if (myReq !== inflightRef.current) return;
       setResult(portfolio);
@@ -213,9 +240,19 @@ export default function DashboardV2() {
       if (myReq !== inflightRef.current) return;
       setError(e?.response?.data?.error || e.message || "Backtest failed.");
     } finally {
-      if (myReq === inflightRef.current) setLoading(false);
+      socket.off("backtest_progress", onProg);
+      if (myReq === inflightRef.current) { setLoading(false); setProgress(null); }
     }
   };
+
+  // Tick an elapsed-time counter while a backtest is running (for the progress strip).
+  useEffect(() => {
+    if (!loading) { setElapsed(0); return; }
+    const t0 = Date.now();
+    setElapsed(0);
+    const id = setInterval(() => setElapsed(Date.now() - t0), 500);
+    return () => clearInterval(id);
+  }, [loading]);
 
   // Clear results when the run inputs change so we never show stale numbers.
   useEffect(() => { setResult(null); setError(null); }, [symbol, broker, timeframe, active.length]);
@@ -313,10 +350,16 @@ export default function DashboardV2() {
   const editingStrategy = editingId ? active.find((s) => s.id === editingId) : null;
   const editingMeta = editingId ? catalogById[editingId] : null;
   // Window for the look-ahead comparison — same range the portfolio run uses.
-  const laWindow = useMemo(() => {
-    const bounds = selectedDataset ? { firstTime: selectedDataset.first_time, lastTime: selectedDataset.last_time } : null;
-    return rangeToWindow(rangeKey, bounds);
-  }, [selectedDataset, rangeKey]);
+  const laWindow = useMemo(
+    () => rangeToWindow(rangeKey, bounds, customRange),
+    [bounds, rangeKey, customRange],
+  );
+  // Human label for the Config tab: pills show as-is, CUSTOM shows the dates.
+  const rangeLabel = useMemo(() => {
+    if (rangeKey !== "CUSTOM") return rangeKey;
+    const w = resolveWindowDates("CUSTOM", bounds, customRange);
+    return w ? `${fmtDateLong(w.start_time)} – ${fmtDateLong(w.end_time)}` : "Custom";
+  }, [rangeKey, bounds, customRange]);
 
   const canRun = symbol && active.length > 0 && datasetExists && !loading;
 
@@ -355,7 +398,7 @@ export default function DashboardV2() {
               </div>
               <div className="text-xs text-muted mt-1 font-mono">
                 {slice?.stats?.first_time
-                  ? `Backtest ${fmtDate(slice.stats.first_time)} – ${fmtDate(slice.stats.last_time)} · ${(slice.equity || []).length} bars · last run ${agoLabel(lastRun)}`
+                  ? `Backtest ${fmtDateLong(slice.stats.first_time)} – ${fmtDateLong(slice.stats.last_time)} · ${(slice.equity || []).length} bars · last run ${agoLabel(lastRun)}`
                   : "Not yet run"}
               </div>
             </div>
@@ -367,8 +410,8 @@ export default function DashboardV2() {
                 <Field label="Asset">
                   <select className={SELECT_CLS} value={effectiveClass} onChange={(e) => setActiveClass(e.target.value)} aria-label="Asset class">
                     {assetClasses.length === 0
-                      ? <option value={effectiveClass}>—</option>
-                      : assetClasses.map((c) => <option key={c} value={c}>{ASSET_LABELS[c] || c}</option>)}
+                      ? <option className={OPTION_CLS} value={effectiveClass}>—</option>
+                      : assetClasses.map((c) => <option className={OPTION_CLS} key={c} value={c}>{ASSET_LABELS[c] || c}</option>)}
                   </select>
                 </Field>
                 <Field label="Symbol">
@@ -379,25 +422,31 @@ export default function DashboardV2() {
                     aria-label="Symbol"
                   >
                     {symbolRows.length === 0 ? (
-                      <option value="">no data</option>
+                      <option className={OPTION_CLS} value="">no data</option>
                     ) : (
                       <>
-                        {!selectedRow && <option value="">— pick —</option>}
-                        {symbolRows.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                        {!selectedRow && <option className={OPTION_CLS} value="">— pick —</option>}
+                        {symbolRows.map((r) => <option className={OPTION_CLS} key={r.id} value={r.id}>{r.label}</option>)}
                       </>
                     )}
                   </select>
                 </Field>
                 <Field label="Timeframe">
                   <select className={SELECT_CLS} value={timeframe} onChange={(e) => setTimeframe(e.target.value)} aria-label="Timeframe">
-                    {(tfsForSymbol.length ? tfsForSymbol : [timeframe]).map((t) => <option key={t} value={t}>{t}</option>)}
+                    {(tfsForSymbol.length ? tfsForSymbol : [timeframe]).map((t) => <option className={OPTION_CLS} key={t} value={t}>{t}</option>)}
                   </select>
                 </Field>
               </div>
 
               {/* range + actions, pinned right */}
               <div className="flex items-center gap-3 ml-auto">
-                <RangeSelector value={rangeKey} onChange={setRangeKey} />
+                <RangeSelector
+                  value={rangeKey}
+                  onChange={setRangeKey}
+                  bounds={bounds}
+                  customRange={customRange}
+                  onCustomChange={setCustomRange}
+                />
                 <a
                   href={analyticsKey ? `#analytics?key=${encodeURIComponent(analyticsKey)}` : undefined}
                   aria-disabled={!analyticsKey}
@@ -426,6 +475,11 @@ export default function DashboardV2() {
             </div>
           </div>
 
+          {/* KPI strip — headline numbers for the selected strategy/portfolio,
+              visible on every tab so you never have to open Performance to see
+              capital, return, trades, and drawdown. */}
+          {slice?.stats && <KpiStrip stats={slice.stats} />}
+
           {/* tabs */}
           <div className="px-6 pt-3">
             <TabBar
@@ -446,17 +500,36 @@ export default function DashboardV2() {
               <div className="mb-4 px-4 py-2 rounded-lg text-sm text-loss bg-loss/10 border border-loss/30">{error}</div>
             )}
 
+            {loading && (
+              <RunProgress
+                progress={progress}
+                elapsedMs={elapsed}
+                baselineMsg={
+                  active.some((s) => s.params?.use_regime && s.params?.regime_method === "hmm")
+                    ? "Fitting HMM regime model — first run can take ~60–90s, then cached."
+                    : "Running backtest…"
+                }
+              />
+            )}
+
             {!result && !loading && (
-              <EmptyState hasStrategies={active.length > 0} hasSymbol={!!symbol} />
+              <EmptyState
+                hasStrategies={active.length > 0}
+                hasSymbol={!!symbol}
+                canRun={canRun}
+                loading={loading}
+                onRun={() => runBacktest()}
+                contextLine={[
+                  isPortfolio ? `Portfolio · ${active.length} strategies` : headerName,
+                  symbol,
+                  timeframe,
+                  rangeKey,
+                ].filter(Boolean).join("  ·  ")}
+              />
             )}
 
-            {loading && !result && (
-              <div className="flex items-center justify-center py-24 text-muted text-sm gap-3">
-                <span className="w-4 h-4 rounded-full border-2 border-accent-blue border-t-transparent animate-spin" />
-                Running portfolio backtest…
-              </div>
-            )}
-
+            {/* Result tabs — dimmed while a re-run is in flight so stale numbers read as recomputing. */}
+            <div className={loading && result ? "opacity-40 pointer-events-none transition-opacity" : "transition-opacity"}>
             {result && slice && tab === "performance" && (
               <PerformanceTab
                 derived={derived}
@@ -503,11 +576,12 @@ export default function DashboardV2() {
                 catalogById={catalogById}
                 symbol={symbol}
                 timeframe={timeframe}
-                rangeKey={rangeKey}
+                rangeKey={rangeLabel}
                 riskConfig={result.risk_config || riskConfig}
                 onEdit={setEditingId}
               />
             )}
+            </div>
           </div>
         </main>
       </div>
@@ -546,19 +620,167 @@ export default function DashboardV2() {
   );
 }
 
-function EmptyState({ hasStrategies, hasSymbol }) {
+function fmtElapsed(ms) {
+  const s = Math.floor((ms || 0) / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// Headline KPI strip under the header: final capital, net P&L ($ and %), trade
+// count, and worst peak-to-trough drawdown. Reads straight from the selected
+// slice's stats — same numbers the Performance tab shows, surfaced up top.
+function KpiStrip({ stats }) {
+  const ret = stats.total_return_pct;
+  const pnl = stats.total_return_dollars;
+  const dd = stats.max_drawdown_pct_peak; // ≤ 0, peak-relative (industry standard)
+  const tone = (v) => (typeof v === "number" && Number.isFinite(v)
+    ? (v > 0 ? "text-profit" : v < 0 ? "text-loss" : "text-text")
+    : "text-text");
   return (
-    <div className="flex flex-col items-center justify-center py-24 text-center">
-      <div className="w-12 h-12 rounded-xl bg-accent-grad/20 border border-line mb-4" />
-      <div className="text-text font-medium">
-        {!hasStrategies ? "Add strategies to your portfolio" : !hasSymbol ? "Pick a symbol" : "Ready to run"}
+    <div className="px-6 py-3 border-b border-line grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      <Kpi label="Capital" value={fmtUsd(stats.final_equity)}
+           sub={`from ${fmtUsd(stats.starting_capital)}`} />
+      <Kpi label="Net P&L" value={fmtUsd(pnl)} valueCls={tone(pnl)} />
+      <Kpi label="Total return" value={fmtPct(ret)} valueCls={tone(ret)} />
+      <Kpi label="Trades" value={fmtInt(stats.trades)}
+           sub={Number.isFinite(stats.win_rate) ? `${fmtNum(stats.win_rate * 100)}% win` : undefined} />
+      <Kpi label="Max drawdown" value={fmtPct(dd, false)} valueCls="text-loss"
+           sub="peak-to-trough" />
+    </div>
+  );
+}
+
+function Kpi({ label, value, sub, valueCls = "text-text" }) {
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/40 px-3 py-2">
+      <div className="text-[9px] uppercase tracking-wider text-muted">{label}</div>
+      <div className={`text-lg font-mono font-semibold leading-tight ${valueCls}`}>{value}</div>
+      {sub && <div className="text-[10px] text-muted/70 font-mono mt-0.5 truncate">{sub}</div>}
+    </div>
+  );
+}
+
+// Live progress strip shown while a backtest runs. Reflects the real backend
+// stage streamed over the socket (strategy → HMM refit → simulate → stats); the
+// HMM refit stage shows a determinate bar (it's the slow one), everything else a
+// pulsing indeterminate bar. Falls back to baselineMsg before any event arrives.
+function RunProgress({ progress, elapsedMs, baselineMsg }) {
+  const p = progress || {};
+  let label = baselineMsg;
+  let pct = null;
+  if (p.stage === "strategy") {
+    label = `Analyzing ${p.label}${p.total > 1 ? ` (${p.index}/${p.total})` : ""}${p.hmm ? " — fitting HMM…" : "…"}`;
+  } else if (p.stage === "hmm") {
+    label = `Fitting HMM regime model · ${p.label} — refit ${p.refit}/${p.n_refits}`;
+    pct = p.pct;
+  } else if (p.stage === "simulate") {
+    label = "Simulating portfolio…";
+  } else if (p.stage === "stats") {
+    label = "Computing stats & analytics…";
+  }
+  return (
+    <div className="mb-4 rounded-xl border border-accent-blue/30 bg-accent-blue/5 px-4 py-3">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="flex items-center gap-2 text-sm text-text min-w-0">
+          <span className="w-3.5 h-3.5 rounded-full border-2 border-accent-blue border-t-transparent animate-spin shrink-0" />
+          <span className="truncate">{label}</span>
+        </div>
+        <span className="text-xs font-mono text-muted shrink-0">{fmtElapsed(elapsedMs)}</span>
       </div>
-      <div className="text-sm text-muted mt-1 max-w-sm">
-        {!hasStrategies
-          ? "Use “+ Add strategy” in the left rail to build a shared-cash portfolio."
-          : !hasSymbol
-            ? "Choose a symbol and timeframe above, then run a backtest."
-            : "Press “Run backtest” to compute the portfolio report."}
+      {pct != null ? (
+        <ProgressBar label="HMM fit" pct={pct} />
+      ) : (
+        <div className="h-2 rounded bg-bg-elev/60 overflow-hidden">
+          <div className="h-full w-full bg-accent-grad/60 animate-pulse" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EmptyState({ hasStrategies, hasSymbol, canRun, loading, onRun, contextLine }) {
+  const ready = hasStrategies && hasSymbol;
+  const heading = !hasStrategies ? "Add strategies to your portfolio"
+    : !hasSymbol ? "Pick a symbol"
+    : "Ready to run";
+  const sub = !hasStrategies
+    ? "Use “+ Add strategy” in the left rail to build a shared-cash portfolio."
+    : !hasSymbol
+      ? "Choose a symbol and timeframe above, then run a backtest."
+      : "Compute the performance report — equity curve, drawdown, monthly returns and trade stats.";
+
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      {/* icon (pulsing glow once a run is queued) */}
+      <div className="relative mb-5">
+        {ready && <span className="absolute inset-0 rounded-2xl bg-accent-blue/25 blur-xl animate-pulse" aria-hidden="true" />}
+        <div className="relative w-14 h-14 rounded-2xl bg-accent-grad/15 border border-accent-blue/30 flex items-center justify-center text-accent-blue">
+          {ready ? (
+            <svg className="w-6 h-6 translate-x-[1px]" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          ) : (
+            <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          )}
+        </div>
+      </div>
+
+      <div className="text-text font-semibold text-lg">{heading}</div>
+      {ready && contextLine && (
+        <div className="text-xs font-mono text-accent-cyan/90 mt-1.5 tracking-wide">{contextLine}</div>
+      )}
+      <div className="text-sm text-muted mt-2 max-w-md">{sub}</div>
+
+      {ready && (
+        <button
+          onClick={onRun}
+          disabled={!canRun}
+          className={`mt-6 h-11 inline-flex items-center gap-2 px-6 rounded-xl text-sm font-medium transition ${
+            canRun
+              ? "bg-accent-grad text-white shadow-lg shadow-accent-blue/20 hover:opacity-90 cursor-pointer"
+              : "bg-bg-elev text-muted cursor-not-allowed"
+          }`}
+        >
+          {loading ? "Running…" : "▶ Run backtest"}
+        </button>
+      )}
+      {ready && !canRun && !loading && (
+        <div className="text-[11px] text-muted/70 mt-2">Dataset for this symbol/timeframe isn’t downloaded yet.</div>
+      )}
+
+      {/* faded preview of the report that's about to render */}
+      {ready && <GhostReport />}
+    </div>
+  );
+}
+
+// Skeleton of the Performance tab — KPI card row + a faint equity sweep. Purely
+// decorative; fills the empty canvas with a hint of what a run produces.
+function GhostReport() {
+  return (
+    <div className="w-full max-w-3xl mt-10 opacity-35 pointer-events-none select-none" aria-hidden="true">
+      <div className="grid grid-cols-3 md:grid-cols-6 gap-3">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="rounded-xl border border-line bg-bg-panel/40 p-3 h-[58px]">
+            <div className="h-1.5 w-2/3 bg-bg-elev rounded mb-2.5" />
+            <div className="h-3 w-1/2 bg-bg-elev rounded" />
+          </div>
+        ))}
+      </div>
+      <div className="rounded-xl border border-line bg-bg-panel/40 mt-3 h-32 overflow-hidden">
+        <svg viewBox="0 0 600 130" width="100%" height="100%" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="ghostfill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.25" />
+              <stop offset="100%" stopColor="#3b82f6" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d="M0,110 C90,100 130,70 200,72 C270,74 300,40 380,46 C450,51 500,20 600,14"
+                fill="none" stroke="#3b82f6" strokeWidth="2" vectorEffect="non-scaling-stroke" opacity="0.7" />
+          <path d="M0,110 C90,100 130,70 200,72 C270,74 300,40 380,46 C450,51 500,20 600,14 L600,130 L0,130 Z"
+                fill="url(#ghostfill)" stroke="none" />
+        </svg>
       </div>
     </div>
   );

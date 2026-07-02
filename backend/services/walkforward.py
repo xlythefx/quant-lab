@@ -16,15 +16,22 @@ from __future__ import annotations
 
 import logging
 import math
+import multiprocessing as mp
 import threading
 import time
 import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Optional
 
 import numpy as np
 import optuna
 from optuna.samplers import TPESampler
 from sklearn.model_selection import TimeSeriesSplit
+
+try:
+    import psutil   # CPU/utilization sampling for the live run monitor
+except ImportError:
+    psutil = None
 
 from services import assets, backtest_engine, event_bus, market_data, risk_config, quant_metrics
 from services.monte_carlo import _bars_per_year
@@ -239,6 +246,112 @@ def _normalize_spec(spec: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Per-window optimization (module-level so it's picklable for ProcessPoolExecutor)
+# ---------------------------------------------------------------------------
+
+def _optimize_window_pure(spec: dict, is_warm_start: int, is_start: int, is_end: int,
+                          on_trial=None, cancel_check=None):
+    """Run one window's Optuna study. Pure function (no job/socket state) so it can
+    run in a worker process. `on_trial(trial_idx, score, best_score)` reports
+    progress; `cancel_check()->bool` stops the study early. Trials are sequential
+    within a window (n_jobs=1) — window-level parallelism comes from running many
+    of these across processes, which keeps each window's result reproducible."""
+    s = spec
+    track = {"i": 0, "best": None}
+
+    def objective(trial: optuna.Trial) -> float:
+        if cancel_check and cancel_check():
+            raise optuna.TrialPruned()
+        params = dict(s["base_params"])
+        for entry in s["search_space"]:
+            name = entry["name"]
+            low = float(entry["low"]); high = float(entry["high"])
+            step = entry.get("step")
+            log_scale = bool(entry.get("log", False))
+            if entry["type"] == "int":
+                params[name] = trial.suggest_int(
+                    name, int(low), int(high), step=int(step) if step else 1, log=log_scale)
+            else:
+                if step:
+                    params[name] = trial.suggest_float(name, low, high, step=float(step))
+                else:
+                    params[name] = trial.suggest_float(name, low, high, log=log_scale)
+        result = backtest_engine.run(
+            s["strategy_id"], s["symbol"], s["timeframe"],
+            params, start_time=is_warm_start, end_time=is_end, trade_start_time=is_start)
+        score = _score_from_stats(_window_stats(result, is_start), s["metric"])
+        track["i"] += 1
+        if track["best"] is None or score > track["best"]:
+            track["best"] = score
+        if on_trial:
+            on_trial(track["i"], score, track["best"])
+        return score
+
+    def stop_if_cancelled(study: optuna.Study, _trial) -> None:
+        if cancel_check and cancel_check():
+            study.stop()
+
+    study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=s["seed"]))
+    try:
+        study.optimize(objective, n_trials=s["n_trials"], n_jobs=1,
+                       callbacks=[stop_if_cancelled], show_progress_bar=False, gc_after_trial=False)
+    except optuna.TrialPruned:
+        pass
+
+    if not study.trials or study.best_trial is None:
+        return dict(s["base_params"]), None, []
+    best_params = dict(s["base_params"])
+    best_params.update(study.best_params)
+    trial_records = [
+        {"params": t.params, "value": (float(t.value) if t.value is not None else None)}
+        for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+    ]
+    return best_params, study.best_value, trial_records
+
+
+def _task_payload(spec: dict, w: dict) -> dict:
+    """Plain, picklable args for one window task (NumPy index arrays stay in the
+    parent — the OOS evaluation only needs boundary timestamps)."""
+    return {
+        "spec": spec, "w_idx": w["w_idx"],
+        "is_warm_start": w["is_warm_start"], "is_start": w["is_start"], "is_end": w["is_end"],
+        "oos_warm_start": w["oos_warm_start"], "oos_start": w["oos_start"], "oos_end": w["oos_end"],
+    }
+
+
+def _optimize_and_eval_task(payload: dict, progress_q, cancel_event) -> dict:
+    """Worker entrypoint: optimize a window's params then evaluate the best on its
+    OOS slice. Returns plain data the parent stitches. Runs in its own process."""
+    spec = payload["spec"]
+    w_idx = payload["w_idx"]
+
+    def on_trial(i, score, best):
+        try:
+            progress_q.put({"type": "trial", "w_idx": w_idx, "trial_idx": i,
+                            "score": score, "best_score": best})
+        except Exception:
+            pass
+
+    def cancel_check():
+        try:
+            return cancel_event.is_set()
+        except Exception:
+            return False
+
+    best_params, is_score, optuna_trials = _optimize_window_pure(
+        spec, payload["is_warm_start"], payload["is_start"], payload["is_end"],
+        on_trial=on_trial, cancel_check=cancel_check)
+    if cancel_check():
+        return {"w_idx": w_idx, "cancelled": True}
+    oos_result = backtest_engine.run(
+        spec["strategy_id"], spec["symbol"], spec["timeframe"], best_params,
+        start_time=payload["oos_warm_start"], end_time=payload["oos_end"],
+        trade_start_time=payload["oos_start"])
+    return {"w_idx": w_idx, "best_params": best_params, "is_score": is_score,
+            "optuna_trials": optuna_trials, "oos_result": oos_result}
+
+
+# ---------------------------------------------------------------------------
 # Job
 # ---------------------------------------------------------------------------
 
@@ -258,6 +371,17 @@ class WalkForwardJob:
         self.current_best_score: Optional[float] = None
         self.window_summaries: list[dict] = []
 
+        # Live run monitor — CPU utilization + how many window-processes are busy.
+        self.cpu_percent: float = 0.0
+        self.cpu_percent_percore: list[float] = []
+        self.active_workers: int = 0
+        self.n_workers_effective: int = 1
+
+        # When False, suppress socket events + the global last-result write. The
+        # robustness runner drives many inner jobs this way and reads `self.result`.
+        self.emit_enabled: bool = True
+        self.result: Optional[dict] = None
+
         self._thread = threading.Thread(target=self._run, name=f"wf-{self.job_id}", daemon=True)
 
     # ---- public ------------------------------------------------------------
@@ -268,15 +392,23 @@ class WalkForwardJob:
     def join(self, timeout: Optional[float] = None) -> None:
         self._thread.join(timeout=timeout)
 
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
     def request_cancel(self) -> None:
         self.cancel_flag = True
 
-    def snapshot(self) -> dict:
-        elapsed = time.time() - self.started_at
-        eta = None
+    def _eta(self) -> Optional[float]:
+        # Wall-clock time per completed window already reflects parallel
+        # throughput (more workers → windows complete faster → smaller `per`),
+        # so the linear estimate is parallel-aware. Null until the first window
+        # finishes (a full first wave is still in flight).
         if self.state == "running" and self.window_idx > 0 and self.total_windows > 0:
-            per = elapsed / self.window_idx
-            eta = max(0.0, per * (self.total_windows - self.window_idx))
+            per = (time.time() - self.started_at) / self.window_idx
+            return max(0.0, per * (self.total_windows - self.window_idx))
+        return None
+
+    def snapshot(self) -> dict:
         return {
             "state": self.state,
             "job_id": self.job_id,
@@ -288,8 +420,12 @@ class WalkForwardJob:
             "total_windows": self.total_windows,
             "trial_idx": self.trial_idx,
             "current_best_score": self.current_best_score,
-            "elapsed_seconds": elapsed,
-            "eta_seconds": eta,
+            "elapsed_seconds": time.time() - self.started_at,
+            "eta_seconds": self._eta(),
+            "cpu_percent": self.cpu_percent,
+            "cpu_percent_percore": self.cpu_percent_percore,
+            "active_workers": self.active_workers,
+            "n_workers": self.n_workers_effective,
             "windows": self.window_summaries,
             "error": self.error,
         }
@@ -297,9 +433,40 @@ class WalkForwardJob:
     # ---- thread ------------------------------------------------------------
 
     def _emit(self, event: str, payload: dict) -> None:
+        if not self.emit_enabled:
+            return
         event_bus.emit(event, {"job_id": self.job_id, **payload})
 
+    def _resource_sampler(self, stop_event: threading.Event) -> None:
+        """Background thread: every ~1s push CPU utilization (overall + per-core),
+        how many window-processes are busy, elapsed, and ETA to the UI."""
+        if psutil is None:
+            return
+        try:
+            psutil.cpu_percent(None)               # prime the overall counter
+            psutil.cpu_percent(None, percpu=True)   # prime the per-core counters
+        except Exception:
+            return
+        while not stop_event.wait(1.0):
+            try:
+                self.cpu_percent = float(psutil.cpu_percent(None))
+                self.cpu_percent_percore = [float(x) for x in psutil.cpu_percent(None, percpu=True)]
+            except Exception:
+                continue
+            self._emit("wf_resources", {
+                "cpu_percent": self.cpu_percent,
+                "cpu_percent_percore": self.cpu_percent_percore,
+                "active_workers": self.active_workers,
+                "n_workers": self.n_workers_effective,
+                "elapsed_seconds": time.time() - self.started_at,
+                "eta_seconds": self._eta(),
+            })
+
     def _run(self) -> None:
+        stop_sampler = threading.Event()
+        sampler = threading.Thread(target=self._resource_sampler, args=(stop_sampler,),
+                                   name=f"wf-cpu-{self.job_id}", daemon=True)
+        sampler.start()
         try:
             self.state = "running"
             self._do_run()
@@ -313,6 +480,9 @@ class WalkForwardJob:
             self.error = str(e)
             self.state = "error"
             self._emit("wf_error", {"message": str(e)})
+        finally:
+            stop_sampler.set()
+            self.active_workers = 0
 
     def _do_run(self) -> None:
         s = self.spec
@@ -378,43 +548,59 @@ class WalkForwardJob:
         # Use a dummy X with same length as df — TimeSeriesSplit only needs len.
         dummy = np.zeros(total)
 
+        # ---- Build every window's boundaries up front (cheap) ----
+        windows: list[dict] = []
         for w_idx, (is_idx, oos_idx) in enumerate(splitter.split(dummy)):
-            if self.cancel_flag:
-                break
-
-            # Purged CV: drop the rightmost `purge_radius` IS bars. Trades
-            # opened on those bars could exit inside OOS, so they'd bias the
-            # in-sample optimization toward parameters that exploit lookahead.
+            # Purged CV: drop the rightmost `purge_radius` IS bars. Trades opened
+            # on those bars could exit inside OOS, biasing IS optimization toward
+            # params that exploit lookahead.
             if s["purge_radius"] > 0:
                 is_idx = is_idx[:-s["purge_radius"]]
-
-            self.window_idx = w_idx + 1
-            is_start = int(time_col[is_idx[0]])
-            is_end = int(time_col[is_idx[-1]])
-            oos_start = int(time_col[oos_idx[0]])
-            oos_end = int(time_col[oos_idx[-1]])
-            # Warm-up: feed the engine extra history before each window so
-            # rolling indicators are valid at the window start; entries before
-            # the window are masked via trade_start_time.
+            # Warm-up: feed the engine extra history before each window so rolling
+            # indicators are valid at the window start; pre-window entries are
+            # masked via trade_start_time.
             warm = s["warmup_bars"]
-            is_warm_start = int(time_col[max(0, int(is_idx[0]) - warm)])
-            oos_warm_start = int(time_col[max(0, int(oos_idx[0]) - warm)])
+            windows.append({
+                "w_idx": w_idx,
+                "is_idx": is_idx, "oos_idx": oos_idx,
+                "is_start": int(time_col[is_idx[0]]),
+                "is_end": int(time_col[is_idx[-1]]),
+                "oos_start": int(time_col[oos_idx[0]]),
+                "oos_end": int(time_col[oos_idx[-1]]),
+                "is_warm_start": int(time_col[max(0, int(is_idx[0]) - warm)]),
+                "oos_warm_start": int(time_col[max(0, int(oos_idx[0]) - warm)]),
+            })
+        self.total_windows = len(windows)
 
-            best_params, is_score, optuna_trials = self._optimize_window(
-                is_warm_start, is_start, is_end
-            )
+        # ---- Optimize + OOS-evaluate every window (parallel across CPUs) ----
+        # The heavy part (Optuna study + OOS backtest) is independent per window,
+        # so we farm windows out to separate processes — real cores, no GIL. Each
+        # window is seeded independently, so results are reproducible regardless of
+        # how many workers run. The cheap, order-dependent stitch happens after, in
+        # the parent. With 1 worker (or 1 window) we run inline to skip the
+        # process-spawn overhead.
+        n_workers = min(int(s["n_workers"]), len(windows))
+        self.n_workers_effective = max(1, n_workers)
+        if n_workers <= 1:
+            results = self._run_windows_sequential(windows, df, bars_per_year)
+        else:
+            results = self._run_windows_parallel(windows, df, bars_per_year, n_workers)
 
-            if self.cancel_flag:
-                break
+        if self.cancel_flag:
+            return
 
-            # Evaluate best params on OOS window (warm-started, trade-gated).
-            oos_result = backtest_engine.run(
-                s["strategy_id"], s["symbol"], s["timeframe"],
-                best_params, start_time=oos_warm_start, end_time=oos_end,
-                trade_start_time=oos_start,
-            )
+        # Workers may finish out of order — restore window order for the report.
+        self.window_summaries.sort(key=lambda x: x["window_idx"])
 
-            # Stitch this window's OOS curve onto the running aggregate.
+        # ---- Stitch each window's OOS curve onto the running aggregate (in order) ----
+        for w in windows:
+            r = results.get(w["w_idx"])
+            if not r or "oos_result" not in r:
+                continue  # window failed or was cancelled before finishing
+            w_idx = w["w_idx"]
+            oos_start = w["oos_start"]
+            oos_result = r["oos_result"]
+
             sub_run_capital = float(oos_result["stats"]["starting_capital"])  # Always == global starting_capital
             # Futures fixed-contract trades are absolute dollars — never scale.
             multiplier_carry = (1.0 if contract_sized
@@ -486,25 +672,6 @@ class WalkForwardJob:
                 else:
                     local_mult_last = (last_pt["equity"] / sub_run_capital) if sub_run_capital > 0 else 1.0
                     carry_equity = carry_equity * local_mult_last
-
-            # Per-window summary + per-fold extras (B&H, realized vol, Sharpe CI).
-            extras = _fold_extras(df, oos_idx, oos_result, rng, bars_per_year,
-                                  oos_start_ts=oos_start)
-            summary = {
-                "window_idx": w_idx + 1,
-                "is_start": is_start,
-                "is_end": is_end,
-                "oos_start": oos_start,
-                "oos_end": oos_end,
-                "best_params": best_params,
-                "is_score": float(is_score) if is_score is not None and math.isfinite(is_score) else None,
-                # In-window stats only (warm-up bars excluded — see _window_stats).
-                "oos_stats": _window_stats(oos_result, oos_start),
-                "optuna_trials": optuna_trials,
-                **extras,
-            }
-            self.window_summaries.append(summary)
-            self._emit("wf_window_done", {"window": summary})
 
         if self.cancel_flag:
             return
@@ -609,89 +776,145 @@ class WalkForwardJob:
             "costs": costs,
         }
 
-        global _last_result
-        _last_result = result
+        self.result = result
+        if self.emit_enabled:
+            global _last_result
+            _last_result = result
         self._emit("wf_complete", {"result": result})
 
-    # ---- per-window optimization ------------------------------------------
+    # ---- window execution -------------------------------------------------
 
-    def _optimize_window(self, is_warm_start: int, is_start: int, is_end: int):
+    def _finalize_window(self, w: dict, r: dict, df, bars_per_year: float) -> None:
+        """Build a window's summary from its worker result (parent-side: needs the
+        OOS index slice for benchmark/vol). Safe to call as windows finish out of
+        order — summaries are sorted by window_idx before the final report."""
         s = self.spec
-        self.trial_idx = 0  # reset per window so progress bar resets
+        oos_result = r["oos_result"]
+        # Per-window seeded RNG so the bootstrap Sharpe CI is reproducible no
+        # matter which order the windows complete in.
+        rng_w = np.random.default_rng(s["seed"] + int(w["w_idx"]))
+        extras = _fold_extras(df, w["oos_idx"], oos_result, rng_w, bars_per_year,
+                              oos_start_ts=w["oos_start"])
+        is_score = r["is_score"]
+        summary = {
+            "window_idx": w["w_idx"] + 1,
+            "is_start": w["is_start"],
+            "is_end": w["is_end"],
+            "oos_start": w["oos_start"],
+            "oos_end": w["oos_end"],
+            "best_params": r["best_params"],
+            "is_score": float(is_score) if is_score is not None and math.isfinite(is_score) else None,
+            # In-window stats only (warm-up bars excluded — see _window_stats).
+            "oos_stats": _window_stats(oos_result, w["oos_start"]),
+            "optuna_trials": r["optuna_trials"],
+            **extras,
+        }
+        self.window_summaries.append(summary)
+        self._emit("wf_window_done", {"window": summary})
 
-        def objective(trial: optuna.Trial) -> float:
+    def _run_windows_sequential(self, windows: list, df, bars_per_year: float) -> dict:
+        """One window at a time, in the job thread. Used for 1 worker / 1 window —
+        keeps the live per-trial progress bar and avoids process-spawn overhead."""
+        s = self.spec
+        results: dict[int, dict] = {}
+        for w in windows:
             if self.cancel_flag:
-                # Stops the study cleanly via the callback below; raising
-                # TrialPruned avoids logging a failed trial.
-                raise optuna.TrialPruned()
-            params = dict(s["base_params"])
-            for entry in s["search_space"]:
-                name = entry["name"]
-                low = float(entry["low"])
-                high = float(entry["high"])
-                step = entry.get("step")
-                log_scale = bool(entry.get("log", False))
-                if entry["type"] == "int":
-                    params[name] = trial.suggest_int(
-                        name, int(low), int(high),
-                        step=int(step) if step else 1,
-                        log=log_scale,
-                    )
-                else:
-                    if step:
-                        params[name] = trial.suggest_float(name, low, high, step=float(step))
-                    else:
-                        params[name] = trial.suggest_float(name, low, high, log=log_scale)
-            result = backtest_engine.run(
-                s["strategy_id"], s["symbol"], s["timeframe"],
-                params, start_time=is_warm_start, end_time=is_end,
-                trade_start_time=is_start,
-            )
-            # Score on the in-window slice only (warm-up bars would dilute it).
-            score = _score_from_stats(_window_stats(result, is_start), s["metric"])
-            self.trial_idx += 1
-            # Throttle progress events: every trial is fine, payload is tiny.
-            self._emit("wf_progress", {
-                "window_idx": self.window_idx,
-                "total_windows": self.total_windows,
-                "trial_idx": self.trial_idx,
-                "n_trials": s["n_trials"],
-                "current_score": score,
-            })
-            return score
+                break
+            self.active_workers = 1
+            self.window_idx = w["w_idx"] + 1
+            self.trial_idx = 0
 
-        def stop_if_cancelled(study: optuna.Study, _trial) -> None:
+            def on_trial(i, score, best):
+                self.trial_idx = i
+                if best is not None:
+                    self.current_best_score = best
+                self._emit("wf_progress", {
+                    "window_idx": self.window_idx,
+                    "total_windows": self.total_windows,
+                    "trial_idx": i,
+                    "n_trials": s["n_trials"],
+                    "current_score": score,
+                })
+
+            best_params, is_score, optuna_trials = _optimize_window_pure(
+                s, w["is_warm_start"], w["is_start"], w["is_end"],
+                on_trial=on_trial, cancel_check=lambda: self.cancel_flag)
             if self.cancel_flag:
-                study.stop()
-            else:
-                self.current_best_score = float(study.best_value) if study.best_trial else None
+                break
+            oos_result = backtest_engine.run(
+                s["strategy_id"], s["symbol"], s["timeframe"], best_params,
+                start_time=w["oos_warm_start"], end_time=w["oos_end"],
+                trade_start_time=w["oos_start"])
+            r = {"w_idx": w["w_idx"], "best_params": best_params, "is_score": is_score,
+                 "optuna_trials": optuna_trials, "oos_result": oos_result}
+            results[w["w_idx"]] = r
+            self._finalize_window(w, r, df, bars_per_year)
+        self.active_workers = 0
+        return results
 
-        study = optuna.create_study(
-            direction="maximize",
-            sampler=TPESampler(seed=s["seed"]),
-        )
-        # n_trials may run a bit short if cancelled mid-study.
-        try:
-            study.optimize(
-                objective,
-                n_trials=s["n_trials"],
-                n_jobs=s.get("n_workers", 1),
-                callbacks=[stop_if_cancelled],
-                show_progress_bar=False,
-                gc_after_trial=False,
-            )
-        except optuna.TrialPruned:
-            pass
+    def _run_windows_parallel(self, windows: list, df, bars_per_year: float, n_workers: int) -> dict:
+        """Optimize windows across `n_workers` processes (true multi-core). A
+        background thread drains per-trial progress from a shared queue and keeps
+        the UI bar moving; a shared cancel Event lets the Stop button reach the
+        workers. Summaries are finalized in the parent as each window returns."""
+        s = self.spec
+        results: dict[int, dict] = {}
+        ctx = mp.get_context("spawn")
 
-        if not study.trials or study.best_trial is None:
-            # No usable trial — fall back to base params with a NaN score.
-            return dict(s["base_params"]), None, []
+        with ctx.Manager() as mgr:
+            q = mgr.Queue()
+            cancel_event = mgr.Event()
+            drain_stop = threading.Event()
 
-        best_params = dict(s["base_params"])
-        best_params.update(study.best_params)
-        trial_records = [
-            {"params": t.params, "value": (float(t.value) if t.value is not None else None)}
-            for t in study.trials
-            if t.state == optuna.trial.TrialState.COMPLETE
-        ]
-        return best_params, study.best_value, trial_records
+            def drain():
+                while not drain_stop.is_set():
+                    if self.cancel_flag:
+                        try: cancel_event.set()
+                        except Exception: pass
+                    try:
+                        msg = q.get(timeout=0.2)
+                    except Exception:
+                        continue
+                    if msg.get("type") == "trial":
+                        self.trial_idx = msg["trial_idx"]
+                        if msg.get("best_score") is not None:
+                            self.current_best_score = msg["best_score"]
+                        self._emit("wf_progress", {
+                            "window_idx": self.window_idx,
+                            "total_windows": self.total_windows,
+                            "trial_idx": msg["trial_idx"],
+                            "n_trials": s["n_trials"],
+                            "current_score": msg.get("score"),
+                        })
+
+            dt = threading.Thread(target=drain, name=f"wf-drain-{self.job_id}", daemon=True)
+            dt.start()
+            try:
+                with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as ex:
+                    futs = {
+                        ex.submit(_optimize_and_eval_task, _task_payload(s, w), q, cancel_event): w
+                        for w in windows
+                    }
+                    self.active_workers = min(n_workers, len(windows))
+                    completed = 0
+                    for fut in as_completed(futs):
+                        if self.cancel_flag:
+                            try: cancel_event.set()
+                            except Exception: pass
+                        w = futs[fut]
+                        try:
+                            r = fut.result()
+                        except Exception:
+                            log.exception("walk-forward window %s failed", w["w_idx"])
+                            continue
+                        if r.get("cancelled"):
+                            continue
+                        results[w["w_idx"]] = r
+                        completed += 1
+                        self.window_idx = completed
+                        # Saturated pool runs min(workers, remaining) at once.
+                        self.active_workers = min(n_workers, len(windows) - completed)
+                        self._finalize_window(w, r, df, bars_per_year)
+            finally:
+                drain_stop.set()
+        return results

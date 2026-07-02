@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { socket } from "../services/socket.js";
 import LiveClock from "./LiveClock.jsx";
 import { logout } from "../services/auth.js";
+import BrandAtom from "./BrandAtom.jsx";
 
 // Grouped under the "Validation" dropdown to keep the top bar uncluttered.
 const VALIDATION_ITEMS = [
@@ -9,6 +10,7 @@ const VALIDATION_ITEMS = [
   { href: "#gridsearch",  view: "gridsearch",  label: "Grid Search" },
   { href: "#montecarlo",  view: "montecarlo",  label: "Monte Carlo" },
   { href: "#costsweep",   view: "costsweep",   label: "Cost Sweep" },
+  { href: "#reportimport", view: "reportimport", label: "Report Import" },
 ];
 
 export default function Navbar({ view = "dashboard", mode, onModeChange }) {
@@ -29,18 +31,16 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
     <nav className="flex items-center justify-between px-6 py-4 border-b border-line bg-bg-panel/60 backdrop-blur">
       <div className="flex items-center gap-6">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-accent-grad" />
+          <BrandAtom size={30} />
           <div className="text-lg font-semibold tracking-tight">
             Quant<span className="text-accent-blue">lab</span>
           </div>
         </div>
 
         <div className="flex items-center gap-1 ml-4">
-          <NavLink href="#dashboard"  active={view === "dashboard"}>Dashboard</NavLink>
           <NavLink href="#dashboardv2" active={view === "dashboardv2"}>Dashboard V2</NavLink>
           <NavDropdown label="Validation" items={VALIDATION_ITEMS} view={view} />
           <NavLink href="#marketlab"   active={view === "marketlab"}>Market Lab</NavLink>
-          <NavLink href="#reportimport" active={view === "reportimport"}>Report Import</NavLink>
           <NavLink href="#skills"      active={view === "skills"}>Skills</NavLink>
           <NavLink href="#strategies"  active={view === "strategies"}>Strategies</NavLink>
           <NavLink href="#livealerts"  active={view === "livealerts"}>Live Alerts</NavLink>

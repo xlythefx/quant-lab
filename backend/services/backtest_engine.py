@@ -111,10 +111,16 @@ def _regime_segments(sig_df: pd.DataFrame, params: dict) -> dict:
     adx_labels = np.where(ranging, "Ranging", "Trending")
     adx = _rle_segments(adx_labels, time_a)
 
+    # Which lens the chart opens on = the strategy's regime method (legacy
+    # use_five_regime still honored). "hmm" is valid here; the chart self-fetches
+    # the HMM lens, while these five/adx segments remain available to toggle.
+    _method = params.get("regime_method")
+    if _method not in ("adx", "five", "hmm"):
+        _method = "five" if params.get("use_five_regime") else "adx"
     return {
         "five": five,
         "adx": adx,
-        "default": "five" if params.get("use_five_regime") else "adx",
+        "default": _method,
     }
 
 

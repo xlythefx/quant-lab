@@ -54,6 +54,89 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.S
 
 
 # ---------------------------------------------------------------------------
+# Regime gating helpers
+# ---------------------------------------------------------------------------
+
+def _regime_method(p) -> str:
+    """Which regime engine to gate with: 'adx' | 'five' | 'hmm'.
+
+    Falls back to the legacy use_five_regime boolean when regime_method is absent
+    (so old saved params / presets keep working)."""
+    m = p.get("regime_method")
+    if m in ("adx", "five", "hmm"):
+        return m
+    return "five" if p.get("use_five_regime") else "adx"
+
+
+# Cache the (slow) causal-HMM per-bar labels so toggling allowed-moods or other
+# (non-HMM) params re-uses the fit. Keyed by the price data + HMM-fit params, so a
+# cache hit only happens for an identical series + identical model settings.
+_HMM_LABEL_CACHE = {}
+_HMM_LABEL_CACHE_MAX = 8
+
+
+def _hmm_labels_for(out: pd.DataFrame, p, prog=None) -> pd.Series:
+    """Per-bar causal HMM mood label for each row of `out` (Series, out.index).
+
+    Bars before the first fit (or when there isn't enough data to fit) are
+    "Warmup"; low-confidence bars are "Undecided". Both are excluded from any
+    allowed-moods set, so they never take entries. Result is cached.
+
+    `prog` (optional) is {"sid","label",...} injected by the portfolio runner; when
+    present (and the labels aren't a cache hit), the slow rolling fit reports its
+    per-refit progress over the socket so the dashboard can show a live bar.
+    """
+    import hashlib
+    from services.strategies.regime_hmm import causal_hmm_labels
+
+    close = out["close"].to_numpy(dtype=float)
+    n_states = int(p.get("hmm_n_states", 5))
+    ranging_ratio = float(p.get("hmm_ranging_ratio", 0.10))
+    undecided_below = float(p.get("hmm_undecided_below", 0.5))
+    key = (hashlib.md5(close.tobytes()).hexdigest(), n_states, ranging_ratio, undecided_below)
+    cached = _HMM_LABEL_CACHE.get(key)
+    if cached is not None:
+        return cached  # cache hit → instant, nothing to report
+
+    # Per-refit progress → socket (only when a sid was injected by the runner).
+    on_progress = None
+    if prog and prog.get("sid"):
+        from services import event_bus
+        sid = prog["sid"]
+        label = prog.get("label", "strategy")
+
+        def on_progress(done, total):
+            event_bus.emit("backtest_progress", {
+                "stage": "hmm", "label": label,
+                "refit": int(done), "n_refits": int(total),
+                "pct": round(100.0 * done / total, 1) if total else 0.0,
+            }, to=sid)
+
+    hmm_p = {"n_states": n_states, "ranging_ratio": ranging_ratio,
+             "undecided_below": undecided_below}
+    try:
+        res = causal_hmm_labels(out, hmm_p, on_progress=on_progress)
+        lab_by_time = dict(zip((int(t) for t in res["times"]), res["labels"]))
+        labels = out["time"].map(lab_by_time).fillna("Warmup")
+    except ValueError:
+        # Not enough data to fit the HMM over this window → no mood info → no entries.
+        labels = pd.Series("Warmup", index=out.index)
+    labels.index = out.index
+
+    if len(_HMM_LABEL_CACHE) >= _HMM_LABEL_CACHE_MAX:
+        _HMM_LABEL_CACHE.pop(next(iter(_HMM_LABEL_CACHE)))
+    _HMM_LABEL_CACHE[key] = labels
+    return labels
+
+
+def _hmm_in_regime(out: pd.DataFrame, p, prog=None) -> pd.Series:
+    """Boolean Series: True where the HMM mood is in the allowed set."""
+    labels = _hmm_labels_for(out, p, prog)
+    allowed = [k for k, on in (p.get("allowed_hmm_moods") or {}).items() if on]
+    return labels.isin(allowed)
+
+
+# ---------------------------------------------------------------------------
 # Strategy
 # ---------------------------------------------------------------------------
 
@@ -84,19 +167,30 @@ class VwmaReversionStrategy(Strategy):
                   {"long": True, "short": True},
                   group="Direction"),
         ParamSpec("use_regime", ParamType.BOOL, False, group="Regime",
-                  description="Block entries when ADX signals a trending market. Exits still fire."),
+                  description="Master switch: gate entries by market regime. Pick the method below. "
+                              "Exits always fire regardless."),
+        ParamSpec("regime_method", ParamType.SELECT, "adx", group="Regime",
+                  options=[
+                      {"value": "adx",  "label": "ADX (ranging vs trending)"},
+                      {"value": "five", "label": "5-Regime classifier"},
+                      {"value": "hmm",  "label": "HMM moods (backtest only, slower)"},
+                  ],
+                  description="Which regime engine gates entries when Use Regime is on. ADX and 5-Regime "
+                              "are fast; HMM re-fits a model over the whole backtest (slower; not used live)."),
         ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime"),
         ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime"),
-        ParamSpec("use_five_regime", ParamType.BOOL, False, group="Regime",
-                  description="Use the 5-regime classifier (Trend↑/Trend↓/High-Vol/Quiet/Choppy) instead "
-                              "of the binary ADX filter. Requires Use Regime on. Only the regimes checked "
-                              "below are allowed to take entries."),
         ParamSpec("allowed_regimes", ParamType.REGIMES,
                   {"Trending Up": False, "Trending Down": False,
                    "High-Volatility": False, "Quiet": True, "Choppy-Range": True},
                   group="Regime",
-                  description="When the 5-regime engine is on, only allow entries while the market is in "
-                              "one of the checked regimes."),
+                  description="5-Regime method: only allow entries while the market is in one of the "
+                              "checked regimes."),
+        ParamSpec("allowed_hmm_moods", ParamType.REGIMES,
+                  {"Bearish Volatile": False, "Bearish Normal": True, "Ranging": True,
+                   "Bullish Normal": True, "Bullish Volatile": False},
+                  group="Regime",
+                  description="HMM method: only allow entries while the HMM mood is one of the checked "
+                              "ones. Warmup / Undecided bars never take entries."),
         ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
                   description="Max concurrent positions per side. Each tranche is sized at the strategy's Risk%. Set to 1 to disable stacking."),
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
@@ -180,6 +274,15 @@ class VwmaReversionStrategy(Strategy):
                     color="rgba(239,68,68,0.85)", line_width=1, line_style="dashed"),
     ]
 
+    def __init__(self, params=None):
+        # Migrate legacy params (use_five_regime bool) to regime_method BEFORE the
+        # base merge strips unknown keys — so old saved configs/presets that only
+        # have use_five_regime still pick the right method.
+        params = dict(params or {})
+        if "regime_method" not in params and "use_five_regime" in params:
+            params["regime_method"] = "five" if params.get("use_five_regime") else "adx"
+        super().__init__(params)
+
     # ---- vectorized (backtest) ----------------------------------------
     def vectorized(self, df: pd.DataFrame) -> pd.DataFrame:
         p = self.p
@@ -216,7 +319,8 @@ class VwmaReversionStrategy(Strategy):
             short_cond = pd.Series(False, index=out.index)
 
         if p.get("use_regime"):
-            if p.get("use_five_regime"):
+            method = _regime_method(p)
+            if method == "five":
                 # 5-regime membership filter (causal labeler shared with Market Lab).
                 rp = _regime_params({
                     "adx_period": p["regime_adx_period"],
@@ -225,6 +329,11 @@ class VwmaReversionStrategy(Strategy):
                 labels = _regime_labels(out, rp)
                 allowed = [k for k, on in (p.get("allowed_regimes") or {}).items() if on]
                 in_regime = pd.Series(np.isin(labels, allowed), index=out.index)
+            elif method == "hmm":
+                # Data-driven HMM moods (causal; slower — re-fits over the window).
+                # self._progress (set by the portfolio runner) carries the sid for
+                # live per-refit progress; absent in plain/standalone runs.
+                in_regime = _hmm_in_regime(out, p, getattr(self, "_progress", None))
             else:
                 # Binary ADX ranging filter (original behavior).
                 in_regime = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"]).detect(out)
@@ -351,7 +460,7 @@ class VwmaReversionStrategy(Strategy):
         warmup = max(p["vwma_length"], p["rsi_length"], p["atr_length"]) * 4
         # The 5-regime labeler needs enough trailing history for its volatility
         # lookback, or the live label won't match the backtest label.
-        if p.get("use_regime") and p.get("use_five_regime"):
+        if p.get("use_regime") and _regime_method(p) == "five":
             rp_live = _regime_params({
                 "adx_period": p["regime_adx_period"],
                 "adx_trend_thresh": p["regime_adx_threshold"],
@@ -416,7 +525,8 @@ class VwmaReversionStrategy(Strategy):
         sides = p["sides"]
 
         if p.get("use_regime") and pos == 0:
-            if p.get("use_five_regime"):
+            method = _regime_method(p)
+            if method == "five":
                 rp = _regime_params({
                     "adx_period": p["regime_adx_period"],
                     "adx_trend_thresh": p["regime_adx_threshold"],
@@ -425,6 +535,12 @@ class VwmaReversionStrategy(Strategy):
                 allowed = [k for k, on in (p.get("allowed_regimes") or {}).items() if on]
                 if last_label not in allowed:
                     return None  # current regime not allowed — block new entries; exits still fire
+            elif method == "hmm":
+                # HMM gating is backtest-only — re-fitting a rolling HMM on every
+                # closed bar live is impractical. So live does NOT gate on HMM
+                # (entries pass through); live will diverge from an HMM-gated
+                # backtest. Use ADX/5-Regime for live regime gating.
+                pass
             else:
                 rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
                 if rd.last_adx(df) >= p["regime_adx_threshold"]:

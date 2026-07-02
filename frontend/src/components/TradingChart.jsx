@@ -87,6 +87,10 @@ export default function TradingChart({
   const activeRegimeColorsRef = useRef(REGIME_COLORS);
   const showRegimesRef = useRef(false);
   const hmmCacheRef = useRef(new Map());   // `${symbol}|${timeframe}` -> {segments, colors, labels}
+  // Volume profile (VRVP): horizontal volume-by-price histogram over the visible bars.
+  const volProfileLayerRef = useRef(null);
+  const vpCandlesRef = useRef(null);       // mirror of staticData.candles for scroll handlers
+  const showVolProfileRef = useRef(false);
 
   const [last, setLast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -102,6 +106,8 @@ export default function TradingChart({
   const [regimeLens, setRegimeLens] = useState("five");
   // HMM is fetched on demand: { loading, error, segments, colors, labels }.
   const [hmmState, setHmmState] = useState(null);
+  // Volume profile overlay. Default OFF — flip on to see where volume piled up by price.
+  const [showVolProfile, setShowVolProfile] = usePersistentState("ql.chart.showVolProfile", false);
 
   const isStatic = !!staticData;
 
@@ -193,6 +199,96 @@ export default function TradingChart({
     }
   };
 
+  // Volume profile (VRVP): a horizontal volume-by-price histogram over the bars
+  // currently in view. Binance gives candles, not ticks, so each bar's volume is
+  // spread evenly across the price buckets its high–low range covers (the standard
+  // candle approximation). Marks the POC (most-traded price) and the ~70% Value Area.
+  const _renderVolProfile = () => {
+    const layer = volProfileLayerRef.current;
+    const chart = chartRef.current;
+    const series = seriesRef.current;
+    const el = containerRef.current;
+    if (!layer || !chart || !series || !el) return;
+    layer.innerHTML = "";
+    const candles = vpCandlesRef.current;
+    if (!candles || !candles.length || !showVolProfileRef.current) return;
+
+    const tr = chart.timeScale().getVisibleRange();
+    if (!tr) return;
+    const fromSec = Math.floor(tr.from);
+    const toSec   = Math.ceil(tr.to);
+    const vis = candles.filter((c) => c.time >= fromSec && c.time <= toSec);
+    if (vis.length < 2) return;
+
+    let pMin = Infinity, pMax = -Infinity;
+    for (const c of vis) { if (c.low < pMin) pMin = c.low; if (c.high > pMax) pMax = c.high; }
+    if (!(pMax > pMin)) return;
+
+    const N = 50;
+    const bucket = (pMax - pMin) / N;
+    const prof = new Array(N).fill(0);
+    const clampIdx = (i) => (i < 0 ? 0 : i > N - 1 ? N - 1 : i);
+    for (const c of vis) {
+      const lo = clampIdx(Math.floor((c.low  - pMin) / bucket));
+      const hi = clampIdx(Math.floor((c.high - pMin) / bucket));
+      const span = hi - lo + 1;
+      const per = (c.volume || 0) / span;
+      for (let j = lo; j <= hi; j++) prof[j] += per;
+    }
+
+    let maxVol = 0, total = 0, pocIdx = 0;
+    for (let i = 0; i < N; i++) { total += prof[i]; if (prof[i] > maxVol) { maxVol = prof[i]; pocIdx = i; } }
+    if (maxVol <= 0) return;
+
+    // Value Area: expand out from the POC, always taking the heavier neighbor,
+    // until ~70% of total volume is enclosed (contiguous band, TradingView-style).
+    let cum = prof[pocIdx], vaLo = pocIdx, vaHi = pocIdx;
+    const target = 0.70 * total;
+    while (cum < target && (vaLo > 0 || vaHi < N - 1)) {
+      const above = vaHi < N - 1 ? prof[vaHi + 1] : -1;
+      const below = vaLo > 0 ? prof[vaLo - 1] : -1;
+      if (above >= below) { vaHi += 1; cum += prof[vaHi]; }
+      else { vaLo -= 1; cum += prof[vaLo]; }
+    }
+
+    const maxW = Math.max(40, el.clientWidth * 0.28);   // longest bar ≈ 28% of width
+    for (let i = 0; i < N; i++) {
+      if (prof[i] <= 0) continue;
+      const yTop = series.priceToCoordinate(pMin + (i + 1) * bucket);
+      const yBot = series.priceToCoordinate(pMin + i * bucket);
+      if (yTop == null || yBot == null) continue;
+      const h = Math.max(1, Math.abs(yBot - yTop) - 1);
+      const w = (prof[i] / maxVol) * maxW;
+      const inVA = i >= vaLo && i <= vaHi;
+      const div = document.createElement("div");
+      div.style.position = "absolute";
+      div.style.left = "0";
+      div.style.top = `${Math.min(yTop, yBot)}px`;
+      div.style.width = `${w}px`;
+      div.style.height = `${h}px`;
+      div.style.pointerEvents = "none";
+      div.style.background = i === pocIdx
+        ? "rgba(251,191,36,0.55)"                 // POC — amber
+        : inVA ? "rgba(96,165,250,0.34)"          // value area — blue
+               : "rgba(148,163,184,0.20)";        // rest — slate
+      layer.appendChild(div);
+    }
+
+    // POC line across the full width at the most-traded price.
+    const yPoc = series.priceToCoordinate(pMin + (pocIdx + 0.5) * bucket);
+    if (yPoc != null) {
+      const line = document.createElement("div");
+      line.style.position = "absolute";
+      line.style.left = "0";
+      line.style.right = "0";
+      line.style.top = `${yPoc}px`;
+      line.style.height = "1px";
+      line.style.background = "rgba(251,191,36,0.7)";
+      line.style.pointerEvents = "none";
+      layer.appendChild(line);
+    }
+  };
+
   useEffect(() => {
     seriesRef.current?.applyOptions({ priceFormat: _priceFormat(symbol) });
   }, [symbol]);
@@ -207,8 +303,13 @@ export default function TradingChart({
 
   // Each new run, reset the lens to the strategy's default ("five" if it gates on
   // the 5-mood engine, else "adx"). Within a run the user can override via buttons.
+  // NEVER auto-select the HMM lens, though: it kicks off a slow (~45s) Market Lab
+  // fit the moment it's active (with Regimes left on). If the strategy gates on
+  // HMM, we fall back to the cheap "five" lens here — the HMM ribbon only fetches
+  // when the user explicitly clicks the HMM lens button.
   useEffect(() => {
-    if (regimeSegments?.default) setRegimeLens(regimeSegments.default);
+    const def = regimeSegments?.default;
+    if (def) setRegimeLens(def === "hmm" ? "five" : def);
   }, [regimeSegments]);
 
   // Lazy HMM: fetch (and cache) the Market Lab HMM only when its lens is selected.
@@ -257,6 +358,14 @@ export default function TradingChart({
     showRegimesRef.current = showRegimes;
     _renderRegimeBands();
   }, [regimeLens, regimeSegments, hmmState, showRegimes]);
+
+  // Mirror candles + toggle into refs (for the scroll handlers), then redraw the
+  // volume profile. Recomputes whenever the data or the toggle changes.
+  useEffect(() => {
+    vpCandlesRef.current = staticData?.candles || null;
+    showVolProfileRef.current = showVolProfile;
+    _renderVolProfile();
+  }, [staticData, showVolProfile]);
 
   const _removeStrategyOverlays = (strategyId) => {
     const chart = chartRef.current;
@@ -323,8 +432,9 @@ export default function TradingChart({
       userScrolledBackRef.current = lr.to < lastSeriesIndexRef.current - 3;
       _renderSessionBands();
       _renderRegimeBands();
+      _renderVolProfile();
     };
-    const handleVisibleTimeRange = () => { _renderSessionBands(); _renderRegimeBands(); };
+    const handleVisibleTimeRange = () => { _renderSessionBands(); _renderRegimeBands(); _renderVolProfile(); };
     ts.subscribeVisibleLogicalRangeChange(handleVisibleRange);
     ts.subscribeVisibleTimeRangeChange(handleVisibleTimeRange);
 
@@ -412,6 +522,7 @@ export default function TradingChart({
     }
     _renderSessionBands();
     _renderRegimeBands();
+    _renderVolProfile();
   }, [isStatic, staticData, sessions]);
 
   // ============================================================
@@ -607,6 +718,8 @@ export default function TradingChart({
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
+      {/* Volume profile — horizontal volume-by-price histogram, drawn behind the bands. */}
+      <div ref={volProfileLayerRef} className="absolute inset-0 pointer-events-none z-[3]" />
       {/* Regime (mood) bands — one z-index below sessions so a tinted session still reads. */}
       <div ref={regimeBandsLayerRef} className="absolute inset-0 pointer-events-none z-[4]" />
       {/* Session bands overlay — rendered imperatively, positioned by chart timeScale. */}
@@ -631,6 +744,20 @@ export default function TradingChart({
       </div>
 
       <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+        {isStatic && staticData?.candles?.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowVolProfile((v) => !v)}
+            title={showVolProfile ? "Hide volume profile" : "Show volume profile (volume by price)"}
+            className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-md border transition-colors ${
+              showVolProfile
+                ? "bg-amber-400/20 text-amber-300 border-amber-400/40"
+                : "bg-bg-elev/60 text-muted border-line hover:text-text"
+            }`}
+          >
+            Volume {showVolProfile ? "on" : "off"}
+          </button>
+        )}
         {hasRegimeData && (
           <button
             type="button"

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { fmtInt } from "../services/format.js";
+import { fmtInt, fmtDateStr } from "../services/format.js";
 
 /**
  * Deterministic Walk-Forward test presets — no AI, no hallucinations.
@@ -175,8 +175,8 @@ function PresetModal({ preset, onClose, onApply, disabled }) {
 
           <Section title="Exact values this preset will apply">
             <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
-              <KV k="Range start" v={v.start || "—"} />
-              <KV k="Range end"   v={v.end || "—"} />
+              <KV k="Range start" v={fmtDateStr(v.start)} />
+              <KV k="Range end"   v={fmtDateStr(v.end)} />
               <KV k="IS bars"     v={fmtInt(v.isBars)} />
               <KV k="OOS bars"    v={fmtInt(v.oosBars)} />
               <KV k="Trials/win"  v={fmtInt(v.nTrials)} />

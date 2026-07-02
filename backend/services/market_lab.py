@@ -242,9 +242,11 @@ def classify_regimes_hmm(symbol, timeframe, start, end, params=None) -> dict:
     """Same response shape as classify_regimes(), but regimes come from a causal
     Gaussian HMM (rolling refit + online filtering) instead of the rule tree.
 
-    Labels are the HMM's auto-named states (e.g. "Bull/Calm (trending)"). The first
-    ~warmup bars are unlabeled ("Warmup"). The fit is causal, so forward-return stats
-    are honest (no look-ahead). Results are cached because the fit is slow.
+    Labels are a fixed mood taxonomy (Bearish/Bullish × Normal/Volatile, plus
+    "Ranging"); states sharing a mood are merged. Low-confidence bars are
+    "Undecided" and the first ~warmup bars are "Warmup" — both excluded from the
+    per-mood stats. The fit is causal, so forward-return stats are honest (no
+    look-ahead). Results are cached because the fit is slow.
     See services/strategies/regime_hmm.py.
     """
     import json
@@ -287,8 +289,10 @@ def classify_regimes_hmm(symbol, timeframe, start, end, params=None) -> dict:
             })
             seg_start = i
 
-    # --- Distribution over the real (non-warmup) regimes ---
-    labeled = labels != "Warmup"
+    # --- Distribution over the real (non-warmup, non-undecided) regimes ---
+    # "Warmup" (pre-fit) and "Undecided" (low-confidence) are per-bar overlays, not
+    # learned moods, so they're excluded from the per-mood denominator.
+    labeled = (labels != "Warmup") & (labels != "Undecided")
     n_labeled = int(labeled.sum())
     distribution = []
     for lab in state_labels:
@@ -327,7 +331,7 @@ def classify_regimes_hmm(symbol, timeframe, start, end, params=None) -> dict:
     if n > edge_horizon:
         efwd = c[edge_horizon:] / c[:-edge_horizon] - 1.0      # aligned to bar i
         elab = labels[: n - edge_horizon]
-        emask = elab != "Warmup"
+        emask = (elab != "Warmup") & (elab != "Undecided")
         drift = float(np.mean(efwd[emask])) if emask.any() else 0.0
         for lab in state_labels:
             f = efwd[elab == lab]
@@ -403,7 +407,8 @@ def classify_regimes_hmm(symbol, timeframe, start, end, params=None) -> dict:
                 "fwd_horizon": fwd_horizon,
                 "edge_horizon": edge_horizon,
                 "n_refits": res["n_refits"],
-                "warmup_bars": int(n - n_labeled),
+                "warmup_bars": int(np.sum(labels == "Warmup")),
+                "undecided_bars": int(np.sum(labels == "Undecided")),
                 "analyzed_bars": int(len(df)),
                 "available_bars": int(available_bars),
                 "capped": bool(capped),
@@ -412,11 +417,15 @@ def classify_regimes_hmm(symbol, timeframe, start, end, params=None) -> dict:
                 "engine": "causal Gaussian HMM (rolling refit + online filtering)",
                 "note": "Data-driven regimes from a causal Gaussian HMM: re-fit on a "
                         "trailing window and labeled by the FILTERED posterior (no "
-                        "look-ahead), so forward-return stats are honest. State names are "
-                        "auto-derived from each state's trend/vol/Hurst signature. The first "
-                        "~warmup bars are unlabeled while the first model trains.",
+                        "look-ahead), so forward-return stats are honest. Each state is "
+                        "named from its drift-to-noise ratio (Bullish/Bearish/Ranging) and "
+                        "volatility; states sharing a name are merged into one mood. "
+                        "Low-confidence bars are marked 'Undecided'; the first ~warmup bars "
+                        "are 'Warmup' while the first model trains.",
             },
-            "labels": state_labels,
+            # state_labels excludes the Warmup/Undecided overlays; add Undecided to
+            # the label list so the frontend legend + color map render it.
+            "labels": list(state_labels) + (["Undecided"] if bool(np.any(labels == "Undecided")) else []),
         }),
     }
     if len(_HMM_CACHE) >= _HMM_CACHE_MAX:
