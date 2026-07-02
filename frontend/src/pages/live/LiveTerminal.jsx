@@ -6,6 +6,7 @@ import WorkspaceTabs from "../../components/live/WorkspaceTabs.jsx";
 import StatusFooter from "../../components/live/StatusFooter.jsx";
 import Panel from "../../components/live/Panel.jsx";
 import CommandPalette from "../../components/live/CommandPalette.jsx";
+import TradingWorkspace from "../../components/live/TradingWorkspace.jsx";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
 import { useEnterStagger } from "../../components/live/animations.js";
 import { useGateway, useInstruments } from "../../components/live/hooks.js";
@@ -27,11 +28,22 @@ function ComingSoon({ title, phase }) {
   );
 }
 
-function WorkspaceHost({ ws }) {
+function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deployments, account }) {
   const ref = useRef(null);
   useEnterStagger(ws, ref);
+  if (ws === "trading") {
+    return (
+      <TradingWorkspace
+        symbol={symbol}
+        timeframe={timeframe}
+        onSymbol={onSymbol}
+        onTimeframe={onTimeframe}
+        deployments={deployments}
+        account={account}
+      />
+    );
+  }
   const stub = {
-    trading:    ["Trading", "04"],
     markets:    ["Markets", "08"],
     risk:       ["Risk", "08 / 09"],
     blotter:    ["Blotter", "07 / 08"],
@@ -54,6 +66,15 @@ function TerminalInner() {
   const { dataMode, toggleDataMode } = useDataMode();
   const gateway = useGateway();
   const { instruments } = useInstruments();
+  const [symbol, setSymbol] = useState(() => {
+    try { return localStorage.getItem("ql.live_symbol") || "BTCUSDT"; } catch { return "BTCUSDT"; }
+  });
+  const [timeframe, setTimeframe] = useState(() => {
+    try { return localStorage.getItem("ql.live_tf") || "1m"; } catch { return "1m"; }
+  });
+
+  useEffect(() => { try { localStorage.setItem("ql.live_symbol", symbol); } catch { /* ignore */ } }, [symbol]);
+  useEffect(() => { try { localStorage.setItem("ql.live_tf", timeframe); } catch { /* ignore */ } }, [timeframe]);
 
   // Stubs until later phases wire them: equity/dayPnl (09), bell count (05), kill switch (06).
   const [killed, setKilled] = useState(false);
@@ -98,7 +119,17 @@ function TerminalInner() {
               <ComingSoon title="Alerts" phase="06" />
             </div>
           )
-          : <WorkspaceHost ws={ws} />}
+          : (
+            <WorkspaceHost
+              ws={ws}
+              symbol={symbol}
+              timeframe={timeframe}
+              onSymbol={setSymbol}
+              onTimeframe={setTimeframe}
+              deployments={[]}
+              account="demo"
+            />
+          )}
       </div>
       <StatusFooter gateway={gateway} dayPnl={null} />
       <CommandPalette
@@ -107,6 +138,7 @@ function TerminalInner() {
         onWorkspace={selectWs}
         onAlerts={() => setView("alerts")}
         symbols={instruments.map((i) => i.symbol)}
+        onSymbol={(s) => { setSymbol(s); selectWs("trading"); }}
       />
     </div>
   );

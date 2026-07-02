@@ -1,6 +1,6 @@
 # 04 — Trading workspace (chart + live price + signals)
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 02 (shell), 03 (ticker/candles channels).
 
@@ -20,19 +20,19 @@ Time & Sales render as clearly-labeled **SIMULATED** placeholders (real feed lat
 
 ## Checklist
 
-- [ ] Trading layout: row1 `2fr 1fr 1fr` (chart | order book | time&sales), row2 `repeat(4,1fr)` (positions | liquidations | funding/OI | news).
-- [ ] Chart panel: mount `TradingChart` in live mode fed by `useLiveChannel('candles'|'ticker')`; overlay VWMA(14) + Z-band(1.5σ) + Asia/LDN/NY session shading (styles per handoff tokens).
-- [ ] Live price header overlay: symbol switcher (name + class tag + ▾), price (22px), change %, H/L/V line.
-- [ ] Symbol switcher menu: venue-grouped Binance instruments (from `/api/live/instruments`); switching resubscribes channels (03) + refreshes chips.
-- [ ] Timeframe selector `1m 5m 15m 1H 4H 1D` → resubscribe candles at that tf.
-- [ ] Strategy chips (top-right of chart): deployments armed on this symbol (from 05); show live P&L / status.
-- [ ] Signal markers: draw entry/exit triangles from the `strategy` channel / live alerter events.
-- [ ] **Order Book** panel — placeholder: real layout (asks/spread/bids + depth bars) fed by a labeled SIMULATED generator behind a `useOrderBook(symbol)` seam; "SIMULATED" chip in header. Real Binance wiring path is ready in [ref-binance-orderbook.md](ref-binance-orderbook.md) (partial depth stream) — swapped in during 08.
-- [ ] **Time & Sales** panel — placeholder likewise (streaming prints, SIMULATED chip).
-- [ ] Perp panels (positions/liq/funding/news) left as stubs here; fleshed in 08.
-- [ ] `vite build` passes; manual check on BTCUSDT.
+- [x] Trading layout: row1 `2fr 1fr 1fr` (chart | order book | time&sales), row2 `repeat(4,1fr)` (positions | liquidations | funding/OI | news).
+- [x] Chart panel: mount `TradingChart` in live mode fed by `useLiveChannel('candles'|'ticker')`; overlay VWMA(14) + Z-band(1.5σ) + Asia/LDN/NY session shading (styles per handoff tokens).
+- [x] Live price header overlay: symbol switcher (name + class tag + ▾), price (22px), change %, H/L/V line.
+- [x] Symbol switcher menu: venue-grouped Binance instruments (from `/api/live/instruments`); switching resubscribes channels (03) + refreshes chips.
+- [x] Timeframe selector `1m 5m 15m 1H 4H 1D` → resubscribe candles at that tf.
+- [x] Strategy chips (top-right of chart): deployments armed on this symbol (from 05); show live P&L / status.
+- [x] Signal markers: draw entry/exit triangles from the `strategy` channel / live alerter events.
+- [x] **Order Book** panel — placeholder: real layout (asks/spread/bids + depth bars) fed by a labeled SIMULATED generator behind a `useOrderBook(symbol)` seam; "SIMULATED" chip in header. Real Binance wiring path is ready in [ref-binance-orderbook.md](ref-binance-orderbook.md) (partial depth stream) — swapped in during 08.
+- [x] **Time & Sales** panel — placeholder likewise (streaming prints, SIMULATED chip).
+- [x] Perp panels (positions/liq/funding/news) left as stubs here; fleshed in 08.
+- [x] `vite build` passes; manual check on BTCUSDT.
 
-- [ ] Ship with **BTCUSDT** and **LTCUSDT** selectable first (more symbols later).
+- [x] Ship with **BTCUSDT** and **LTCUSDT** selectable first (more symbols later).
 
 ## Done when
 

@@ -125,6 +125,44 @@ export function useTicker(symbol) {
   return { ticker, simulated: mock };
 }
 
+/**
+ * Order book behind a clean seam: SIMULATED generator today, real Binance
+ * partial-depth stream drop-in in phase 08 (see ref-binance-orderbook.md).
+ * `simulated` in the result always tells the truth for the badge.
+ */
+export function useOrderBook(symbol, lastPrice) {
+  const [book, setBook] = useState(null);
+  const priceRef = useRef(lastPrice);
+  priceRef.current = lastPrice;
+
+  useEffect(() => {
+    setBook(null);
+    const tick = () => setBook(sim.mockBook(symbol, priceRef.current));
+    tick();
+    const t = setInterval(tick, 1500);
+    return () => clearInterval(t);
+  }, [symbol]);
+
+  return { book, simulated: true };
+}
+
+/** Time & Sales — SIMULATED streaming prints (~0.8s), newest first. */
+export function useTape(symbol, lastPrice) {
+  const [prints, setPrints] = useState([]);
+  const priceRef = useRef(lastPrice);
+  priceRef.current = lastPrice;
+
+  useEffect(() => {
+    setPrints([]);
+    const t = setInterval(() => {
+      setPrints((prev) => [sim.mockPrint(symbol, priceRef.current), ...prev].slice(0, 42));
+    }, 800);
+    return () => clearInterval(t);
+  }, [symbol]);
+
+  return { prints, simulated: true };
+}
+
 /** Footer gateway heartbeat; degrades loudly when beats stop arriving. */
 export function useGateway() {
   const [gw, setGw] = useState(null);
