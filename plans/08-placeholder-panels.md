@@ -31,7 +31,7 @@ Binance endpoints are already researched in
 - [ ] **Funding & Open Interest** panel: funding rate, countdown, OI area/line, long/short bar — SIMULATED.
 - [ ] **Liquidations** panel: streaming feed + long/short pressure bar — SIMULATED.
 - [ ] **News** marquee: auto-scrolling headlines + sentiment tags — SIMULATED (or wire a real headline source later).
-- [ ] **Risk** workspace: 4-up cards (equity/dayPnl/gross/netDelta/margin/VaR/…), exposure bars, margin bar, correlation matrix, position-risk table. Derive what we can from real positions; SIMULATE margin/VaR (no engine).
+- [ ] **Risk** workspace + **Positions** panel: build the layout here, but the data is REAL and wired in **phase 09** (read from the `sinegu-api` WAMP position tables), NOT simulated. Only VaR/maint-margin (which we can't derive) may stay labeled-derived. Falls back to SIMULATED when WAMP is down.
 - [ ] **Blotter → Order Entry**: ticket UI (BUY/SELL, type, price, size, leverage, notional/margin, SUBMIT) that, per the chosen model, **routes to the webhook** (06) rather than an in-app OMS — or is disabled with a clear "webhook-only" note.
 - [ ] Panel adaptation by instrument class (`adaptPanels`): stock→key-stats, index→breadth, fx→carry — SIMULATED.
 - [ ] Audit: every non-real number on screen has a SIMULATED marker. No exceptions.

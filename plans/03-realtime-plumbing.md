@@ -24,6 +24,8 @@ snapshot endpoints for initial paint. Keep it lightweight (self-use scale).
 - [ ] Decide channel transport: reuse `event_bus.emit(channel, payload, to=room)`; room = `f"{venue}:{symbol}"` for market channels, a global room for account channels.
 - [ ] Backend: a small live feed service that, for a subscribed (venue, symbol, tf), polls/streams Binance via CCXT and emits `ticker` (≤1–2/s) and `candles` (on close/partial).
 - [ ] Backend: `gateway` heartbeat emit (~0.5 Hz) with `{latencyMs, session, feed}` (session from UTC hour; latency best-effort).
+- [ ] Connection + broker health: surface feed status (OK/DEGRADED) and webhook-delivery health; a dropped price feed or a failed webhook POST must raise a loud, obvious warning — never fail silently.
+- [ ] Auto-reconnect + re-subscribe the selected instrument on socket drop; on Binance stream reconnect, backfill via a REST snapshot before resuming so the chart/book aren't stale.
 - [ ] Backend REST snapshots (match handoff shapes): `GET /api/live/candles`, `/api/live/ticker`, `/api/live/instruments` (Binance symbols we have). Keep field names `{t,o,h,l,c,v}` etc.
 - [ ] Frontend: `useLiveChannel(channel, {venue, symbol})` hook — subscribes on mount, unsubscribes on unmount / symbol switch; returns latest snapshot.
 - [ ] Frontend: `subscribe/unsubscribe` messages so the backend only streams the selected instrument.

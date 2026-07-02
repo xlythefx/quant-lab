@@ -37,6 +37,7 @@ alert AND optionally POSTs a TradingView-style payload to a configured broker we
 - [ ] **Create/edit alerts + webhooks via a modal** on the new live page — reuse the existing `LiveAlerts` "Add / Edit rule" modal (name, strategy, symbol, timeframe, webhook URL + preset picker, secret, alias, leverage) so creation works "just like today".
 - [ ] Rules persist to `data/live_alerts.json` via the existing `live_alerts_routes` (unchanged); can be created, edited, and deleted from the modal/list.
 - [ ] Add a local **SQLite `alerts_history`** table: every fired alert is appended (time, rule name, strategy, symbol, side, price, webhook status). List view can filter and **delete** past alerts.
+- [ ] **Activity log:** a chronological feed of everything the system did — armed / paused / killed / signal fired / webhook sent (ok/failed) / reconnected. This is the black box for trust + debugging; store alongside `alerts_history`.
 - [ ] Alerts list matches handoff shape `Alert[]`; empty-state uses terminal muted text.
 - [ ] Backend: webhook config store (URL + secret) in backend config/secrets — **never** returned to the frontend in full; frontend sees only a label + masked hint.
 - [ ] Backend: on a live signal, POST the webhook payload (e.g. `{secret, action, symbol, price, ...}`) to the configured broker bridge; log success/failure.

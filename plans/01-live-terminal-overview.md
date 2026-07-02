@@ -1,6 +1,6 @@
 # 01 — Live Terminal: overview & north-star
 
-**Status:** ⬜ Todo (anchor doc — not "executed"; it frames the phase files 02–08)
+**Status:** ⬜ Todo (anchor doc — not "executed"; it frames the phase files 02–10)
 **Created:** Jul 01, 2026
 
 ## Goal
@@ -28,7 +28,7 @@ new home for **live alerts** and running strategies.
   `LiveAlerts` page + live alerter stay fully functional the whole time we build the
   new terminal. The Live Terminal is **additive** — nothing live is removed while we
   build. Only **after** we confirm the new terminal works do we retire the old surface,
-  and that removal is its **own separate step** we schedule later (not part of 02–08).
+  and that removal is its **own deliberate step (phase 10)**, only after the new terminal is proven.
 - **Retain not-yet-real features for future use.** Panels QuantLab can't feed yet
   (order book, funding, OI, liquidations, news, risk/margin, order entry) are **built
   as SIMULATED scaffolding and kept**, not dropped — each structured so a real feed is
@@ -71,14 +71,16 @@ from `Institutional Trading Terminal.zip`). The interactive mockup
 
 **Real data now:**
 - Trading chart: Binance candles + live ticker + this-strategy's live signals.
-- Strategies / Deployments: from the live alerter (armed strategy × symbol).
-- Alerts: re-homed `LiveAlerts`.
-- Analytics: backtest analytics run over the live trade log.
+- Strategies / Deployments: from the live alerter (armed strategy × symbol), with a Demo/Live account select.
+- Alerts: re-homed `LiveAlerts` create/edit modal + fired-history + activity log.
+- Analytics: backtest analytics on the live journal (+ real broker realized P&L).
+- Positions / Risk: REAL, read from the `sinegu-api` WAMP tables (phase 09); fired alerts reconciled against them.
 - Footer/status, clock, LIVE dot, bell badge (running deployments count).
 
 **Faithful placeholders (labeled SIMULATED, deferred wiring):**
 - Order book (L2), Time & Sales, Funding/OI, Liquidations, News marquee.
-- Markets table, Risk workspace (margin/VaR), Blotter order entry.
+- Markets table, Blotter order entry.
+- (Order book has the shortest path to real — see [ref-binance-orderbook.md](ref-binance-orderbook.md).)
 
 ## Phased roadmap (each is its own plan file)
 
@@ -88,9 +90,11 @@ from `Institutional Trading Terminal.zip`). The interactive mockup
 - **05** — Strategies & Deployments: wire to `live_alerter`; deploy/pause/kill; webhook target. Real.
 - **06** — Alerts & webhooks: re-home LiveAlerts; broker webhook config + test-signal. Real.
 - **07** — Analytics (live): reuse backtest analytics on the live journal. Real.
-- **08** — Placeholder panels: Markets / Risk / Blotter / perp panels / news, design-faithful + SIMULATED. Later-wire.
+- **08** — Placeholder panels: Markets / Blotter / order book / funding / liquidations / news, design-faithful + SIMULATED. Later-wire.
+- **09** — Real positions, risk & broker reconciliation: read from `sinegu-api` WAMP (read-only); reconcile fired alerts vs actual positions. Real.
+- **10** — Cutover: retire the old LiveAlerts surface, only after the new terminal is proven.
 
-Suggested execution order: 02 → 03 → 04 → 05 → 06 → 07 → 08. We start only when you say so.
+Suggested execution order: 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 → 10. We start only when you say so.
 
 ## Resolved decisions (Jul 01, 2026)
 
@@ -106,6 +110,19 @@ Suggested execution order: 02 → 03 → 04 → 05 → 06 → 07 → 08. We star
   (`alerts_history`), deletable in the terminal. The WAMP `sinegu-api`
   (`C:\wamp64\www\sinegu-api`) remains only the webhook *destination*, not a storage
   dependency. Alert creation reuses today's modal flow. (Details in 06.)
+- ✅ **New UI stays pristine & isolated.** The Live Terminal is its own fresh UI in the
+  new design; it never imports backtest components (chart/forms/panels), and its
+  components never leak into the backtest dashboard. The two worlds share only
+  connections/data (endpoints, socket, alerter, analytics math, PARAM_SCHEMA). See
+  [EXECUTION-NOTES.md](EXECUTION-NOTES.md).
+- ✅ **Demo/Live account select.** A deployment carries a simple `account` = Demo | Live
+  dropdown that decides which account/webhook target the signal is sent to. Demo = run
+  live with fake money first. Kept intentionally simple.
+- ✅ **Real positions/risk/reconciliation from WAMP (read-only).** The Risk/Positions
+  panels read real broker positions from the `sinegu-api` WAMP tables
+  (`binance_positions`/`ig_positions` + `*_pastpositions`), and fired alerts are
+  reconciled against them. Read-only, positions/risk only — alerts still stored in
+  QuantLab; falls back to SIMULATED when WAMP is down. (Phase 09.)
 
 ## Still to confirm while executing
 
@@ -114,5 +131,5 @@ Suggested execution order: 02 → 03 → 04 → 05 → 06 → 07 → 08. We star
 
 ## Done when
 
-The overview is agreed and the phase files 02–08 exist and are scoped. (This doc is
+The overview is agreed and the phase files 02–10 exist and are scoped. (This doc is
 the map; the phase files are the work.)

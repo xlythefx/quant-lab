@@ -31,6 +31,9 @@ POSTing signals to a **broker webhook**. Bell badge = count of RUNNING deploymen
 - [ ] Deploy modal: pick strategy, symbol (Binance), timeframe, preset (Conservative/Balanced/Aggressive → param overrides), tune params (reuse [StrategyEditor.jsx](../frontend/src/components/StrategyEditor.jsx) form), choose webhook target, deploy.
 - [ ] Deployments list: status toggle (pause/resume), kill, live P&L / n, per-strategy accent.
 - [ ] Bell badge in top bar (02) = number of RUNNING deployments.
+- [ ] **Demo/Live account select** in the deploy modal — a simple `account` = Demo | Live dropdown that sets which account/webhook target the signal is sent to (Demo = run live with fake money). Shown in the confirm-before-arm step.
+- [ ] **Backtest → live handoff:** a "Go Live with this strategy" action on the backtest side that flips to live mode and opens the deploy modal pre-filled with the same strategy + params. (Nav + params only — do NOT import live UI into the backtest dashboard.)
+- [ ] **"Why did/didn't it fire":** each deployment shows its last evaluation (last bar seen, whether the condition was met) so quiet periods are explainable and you can trust it's watching.
 - [ ] "Test signal" fires a manual signal end-to-end (daemon → `strategy` channel → chart marker + alert).
 - [ ] `vite build` + a real arm/pause/kill cycle on BTCUSDT.
 

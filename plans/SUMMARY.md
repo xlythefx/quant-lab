@@ -37,6 +37,14 @@ each item links to its full plan file.
    are stored inside QuantLab (a local file plus a small local database) and can be
    deleted. We are not tying this to your WAMP server; WAMP stays only as the place your
    alerts get sent to.
+7. Because a live alert can trigger a real trade at your broker, the live side has safety
+   rails: webhooks start in a safe test mode, there is a one-click "disarm everything",
+   turning a strategy live asks you to confirm, and the same signal can never fire twice.
+8. Each strategy has a simple Demo or Live account switch, so you can run it live with fake
+   money first, then flip to real when you trust it.
+9. The new terminal has its own fresh look (the professional design). It does not borrow
+   screens from the backtest side and does not push its screens into it — the two only
+   share the data underneath.
 
 ## The work, one plan at a time
 
@@ -66,6 +74,17 @@ start when you say so.
    (markets list, risk view, order book, funding, news) as tidy SIMULATED placeholders,
    built so we can make them real later. The order book is first in line to go real —
    the Binance how-to is already written ([ref-binance-orderbook.md](ref-binance-orderbook.md)).
+9. [Real positions, risk and reconciliation](09-positions-risk-reconciliation.md) — show
+   your real open positions and profit (read from your existing WAMP database that already
+   tracks them), and check that every alert that fired actually opened a real position at
+   the broker — so a "fired but nothing happened" can't slip by.
+10. [Retire the old alerts](10-cutover.md) — once the new terminal is proven, make it the
+   only home for live, and switch off the old alerts page (only after double-checking they
+   behave the same, so nothing is lost).
+
+For whoever builds this (for example Fable 5): the how-to-build guide is in
+[EXECUTION-NOTES.md](EXECUTION-NOTES.md) — coding conventions, what to reuse, a mock-data
+mode so panels can be built without a live connection, and the safety and reconnect rules.
 
 ## How you'll know it's working (the finish line)
 

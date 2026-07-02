@@ -27,6 +27,7 @@ backtest report identically.
 - [ ] Frontend Analytics: 8 stat cards + cumulative equity curve (progressive draw) + breakdown table grouped by STRATEGY/ASSET/BROKER; row click sets a drill-down filter and recomputes.
 - [ ] Frontend Blotter → Trade Log tab: filters (strategy/asset/venue), summary strip (Net, Win%, PF, ExpR, N), dense table.
 - [ ] Cross-check: a handful of live trades produce the same metric formulas as the backtest engine.
+- [ ] **Live vs expectation:** compare live results against what the backtest predicted (win rate, expectancy, drawdown), so you can see whether reality is tracking the test. Prefer the broker's ACTUAL realized P&L (WAMP `*_pastpositions`, phase 09) over our own guess where available.
 
 ## Done when
 
