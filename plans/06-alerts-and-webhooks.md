@@ -1,6 +1,6 @@
 # 06 — Alerts & webhooks (re-home LiveAlerts + broker bridge)
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 05 (deployments emit signals).
 
@@ -33,18 +33,18 @@ alert AND optionally POSTs a TradingView-style payload to a configured broker we
 
 ## Checklist
 
-- [ ] Surface `LiveAlerts` content in a terminal Alerts view (bell → Alerts) **without removing** the existing `#livealerts` page — both read the same backend. The old page stays live until the new terminal is confirmed; its removal is a separate, later step (see 01 migration principles).
-- [ ] **Create/edit alerts + webhooks via a modal** on the new live page — reuse the existing `LiveAlerts` "Add / Edit rule" modal (name, strategy, symbol, timeframe, webhook URL + preset picker, secret, alias, leverage) so creation works "just like today".
-- [ ] Rules persist to `data/live_alerts.json` via the existing `live_alerts_routes` (unchanged); can be created, edited, and deleted from the modal/list.
-- [ ] Add a local **SQLite `alerts_history`** table: every fired alert is appended (time, rule name, strategy, symbol, side, price, webhook status). List view can filter and **delete** past alerts.
-- [ ] **Activity log:** a chronological feed of everything the system did — armed / paused / killed / signal fired / webhook sent (ok/failed) / reconnected. This is the black box for trust + debugging; store alongside `alerts_history`.
-- [ ] Alerts list matches handoff shape `Alert[]`; empty-state uses terminal muted text.
-- [ ] Backend: webhook config store (URL + secret) in backend config/secrets — **never** returned to the frontend in full; frontend sees only a label + masked hint.
-- [ ] Backend: on a live signal, POST the webhook payload (e.g. `{secret, action, symbol, price, ...}`) to the configured broker bridge; log success/failure.
-- [ ] Frontend: webhook target picker in the Deploy modal (05) referencing configured targets by id/label only.
-- [ ] "Test signal" (05) also exercises the webhook POST (dry-run flag so it doesn't hit a live broker by accident).
-- [ ] Delivery status surfaced (last POST ok/failed) per deployment.
-- [ ] Verify a test signal → alert appears + webhook POST logged (against a mock endpoint).
+- [x] Surface `LiveAlerts` content in a terminal Alerts view (bell → Alerts) **without removing** the existing `#livealerts` page — both read the same backend. The old page stays live until the new terminal is confirmed; its removal is a separate, later step (see 01 migration principles).
+- [x] **Create/edit alerts + webhooks via a modal** on the new live page — reuse the existing `LiveAlerts` "Add / Edit rule" modal (name, strategy, symbol, timeframe, webhook URL + preset picker, secret, alias, leverage) so creation works "just like today".
+- [x] Rules persist to `data/live_alerts.json` via the existing `live_alerts_routes` (unchanged); can be created, edited, and deleted from the modal/list.
+- [x] Add a local **SQLite `alerts_history`** table: every fired alert is appended (time, rule name, strategy, symbol, side, price, webhook status). List view can filter and **delete** past alerts.
+- [x] **Activity log:** a chronological feed of everything the system did — armed / paused / killed / signal fired / webhook sent (ok/failed) / reconnected. This is the black box for trust + debugging; store alongside `alerts_history`.
+- [x] Alerts list matches handoff shape `Alert[]`; empty-state uses terminal muted text.
+- [x] Backend: webhook config store (URL + secret) in backend config/secrets — **never** returned to the frontend in full; frontend sees only a label + masked hint.
+- [x] Backend: on a live signal, POST the webhook payload (e.g. `{secret, action, symbol, price, ...}`) to the configured broker bridge; log success/failure.
+- [x] Frontend: webhook target picker in the Deploy modal (05) referencing configured targets by id/label only.
+- [x] "Test signal" (05) also exercises the webhook POST (dry-run flag so it doesn't hit a live broker by accident).
+- [x] Delivery status surfaced (last POST ok/failed) per deployment.
+- [x] Verify a test signal → alert appears + webhook POST logged (against a mock endpoint).
 
 ## Done when
 

@@ -8,6 +8,7 @@ import Panel from "../../components/live/Panel.jsx";
 import CommandPalette from "../../components/live/CommandPalette.jsx";
 import TradingWorkspace from "../../components/live/TradingWorkspace.jsx";
 import StrategiesWorkspace from "../../components/live/StrategiesWorkspace.jsx";
+import AlertsView from "../../components/live/AlertsView.jsx";
 import { setKillSwitch } from "../../components/live/liveApi.js";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
 import { useEnterStagger } from "../../components/live/animations.js";
@@ -155,11 +156,7 @@ function TerminalInner() {
       <WorkspaceTabs active={view === "workspaces" ? ws : null} onSelect={selectWs} onCommand={() => setPaletteOpen(true)} />
       <div className="lt-content">
         {view === "alerts"
-          ? (
-            <div className="lt-ws grid" style={{ gridTemplateRows: "1fr" }}>
-              <ComingSoon title="Alerts" phase="06" />
-            </div>
-          )
+          ? <AlertsView />
           : (
             <WorkspaceHost
               ws={ws}
