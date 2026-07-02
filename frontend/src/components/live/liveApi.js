@@ -91,6 +91,12 @@ export async function getLiveAnalytics(params = {}) {
   return data; // {stats, curve, breakdown}
 }
 
+export async function getDeploymentExpectation(name) {
+  // Runs the same strategy+params through the backtest engine (can take a bit).
+  const { data } = await api.get(`/api/live/deployments/${encodeURIComponent(name)}/expectation`, { timeout: 300_000 });
+  return data; // {ok, expected:{win_rate, profit_factor, ...}} | {ok:false, error}
+}
+
 // ---- phase 09: positions / risk / reconciliation ----------------------------
 export async function getLivePositions(account) {
   const { data } = await api.get("/api/live/positions", { params: { account } });

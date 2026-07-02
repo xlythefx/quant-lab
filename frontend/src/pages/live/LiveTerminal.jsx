@@ -8,6 +8,8 @@ import Panel from "../../components/live/Panel.jsx";
 import CommandPalette from "../../components/live/CommandPalette.jsx";
 import TradingWorkspace from "../../components/live/TradingWorkspace.jsx";
 import StrategiesWorkspace from "../../components/live/StrategiesWorkspace.jsx";
+import AnalyticsWorkspace from "../../components/live/AnalyticsWorkspace.jsx";
+import BlotterWorkspace from "../../components/live/BlotterWorkspace.jsx";
 import AlertsView from "../../components/live/AlertsView.jsx";
 import { setKillSwitch } from "../../components/live/liveApi.js";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
@@ -70,11 +72,11 @@ function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deploy, a
       />
     );
   }
+  if (ws === "analytics") return <AnalyticsWorkspace deployments={deploy.deployments} />;
+  if (ws === "blotter") return <BlotterWorkspace />;
   const stub = {
     markets:    ["Markets", "08"],
     risk:       ["Risk", "08 / 09"],
-    blotter:    ["Blotter", "07 / 08"],
-    analytics:  ["Analytics", "07"],
   }[ws];
   return (
     <div ref={ref} className="lt-ws grid" style={{ gridTemplateRows: "1fr" }}>

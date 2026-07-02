@@ -317,3 +317,70 @@ def activity():
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"rows": live_store.get_activity(limit)})
+
+
+# ===========================================================================
+# Phase 07 — live trade journal + analytics (backtest math over live trades)
+# ===========================================================================
+
+@live_bp.get("/journal")
+def journal():
+    period = (request.args.get("period") or "ALL").upper()
+    span = {"7D": 7 * 86400, "30D": 30 * 86400}.get(period)
+    since = int(time.time()) - span if span else None
+    rows = live_store.get_journal(
+        since_ts=since,
+        strategy_id=request.args.get("strategy_id") or None,
+        symbol=request.args.get("symbol") or None,
+        account=request.args.get("account") or None,
+    )
+    rows.reverse()  # newest first for the table
+    return jsonify({"rows": rows})
+
+
+@live_bp.get("/analytics")
+def analytics():
+    from services.live import live_analytics
+    try:
+        return jsonify(live_analytics.compute(
+            period=request.args.get("period") or "ALL",
+            group=request.args.get("group") or "strategy",
+            filter_key=request.args.get("filter_key") or None,
+            filter_value=request.args.get("filter_value") or None,
+            account=request.args.get("account") or None,
+        ))
+    except Exception as e:
+        log.exception("live analytics failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@live_bp.get("/deployments/<path:name>/expectation")
+def deployment_expectation(name):
+    """Live vs expectation: run the SAME strategy+params through the backtest
+    engine over the cached parquet and return the headline stats to compare
+    against the deployment's live journal."""
+    rule = live_alerts_config.find_rule_by_name(name)
+    if not rule:
+        return jsonify({"error": f"no deployment named '{name}'"}), 404
+    try:
+        from services import backtest_engine
+        res = backtest_engine.run(
+            rule["strategy_id"], rule["symbol"], rule.get("timeframe") or "1h",
+            params=rule.get("params") or {}, stats_only=True,
+        )
+        s = res.get("stats") or {}
+        return jsonify({"ok": True, "expected": {
+            "win_rate": s.get("win_rate"),
+            "profit_factor": s.get("profit_factor"),
+            "avg_pnl_pct": s.get("avg_pnl_pct"),
+            "max_drawdown_pct_peak": s.get("max_drawdown_pct_peak"),
+            "trades": s.get("trades"),
+            "sharpe": s.get("sharpe"),
+            "first_time": s.get("first_time"),
+            "last_time": s.get("last_time"),
+        }})
+    except FileNotFoundError:
+        return jsonify({"ok": False, "error": f"no cached dataset for {rule['symbol']} {rule.get('timeframe')} — download it on the Downloads page first"}), 404
+    except Exception as e:
+        log.exception("expectation backtest failed")
+        return jsonify({"ok": False, "error": str(e)}), 500

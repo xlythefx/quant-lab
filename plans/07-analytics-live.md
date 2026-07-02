@@ -1,6 +1,6 @@
 # 07 — Analytics (live) + trade journal
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 05 (deployments produce trades).
 
@@ -20,14 +20,14 @@ backtest report identically.
 
 ## Checklist
 
-- [ ] Persist live trades in **SQLite** (decided): a `journal_trades` table written by the alerter on each realized round-trip.
-- [ ] Backend: record each live round-trip as a `JournalTrade {time, strategy, symbol, side, venue, entry, exit, r, pnl, hold}` on exit.
-- [ ] Backend: `GET /api/analytics?period=&group=&filter=` → reuse `_compute_stats`/`_compute_analytics` over the live journal (net, win%, PF, Sharpe, maxDD, expectancy, curve, breakdown).
-- [ ] Backend: `GET /api/trades/journal?period=&strat=&symbol=&venue=` → filtered journal rows.
-- [ ] Frontend Analytics: 8 stat cards + cumulative equity curve (progressive draw) + breakdown table grouped by STRATEGY/ASSET/BROKER; row click sets a drill-down filter and recomputes.
-- [ ] Frontend Blotter → Trade Log tab: filters (strategy/asset/venue), summary strip (Net, Win%, PF, ExpR, N), dense table.
-- [ ] Cross-check: a handful of live trades produce the same metric formulas as the backtest engine.
-- [ ] **Live vs expectation:** compare live results against what the backtest predicted (win rate, expectancy, drawdown), so you can see whether reality is tracking the test. Prefer the broker's ACTUAL realized P&L (WAMP `*_pastpositions`, phase 09) over our own guess where available.
+- [x] Persist live trades in **SQLite** (decided): a `journal_trades` table written by the alerter on each realized round-trip.
+- [x] Backend: record each live round-trip as a `JournalTrade {time, strategy, symbol, side, venue, entry, exit, r, pnl, hold}` on exit.
+- [x] Backend: `GET /api/analytics?period=&group=&filter=` → reuse `_compute_stats`/`_compute_analytics` over the live journal (net, win%, PF, Sharpe, maxDD, expectancy, curve, breakdown).
+- [x] Backend: `GET /api/trades/journal?period=&strat=&symbol=&venue=` → filtered journal rows.
+- [x] Frontend Analytics: 8 stat cards + cumulative equity curve (progressive draw) + breakdown table grouped by STRATEGY/ASSET/BROKER; row click sets a drill-down filter and recomputes.
+- [x] Frontend Blotter → Trade Log tab: filters (strategy/asset/venue), summary strip (Net, Win%, PF, ExpR, N), dense table.
+- [x] Cross-check: a handful of live trades produce the same metric formulas as the backtest engine.
+- [x] **Live vs expectation:** compare live results against what the backtest predicted (win rate, expectancy, drawdown), so you can see whether reality is tracking the test. Prefer the broker's ACTUAL realized P&L (WAMP `*_pastpositions`, phase 09) over our own guess where available.
 
 ## Done when
 

@@ -34,7 +34,7 @@ top-level Go Live mode switch · Binance feed. Design docs in [design-handoff/](
 - ✅ **04** — [Trading workspace](04-trading-workspace.md) · chart + live price + signals (book/tape SIMULATED)
 - ✅ **05** — [Strategies & Deployments](05-strategies-deployments.md) · wire to the live alerter; deploy/pause/kill
 - ✅ **06** — [Alerts & webhooks](06-alerts-and-webhooks.md) · re-home LiveAlerts; broker webhook + test-signal
-- ⬜ **07** — [Analytics (live)](07-analytics-live.md) · reuse backtest analytics on the live journal
+- ✅ **07** — [Analytics (live)](07-analytics-live.md) · reuse backtest analytics on the live journal
 - ⬜ **08** — [Placeholder panels](08-placeholder-panels.md) · Markets/Blotter/order book/funding/news, SIMULATED
 - ⬜ **09** — [Positions, risk & reconciliation](09-positions-risk-reconciliation.md) · REAL, read from sinegu-api WAMP
 - ⬜ **10** — [Cutover & retire old live](10-cutover.md) · only after the new terminal is proven
