@@ -27,6 +27,7 @@ def test_live_alert():
     body = request.get_json(silent=True) or {}
     rule_name = (body.get("rule_name") or "").strip()
     action = (body.get("action") or "BUY").strip().upper()
+    dry_run = bool(body.get("dry_run", False))  # old page: real POST (unchanged)
     if not rule_name:
         return jsonify({"ok": False, "error": "rule_name required"}), 400
-    return jsonify(live_alerter.test_dispatch(rule_name, action))
+    return jsonify(live_alerter.test_dispatch(rule_name, action, dry_run=dry_run))

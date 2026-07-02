@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDataMode } from "./dataMode.jsx";
-import { getLiveInstruments, getLiveCandles, getLiveTicker } from "./liveApi.js";
-import { subscribeLiveCandles, onGateway, onSocketReconnect } from "./liveChannels.js";
+import { getLiveInstruments, getLiveCandles, getLiveTicker, getDeployments } from "./liveApi.js";
+import {
+  subscribeLiveCandles, onGateway, onSocketReconnect,
+  onDeploymentsChanged, onAlertDispatched, onLiveSignal,
+} from "./liveChannels.js";
 import * as sim from "./simFeed.js";
 
 /**
@@ -161,6 +164,33 @@ export function useTape(symbol, lastPrice) {
   }, [symbol]);
 
   return { prints, simulated: true };
+}
+
+/**
+ * Deployments (armed live-alert rules + runtime state) + kill switch.
+ * Refetches on backend change events, dispatches, and signals.
+ */
+export function useDeployments() {
+  const [state, setState] = useState({ deployments: [], killswitch: false, loading: true, error: null });
+
+  const refresh = useCallback(() => {
+    getDeployments()
+      .then((d) => setState({ deployments: d.deployments || [], killswitch: !!d.killswitch, loading: false, error: null }))
+      .catch((e) => setState((s) => ({ ...s, loading: false, error: e?.message || "failed to load deployments" })));
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const offs = [
+      onDeploymentsChanged(refresh),
+      onAlertDispatched(refresh),
+      onLiveSignal(refresh),
+    ];
+    const t = setInterval(refresh, 30_000);
+    return () => { offs.forEach((f) => f()); clearInterval(t); };
+  }, [refresh]);
+
+  return { ...state, refresh };
 }
 
 /** Footer gateway heartbeat; degrades loudly when beats stop arriving. */

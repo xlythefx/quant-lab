@@ -1,6 +1,6 @@
 # 05 — Strategies & Deployments (wire to the live alerter)
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 02 (shell), 03 (strategy channel). Core of "live".
 
@@ -23,19 +23,19 @@ POSTing signals to a **broker webhook**. Bell badge = count of RUNNING deploymen
 
 ## Checklist
 
-- [ ] Map concepts: existing live-alert entry → `Deployment {id, stratId, symbol, venue, tf, preset, params, webhookId, status, pnl, n}`.
-- [ ] Backend: `GET /api/deployments`, `POST /api/deployments`, `PATCH /api/deployments/{id}` (status), `DELETE /api/deployments/{id}`, `POST /api/deployments/{id}/test-signal` — thin wrappers over the alerter config/daemon.
-- [ ] Backend: on each live signal, the alerter emits on the `strategy` channel `{deploymentId, trade, signal?}`, updates `pnl`/`n`, and (on a realized round-trip) writes a row to the SQLite `journal_trades` table (see 07).
-- [ ] **Keep the existing live alerter / `#livealerts` fully working** — deployments are a new view over the same backend, not a replacement. Retiring the old page is a later, separate step (see 01 migration principles).
-- [ ] Strategies roster: cards from the real strategy registry ([strategy_registry.py](../backend/services/strategy_registry.py)), accent-colored, with a **Deploy** action.
-- [ ] Deploy modal: pick strategy, symbol (Binance), timeframe, preset (Conservative/Balanced/Aggressive → param overrides), tune params (reuse [StrategyEditor.jsx](../frontend/src/components/StrategyEditor.jsx) form), choose webhook target, deploy.
-- [ ] Deployments list: status toggle (pause/resume), kill, live P&L / n, per-strategy accent.
-- [ ] Bell badge in top bar (02) = number of RUNNING deployments.
-- [ ] **Demo/Live account select** in the deploy modal — a simple `account` = Demo | Live dropdown that sets which account/webhook target the signal is sent to (Demo = run live with fake money). Shown in the confirm-before-arm step.
-- [ ] **Backtest → live handoff:** a "Go Live with this strategy" action on the backtest side that flips to live mode and opens the deploy modal pre-filled with the same strategy + params. (Nav + params only — do NOT import live UI into the backtest dashboard.)
-- [ ] **"Why did/didn't it fire":** each deployment shows its last evaluation (last bar seen, whether the condition was met) so quiet periods are explainable and you can trust it's watching.
-- [ ] "Test signal" fires a manual signal end-to-end (daemon → `strategy` channel → chart marker + alert).
-- [ ] `vite build` + a real arm/pause/kill cycle on BTCUSDT.
+- [x] Map concepts: existing live-alert entry → `Deployment {id, stratId, symbol, venue, tf, preset, params, webhookId, status, pnl, n}`.
+- [x] Backend: `GET /api/deployments`, `POST /api/deployments`, `PATCH /api/deployments/{id}` (status), `DELETE /api/deployments/{id}`, `POST /api/deployments/{id}/test-signal` — thin wrappers over the alerter config/daemon.
+- [x] Backend: on each live signal, the alerter emits on the `strategy` channel `{deploymentId, trade, signal?}`, updates `pnl`/`n`, and (on a realized round-trip) writes a row to the SQLite `journal_trades` table (see 07).
+- [x] **Keep the existing live alerter / `#livealerts` fully working** — deployments are a new view over the same backend, not a replacement. Retiring the old page is a later, separate step (see 01 migration principles).
+- [x] Strategies roster: cards from the real strategy registry ([strategy_registry.py](../backend/services/strategy_registry.py)), accent-colored, with a **Deploy** action.
+- [x] Deploy modal: pick strategy, symbol (Binance), timeframe, preset (Conservative/Balanced/Aggressive → param overrides), tune params (reuse [StrategyEditor.jsx](../frontend/src/components/StrategyEditor.jsx) form), choose webhook target, deploy.
+- [x] Deployments list: status toggle (pause/resume), kill, live P&L / n, per-strategy accent.
+- [x] Bell badge in top bar (02) = number of RUNNING deployments.
+- [x] **Demo/Live account select** in the deploy modal — a simple `account` = Demo | Live dropdown that sets which account/webhook target the signal is sent to (Demo = run live with fake money). Shown in the confirm-before-arm step.
+- [x] **Backtest → live handoff:** a "Go Live with this strategy" action on the backtest side that flips to live mode and opens the deploy modal pre-filled with the same strategy + params. (Nav + params only — do NOT import live UI into the backtest dashboard.)
+- [x] **"Why did/didn't it fire":** each deployment shows its last evaluation (last bar seen, whether the condition was met) so quiet periods are explainable and you can trust it's watching.
+- [x] "Test signal" fires a manual signal end-to-end (daemon → `strategy` channel → chart marker + alert).
+- [x] `vite build` + a real arm/pause/kill cycle on BTCUSDT.
 
 ## Done when
 

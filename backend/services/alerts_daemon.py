@@ -60,12 +60,26 @@ class _HeadlessRunner:
             log.exception("[alerts_daemon] on_candle error %s/%s (rule=%s)",
                           self.strategy_id, self.symbol, self.rule["name"])
             return
-        if sig is None:
+        signals = [] if sig is None else (sig if isinstance(sig, list) else [sig])
+
+        # Live Terminal bookkeeping (additive; never blocks the dispatch path):
+        # last-eval for "why did/didn't it fire", idempotency guard, position
+        # tracking + journal, live_signal socket events.
+        try:
+            from services.live import live_engine
+            live_engine.note_eval(self.rule, candle, signals)
+            if signals:
+                signals = live_engine.filter_new_signals(self.rule, candle, signals)
+                live_engine.on_signals(self.rule, candle, signals)
+        except Exception:
+            log.exception("[alerts_daemon] live_engine hook failed (continuing)")
+
+        if not signals:
             return
         # on_candle may return a single Signal or a list (pyramiding strategies
         # emit a BUY per added tranche + one EXIT to close the stack). Fire one
         # webhook per signal, in order, so the broker stacks/flattens correctly.
-        for s in (sig if isinstance(sig, list) else [sig]):
+        for s in signals:
             live_alerter.dispatch_for_rule(self.rule, self.symbol, s)
 
     def stop(self):

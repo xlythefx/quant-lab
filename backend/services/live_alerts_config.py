@@ -92,6 +92,10 @@ def _coerce_rule(r: dict, *, fallback_index: int = 0) -> dict | None:
         "broker":           str(r.get("broker") or _auto_broker(symbol)).lower(),
         # optional per-rule strategy param overrides; Strategy._merge_with_defaults handles coercion
         "params":           dict(r.get("params") or {}),
+        # Live Terminal: which account the signal targets. Demo = run live
+        # with fake money (the safe default); Live = real funds. Old rules
+        # without the field are treated as demo. The old page ignores it.
+        "account":          ("live" if str(r.get("account") or "").lower() == "live" else "demo"),
     }
     if out["broker"] not in _VALID_BROKERS:
         out["broker"] = _auto_broker(symbol)

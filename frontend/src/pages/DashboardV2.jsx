@@ -16,6 +16,7 @@ import {
   useActiveStrategies, addStrategy, removeStrategy, updateParams, saveUserDefaults, getUserDefaults,
 } from "../services/strategiesStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
+import { goLive } from "../services/appMode.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
 import { socket } from "../services/socket.js";
 import { ProgressBar } from "../components/walkforward/widgets.jsx";
@@ -462,6 +463,29 @@ export default function DashboardV2() {
                 >
                   Analytics →
                 </a>
+                {!isPortfolio && (
+                  <button
+                    onClick={() => {
+                      // Backtest → live handoff (nav + params only, no live UI here):
+                      // stash the prefill, flip to the Live Terminal, deploy modal opens.
+                      const s = active.find((x) => x.id === selectedId);
+                      try {
+                        localStorage.setItem("ql.live_deploy_prefill", JSON.stringify({
+                          strategy_id: selectedId,
+                          symbol: symbol || "",
+                          timeframe,
+                          params: s?.params || {},
+                        }));
+                      } catch { /* ignore */ }
+                      goLive();
+                    }}
+                    title={`Deploy ${headerName} live with these params (opens the Live Terminal)`}
+                    className="h-11 inline-flex items-center gap-2 px-4 rounded-xl text-sm font-medium border border-[#00d4a1]/50 text-[#00d4a1] hover:bg-[#00d4a1]/10 transition"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#00d4a1] animate-pulse" />
+                    Go Live
+                  </button>
+                )}
                 <button
                   onClick={() => runBacktest()}
                   disabled={!canRun}

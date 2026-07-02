@@ -7,10 +7,25 @@ import StatusFooter from "../../components/live/StatusFooter.jsx";
 import Panel from "../../components/live/Panel.jsx";
 import CommandPalette from "../../components/live/CommandPalette.jsx";
 import TradingWorkspace from "../../components/live/TradingWorkspace.jsx";
+import StrategiesWorkspace from "../../components/live/StrategiesWorkspace.jsx";
+import { setKillSwitch } from "../../components/live/liveApi.js";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
 import { useEnterStagger } from "../../components/live/animations.js";
-import { useGateway, useInstruments } from "../../components/live/hooks.js";
+import { useGateway, useInstruments, useDeployments } from "../../components/live/hooks.js";
 import { exitLive } from "../../services/appMode.js";
+
+/** Backtest → live handoff: read + clear the deploy prefill left by the
+ * research dashboard's "Go Live with this strategy" action. */
+function takeDeployPrefill() {
+  try {
+    const raw = localStorage.getItem("ql.live_deploy_prefill");
+    if (!raw) return null;
+    localStorage.removeItem("ql.live_deploy_prefill");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The Live Terminal shell — 52px rail | 54px top bar | 32px tabs | content |
@@ -28,7 +43,7 @@ function ComingSoon({ title, phase }) {
   );
 }
 
-function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deployments, account }) {
+function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deploy, account, prefill, onPrefillConsumed }) {
   const ref = useRef(null);
   useEnterStagger(ws, ref);
   if (ws === "trading") {
@@ -38,8 +53,19 @@ function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deploymen
         timeframe={timeframe}
         onSymbol={onSymbol}
         onTimeframe={onTimeframe}
-        deployments={deployments}
+        deployments={deploy.deployments}
         account={account}
+      />
+    );
+  }
+  if (ws === "strategies") {
+    return (
+      <StrategiesWorkspace
+        deployments={deploy.deployments}
+        killswitch={deploy.killswitch}
+        refresh={deploy.refresh}
+        prefill={prefill}
+        onPrefillConsumed={onPrefillConsumed}
       />
     );
   }
@@ -47,7 +73,6 @@ function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deploymen
     markets:    ["Markets", "08"],
     risk:       ["Risk", "08 / 09"],
     blotter:    ["Blotter", "07 / 08"],
-    strategies: ["Strategies", "05"],
     analytics:  ["Analytics", "07"],
   }[ws];
   return (
@@ -76,8 +101,24 @@ function TerminalInner() {
   useEffect(() => { try { localStorage.setItem("ql.live_symbol", symbol); } catch { /* ignore */ } }, [symbol]);
   useEffect(() => { try { localStorage.setItem("ql.live_tf", timeframe); } catch { /* ignore */ } }, [timeframe]);
 
-  // Stubs until later phases wire them: equity/dayPnl (09), bell count (05), kill switch (06).
-  const [killed, setKilled] = useState(false);
+  const deploy = useDeployments();
+  const runningCount = deploy.deployments.filter((d) => d.status === "RUNNING").length;
+  const [prefill, setPrefill] = useState(() => takeDeployPrefill());
+
+  // Backtest handoff: if the research side left a prefill, open Strategies.
+  useEffect(() => {
+    if (prefill) setWs("strategies");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleKill = async () => {
+    const next = !deploy.killswitch;
+    if (next && !window.confirm("DISARM ALL — pause every webhook immediately?\nNo POSTs will be sent until re-armed.")) return;
+    try {
+      await setKillSwitch(next);
+      deploy.refresh();
+    } catch { /* refresh will reflect the true state */ }
+  };
 
   useEffect(() => {
     try { localStorage.setItem("ql.live_ws", ws); } catch { /* ignore */ }
@@ -102,14 +143,14 @@ function TerminalInner() {
       <TopBar
         equity={null}
         dayPnl={null}
-        bellCount={0}
+        bellCount={runningCount}
         alertsActive={view === "alerts"}
         onBell={() => setView(view === "alerts" ? "workspaces" : "alerts")}
         onExitLive={() => exitLive()}
         dataMode={dataMode}
         onToggleDataMode={toggleDataMode}
-        killed={killed}
-        onToggleKill={() => setKilled((k) => !k)}
+        killed={deploy.killswitch}
+        onToggleKill={toggleKill}
       />
       <WorkspaceTabs active={view === "workspaces" ? ws : null} onSelect={selectWs} onCommand={() => setPaletteOpen(true)} />
       <div className="lt-content">
@@ -126,8 +167,10 @@ function TerminalInner() {
               timeframe={timeframe}
               onSymbol={setSymbol}
               onTimeframe={setTimeframe}
-              deployments={[]}
+              deploy={deploy}
               account="demo"
+              prefill={prefill}
+              onPrefillConsumed={() => setPrefill(null)}
             />
           )}
       </div>

@@ -32,6 +32,9 @@ backend/data/tradestation/
 # Runtime webhook config — contains live URLs and secrets
 backend/data/live_alerts.json
 
+# Live Terminal runtime store (journal / alert history / activity log)
+backend/data/live_terminal.db*
+
 # VPS deployment scripts and configs (may contain credentials/IPs)
 vps-deployment/
 nginx_eu_current.conf
