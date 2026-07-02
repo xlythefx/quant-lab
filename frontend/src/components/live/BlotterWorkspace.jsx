@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Panel from "./Panel.jsx";
+import OrderTicket from "./OrderTicket.jsx";
 import { useEnterStagger } from "./animations.js";
 import { getLiveJournal } from "./liveApi.js";
 import { onLiveSignal } from "./liveChannels.js";
@@ -72,7 +73,7 @@ export default function BlotterWorkspace({ orderEntry = null }) {
         }
       >
         {tab === "entry" ? (
-          orderEntry || <div className="lt-empty">Order entry ticket — built in phase 08 (webhook-only by design; QuantLab has no in-app OMS)</div>
+          <OrderTicket symbol={orderEntry?.symbol || "BTCUSDT"} lastPrice={orderEntry?.lastPrice ?? null} />
         ) : (
           <>
             <div style={{ display: "flex", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--lt-row)", alignItems: "center", flexWrap: "wrap" }}>

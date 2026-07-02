@@ -89,6 +89,9 @@ def create_app():
     alerts_daemon.start(manager)
     live_feed.start()
 
+    from services.live.orderbook_hub import OrderBookHub
+    ob_hub = OrderBookHub(socketio)
+
     # ---- Socket.IO events --------------------------------------------
     @socketio.on("connect")
     def on_connect():
@@ -102,6 +105,27 @@ def create_app():
         log.info("client disconnected sid=%s", request.sid)
         strategy_mgr.cleanup_sid(request.sid)
         manager.cleanup_sid(request.sid)
+        ob_hub.cleanup_sid(request.sid)
+
+    # ---- Live Terminal: real order book (partial depth stream) --------
+    @socketio.on("live_ob_subscribe")
+    def on_ob_subscribe(payload):
+        from flask import request
+        try:
+            symbol = validate_symbol((payload or {}).get("symbol"))
+        except ValidationError as e:
+            socketio.emit("error", {"event": "live_ob_subscribe", "message": str(e)}, to=request.sid)
+            return
+        ob_hub.subscribe(request.sid, symbol)
+
+    @socketio.on("live_ob_unsubscribe")
+    def on_ob_unsubscribe(payload):
+        from flask import request
+        try:
+            symbol = validate_symbol((payload or {}).get("symbol"))
+        except ValidationError as e:
+            return
+        ob_hub.unsubscribe(request.sid, symbol)
 
     @socketio.on("subscribe")
     def on_subscribe(payload):

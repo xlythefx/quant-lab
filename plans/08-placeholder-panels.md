@@ -1,6 +1,6 @@
 # 08 — Placeholder panels (design-faithful, SIMULATED)
 
-**Status:** ⬜ Todo
+**Status:** ✅ Done (Jul 02, 2026)
 **Created:** Jul 01, 2026
 **Depends on:** 02 (shell); best done after the real core (04–07).
 
@@ -24,17 +24,17 @@ Binance endpoints are already researched in
 
 ## Checklist
 
-- [ ] Shared `SimulatedBadge` + a single `simFeed` util (seeded random-walk) so all placeholders share one honest labeling + generator.
-- [ ] **Markets** workspace: sortable instruments table (symbol/last/24h%/funding/…/sparkline). Real where we have it (last/24h% from Binance), SIMULATED for funding if unavailable.
-- [ ] **Order Book** + **Time & Sales** (from 04): keep SIMULATED generators behind a `useOrderBook(symbol)` seam so real wiring is a drop-in.
-- [ ] **Order Book → real (soon):** wire to Binance **Partial Book Depth Stream** `btcusdt@depth20@100ms` / `ltcusdt@depth20@100ms` (top-20 snapshot per push, no local-book reconciliation). Full spec + REST fallback in [ref-binance-orderbook.md](ref-binance-orderbook.md). Route it through the phase-03 channel layer + ~1.5s server-side throttle; drop the SIMULATED badge only once it's live.
-- [ ] **Funding & Open Interest** panel: funding rate, countdown, OI area/line, long/short bar — SIMULATED.
-- [ ] **Liquidations** panel: streaming feed + long/short pressure bar — SIMULATED.
-- [ ] **News** marquee: auto-scrolling headlines + sentiment tags — SIMULATED (or wire a real headline source later).
-- [ ] **Risk** workspace + **Positions** panel: build the layout here, but the data is REAL and wired in **phase 09** (read from the `sinegu-api` WAMP position tables), NOT simulated. Only VaR/maint-margin (which we can't derive) may stay labeled-derived. Falls back to SIMULATED when WAMP is down.
-- [ ] **Blotter → Order Entry**: ticket UI (BUY/SELL, type, price, size, leverage, notional/margin, SUBMIT) that, per the chosen model, **routes to the webhook** (06) rather than an in-app OMS — or is disabled with a clear "webhook-only" note.
-- [ ] Panel adaptation by instrument class (`adaptPanels`): stock→key-stats, index→breadth, fx→carry — SIMULATED.
-- [ ] Audit: every non-real number on screen has a SIMULATED marker. No exceptions.
+- [x] Shared `SimulatedBadge` + a single `simFeed` util (seeded random-walk) so all placeholders share one honest labeling + generator.
+- [x] **Markets** workspace: sortable instruments table (symbol/last/24h%/funding/…/sparkline). Real where we have it (last/24h% from Binance), SIMULATED for funding if unavailable.
+- [x] **Order Book** + **Time & Sales** (from 04): keep SIMULATED generators behind a `useOrderBook(symbol)` seam so real wiring is a drop-in.
+- [x] **Order Book → real (soon):** wire to Binance **Partial Book Depth Stream** `btcusdt@depth20@100ms` / `ltcusdt@depth20@100ms` (top-20 snapshot per push, no local-book reconciliation). Full spec + REST fallback in [ref-binance-orderbook.md](ref-binance-orderbook.md). Route it through the phase-03 channel layer + ~1.5s server-side throttle; drop the SIMULATED badge only once it's live.
+- [x] **Funding & Open Interest** panel: funding rate, countdown, OI area/line, long/short bar — SIMULATED.
+- [x] **Liquidations** panel: streaming feed + long/short pressure bar — SIMULATED.
+- [x] **News** marquee: auto-scrolling headlines + sentiment tags — SIMULATED (or wire a real headline source later).
+- [x] **Risk** workspace + **Positions** panel: build the layout here, but the data is REAL and wired in **phase 09** (read from the `sinegu-api` WAMP position tables), NOT simulated. Only VaR/maint-margin (which we can't derive) may stay labeled-derived. Falls back to SIMULATED when WAMP is down.
+- [x] **Blotter → Order Entry**: ticket UI (BUY/SELL, type, price, size, leverage, notional/margin, SUBMIT) that, per the chosen model, **routes to the webhook** (06) rather than an in-app OMS — or is disabled with a clear "webhook-only" note.
+- [x] Panel adaptation by instrument class (`adaptPanels`): stock→key-stats, index→breadth, fx→carry — SIMULATED.
+- [x] Audit: every non-real number on screen has a SIMULATED marker. No exceptions.
 
 ## Done when
 

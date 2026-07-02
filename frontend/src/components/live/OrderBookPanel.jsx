@@ -44,7 +44,7 @@ export default function OrderBookPanel({ symbol, lastPrice }) {
   };
 
   return (
-    <Panel title="Order Book" simulated={simulated}>
+    <Panel title="Order Book" simulated={simulated} live={!simulated}>
       <div
         className="lt-mono lt-muted"
         style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr", gap: 4, padding: "4px 10px", fontSize: 8.5, letterSpacing: "0.08em", borderBottom: "1px solid var(--lt-row)" }}

@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDataMode } from "./dataMode.jsx";
-import { getLiveInstruments, getLiveCandles, getLiveTicker, getDeployments } from "./liveApi.js";
 import {
-  subscribeLiveCandles, onGateway, onSocketReconnect,
+  getLiveInstruments, getLiveCandles, getLiveTicker, getDeployments,
+  getLiveRisk, getLivePositions,
+} from "./liveApi.js";
+import {
+  subscribeLiveCandles, subscribeOrderBook, onGateway, onSocketReconnect,
   onDeploymentsChanged, onAlertDispatched, onLiveSignal,
 } from "./liveChannels.js";
 import * as sim from "./simFeed.js";
@@ -129,24 +132,45 @@ export function useTicker(symbol) {
 }
 
 /**
- * Order book behind a clean seam: SIMULATED generator today, real Binance
- * partial-depth stream drop-in in phase 08 (see ref-binance-orderbook.md).
- * `simulated` in the result always tells the truth for the badge.
+ * Order book behind a clean seam. Live mode rides the REAL Binance partial
+ * depth stream (top-20 snapshots via the backend hub — phase 08 wiring per
+ * ref-binance-orderbook.md); mock mode (or until the first real frame lands)
+ * uses the seeded generator. `simulated` always tells the truth: the badge
+ * drops only once real depth is on screen.
  */
 export function useOrderBook(symbol, lastPrice) {
+  const { dataMode } = useDataMode();
+  const mock = dataMode === "mock";
   const [book, setBook] = useState(null);
+  const [real, setReal] = useState(false);
   const priceRef = useRef(lastPrice);
   priceRef.current = lastPrice;
 
   useEffect(() => {
     setBook(null);
-    const tick = () => setBook(sim.mockBook(symbol, priceRef.current));
-    tick();
-    const t = setInterval(tick, 1500);
-    return () => clearInterval(t);
-  }, [symbol]);
+    setReal(false);
 
-  return { book, simulated: true };
+    if (mock) {
+      const tick = () => setBook(sim.mockBook(symbol, priceRef.current));
+      tick();
+      const t = setInterval(tick, 1500);
+      return () => clearInterval(t);
+    }
+
+    let gotReal = false;
+    const unsub = subscribeOrderBook(symbol, (b) => {
+      gotReal = true;
+      setReal(true);
+      setBook({ bids: b.bids, asks: b.asks, ts: Date.now() });
+    });
+    // Until the first real frame, keep a labeled sim book so the panel isn't blank.
+    const t = setInterval(() => {
+      if (!gotReal) setBook(sim.mockBook(symbol, priceRef.current));
+    }, 1500);
+    return () => { unsub(); clearInterval(t); };
+  }, [symbol, mock]);
+
+  return { book, simulated: !real };
 }
 
 /** Time & Sales — SIMULATED streaming prints (~0.8s), newest first. */
@@ -191,6 +215,46 @@ export function useDeployments() {
   }, [refresh]);
 
   return { ...state, refresh };
+}
+
+/**
+ * Real broker risk/positions (WAMP read-only, phase 09) with an honest
+ * SIMULATED fallback: when the backend can't reach the WAMP MySQL (or in
+ * mock mode) panels render the labeled placeholder instead of hard-breaking.
+ */
+export function usePositionsRisk(account = "demo") {
+  const { dataMode } = useDataMode();
+  const mock = dataMode === "mock";
+  const [state, setState] = useState({ risk: null, positions: [], simulated: true, loading: true });
+
+  useEffect(() => {
+    let dead = false;
+    setState((s) => ({ ...s, loading: true }));
+
+    if (mock) {
+      setState({ risk: sim.mockRisk(account), positions: sim.mockPositions(account), simulated: true, loading: false });
+      return () => { dead = true; };
+    }
+
+    const pull = async () => {
+      try {
+        const [riskRes, posRes] = await Promise.all([getLiveRisk(account), getLivePositions(account)]);
+        if (dead) return;
+        if (riskRes?.ok) {
+          setState({ risk: riskRes, positions: posRes?.rows || [], simulated: false, loading: false });
+          return;
+        }
+        throw new Error(riskRes?.error || "wamp unavailable");
+      } catch {
+        if (!dead) setState({ risk: sim.mockRisk(account), positions: sim.mockPositions(account), simulated: true, loading: false });
+      }
+    };
+    pull();
+    const t = setInterval(pull, 10_000);
+    return () => { dead = true; clearInterval(t); };
+  }, [account, mock]);
+
+  return state;
 }
 
 /** Footer gateway heartbeat; degrades loudly when beats stop arriving. */

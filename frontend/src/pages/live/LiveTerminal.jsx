@@ -4,12 +4,13 @@ import LeftRail from "../../components/live/LeftRail.jsx";
 import TopBar from "../../components/live/TopBar.jsx";
 import WorkspaceTabs from "../../components/live/WorkspaceTabs.jsx";
 import StatusFooter from "../../components/live/StatusFooter.jsx";
-import Panel from "../../components/live/Panel.jsx";
 import CommandPalette from "../../components/live/CommandPalette.jsx";
 import TradingWorkspace from "../../components/live/TradingWorkspace.jsx";
 import StrategiesWorkspace from "../../components/live/StrategiesWorkspace.jsx";
 import AnalyticsWorkspace from "../../components/live/AnalyticsWorkspace.jsx";
 import BlotterWorkspace from "../../components/live/BlotterWorkspace.jsx";
+import MarketsWorkspace from "../../components/live/MarketsWorkspace.jsx";
+import RiskWorkspace from "../../components/live/RiskWorkspace.jsx";
 import AlertsView from "../../components/live/AlertsView.jsx";
 import { setKillSwitch } from "../../components/live/liveApi.js";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
@@ -36,17 +37,7 @@ function takeDeployPrefill() {
  * connections with the backtest world. See plans/EXECUTION-NOTES.md.
  */
 
-function ComingSoon({ title, phase }) {
-  return (
-    <Panel title={title}>
-      <div className="lt-empty" style={{ paddingTop: 60 }}>
-        {title} — coming in {phase}
-      </div>
-    </Panel>
-  );
-}
-
-function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deploy, account, prefill, onPrefillConsumed }) {
+function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, onGoTrading, deploy, account, prefill, onPrefillConsumed }) {
   const ref = useRef(null);
   useEnterStagger(ws, ref);
   if (ws === "trading") {
@@ -73,16 +64,10 @@ function WorkspaceHost({ ws, symbol, timeframe, onSymbol, onTimeframe, deploy, a
     );
   }
   if (ws === "analytics") return <AnalyticsWorkspace deployments={deploy.deployments} />;
-  if (ws === "blotter") return <BlotterWorkspace />;
-  const stub = {
-    markets:    ["Markets", "08"],
-    risk:       ["Risk", "08 / 09"],
-  }[ws];
-  return (
-    <div ref={ref} className="lt-ws grid" style={{ gridTemplateRows: "1fr" }}>
-      <ComingSoon title={stub[0]} phase={stub[1]} />
-    </div>
-  );
+  if (ws === "blotter") return <BlotterWorkspace orderEntry={{ symbol }} />;
+  if (ws === "markets") return <MarketsWorkspace onSymbol={(s) => { onSymbol(s); onGoTrading?.(); }} />;
+  if (ws === "risk") return <RiskWorkspace account={account} />;
+  return null;
 }
 
 function TerminalInner() {
@@ -166,6 +151,7 @@ function TerminalInner() {
               timeframe={timeframe}
               onSymbol={setSymbol}
               onTimeframe={setTimeframe}
+              onGoTrading={() => selectWs("trading")}
               deploy={deploy}
               account="demo"
               prefill={prefill}
