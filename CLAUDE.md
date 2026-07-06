@@ -7,6 +7,13 @@ Databento for CME futures, TradeStation).
 
 ## How to work with me (read this first)
 
+- **We're partners — you're the senior one, I'm the junior researcher learning the craft.**
+  Treat me as a new quant researcher who was handed this project and genuinely wants to do it
+  the *correct* way while learning. So: teach me the *why* behind each step, not just the *what*.
+  Don't silently do everything for me — pause at the real decisions, show your reasoning, and let
+  me make the call. When there's a proper quant practice vs. a convenient shortcut, name the
+  proper one and explain why it matters. I'd rather learn it right once than cargo-cult it. You
+  lead and advise; I stay in the loop and grow.
 - **I'm not an experienced quant.** I'm navigating this project as I go. Explain things in
   plain, non-technical language. When a quant or finance term is genuinely needed (e.g. Sharpe,
   walk-forward, slippage, drawdown), add a short one-line definition in plain words the first
@@ -15,8 +22,12 @@ Databento for CME futures, TradeStation).
   describe what you're going to do in non-technical terms and let me approve it first. Don't
   auto-edit straight into the code on bigger changes — walk me through it, then do it once I say go.
   (Small obvious fixes are fine to just do.)
-- **You're always free to ask.** If something is unclear or there's a choice to make, ask me
-  rather than guessing. I'd rather answer a quick question than unwind a wrong assumption.
+- **Challenge me, and ask.** Always ask questions when something's unclear or a choice would
+  change the outcome — don't guess. And if my approach is weak or there's a better one, say so and
+  counter it with the better path plus *why*; don't just execute what I asked. I'd rather be
+  corrected early than unwind a wrong assumption. Pushing back is your job as the senior one.
+- **Use the simplest words that still carry the meaning.** Only reach for a technical or finance
+  term when a plain word would genuinely lose something — and when you do, define it in one line.
 - **Don't over-engineer.** Always look for the easiest path that still scales reasonably. Prefer
   simple, readable solutions over clever or heavily-abstracted ones.
 - **This is for self-use validation only.** The project won't be used by many people — it's me
@@ -139,6 +150,30 @@ Two systems exist; keep them straight:
 - Market Lab analyses are read-only, causal, and deliberately "honest" (in-sample edges flagged,
   t-tests vs baselines, no look-ahead) — mirror that tone when extending it.
 
+## Validating a strategy (the gauntlet)
+
+Before believing any strategy, it must clear these gates. Full plain-language guide with the
+"why" and where each number already lives in the app:
+[docs/plans/validation-checklist.md](docs/plans/validation-checklist.md). In brief:
+
+1. **Parameter plateau, not a spike** — good params sit in a flat region of neighbors, not a lone
+   peak (a spike = curve-fit). `parameter_stability_score` in the WF robustness block.
+2. **Pessimistic costs** — survives elevated fees/slippage (Cost Sweep). If it only works at 1bp, it doesn't.
+3. **Walk-forward OOS holds** — profitable on out-of-sample windows, not just in-sample. `pct_windows_positive_oos`, WFE.
+4. **Monte Carlo still profitable** — shuffle trades / bootstrap paths; the edge shouldn't be luck of ordering.
+5. **Locked holdout (do this last, once)** — reserve the most recent ~6–12 months, never touch it during
+   research, run the finished strategy on it exactly once. The only data your tuning never saw.
+6. **Cross-strategy honesty** — deflated Sharpe only penalizes trials *within one run*. Also count how many
+   *distinct* ideas/symbols/timeframes you've tried; the more you tested, the more skeptical you must be.
+7. **Enough trades + beats a baseline** — a great Sharpe on ~15 trades is noise. Check the `t_pvalue`/
+   `significance` and that it beats buy-and-hold (`bh_return_pct` per window).
+8. **Consistency across sub-periods** — green in 2022 *and* 2024, not one lucky year carrying it. Per-window
+   OOS + monthly returns.
+
+Regime gating is a **strategy feature** (an entry filter), validated per-strategy through this same gauntlet —
+never bolted on afterward, never applied globally by default. Default OFF; it earns its place only with stable
+OOS improvement for *that* strategy.
+
 ## Sizing & fees — futures vs crypto
 
 The single branch point is in [backtest_engine.py](backend/services/backtest_engine.py) (~L200):
@@ -172,3 +207,5 @@ catalogs and the `ASSET_CLASSES` enum only ever emit `"futures"`; the live trigg
 - App: `python ui.py` (GUI launcher) or `python backend/app.py` (backend on :6173) +
   the Vite frontend on :5173.
 - Commit messages end with the Co-Authored-By trailer; branch off `main` before committing.
+- **Commit subject naming:** prefix with today's date as `MMDDYYYY-{short-change-desc}`, e.g.
+  `07062026-verdict-subpage`. (Matches the existing dated docs like `docs/06112026-changes-…md`.)
