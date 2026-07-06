@@ -350,7 +350,7 @@ function WindowConsistencyStrip({ windows }) {
           <div
             key={w.window_idx}
             title={`Window ${w.window_idx}: OOS Sharpe ${fmtNum(sh)} · ${fmtPct(w.oos_stats?.total_return_pct ?? 0)}`}
-            className={`w-4 h-4 rounded-sm ${good ? "bg-profit/70" : "bg-loss/70"}`}
+            className={`w-4 h-4 rounded-sm ${good ? "bg-emerald-500/70" : "bg-loss/70"}`}
           />
         );
       })}
@@ -491,16 +491,29 @@ export function WFVerdictPanel({ result }) {
         : `The top 10 winners are ${fmtNum(top10 * 100)}% of all profit. Remove those and the edge may vanish.` });
   }
 
-  // 8 — Sub-period consistency (its own card with the strip below)
-  {
-    const light = pctPositive >= 0.7 ? "pass" : pctPositive >= 0.5 ? "warn" : "fail";
-    gates.push({ light, title: "Consistent across sub-periods",
-      value: `${fmtInt(positiveWins)}/${fmtInt(windows.length)} green`,
+  // 8 — Recent decay: are the LATEST windows as good as the earlier ones?
+  // Distinct from "holds out-of-sample" (overall green rate): this compares the
+  // most recent third of windows against the rest, to catch an edge that worked
+  // for years but is fading now — the thing that kills a strategy live.
+  if (windows.length < 6) {
+    gates.push({ light: "na", title: "No recent decay", value: "—",
+      plain: "Too few windows to compare recent vs. earlier performance — run over a longer range." });
+  } else {
+    const recentN = Math.max(4, Math.round(windows.length * 0.33));
+    const earlier = windows.slice(0, windows.length - recentN);
+    const recent = windows.slice(windows.length - recentN);
+    const greens = (arr) => arr.filter((w) => (w.oos_stats?.sharpe ?? 0) > 0).length;
+    const rWins = greens(recent), eWins = greens(earlier);
+    const rRate = rWins / recent.length, eRate = eWins / earlier.length;
+    const drop = eRate - rRate;
+    const light = drop <= 0.1 ? "pass" : drop <= 0.25 ? "warn" : "fail";
+    gates.push({ light, title: "No recent decay",
+      value: `recent ${fmtNum(rRate * 100)}% vs ${fmtNum(eRate * 100)}%`,
       plain: light === "pass"
-        ? "Green across most windows — not one lucky period carrying the whole record."
+        ? `The most recent ${fmtInt(recent.length)} windows (${fmtInt(rWins)} green) hold up against the earlier ones. No sign the edge is fading.`
         : light === "warn"
-        ? "Mixed across windows. Some periods work, some don't — the edge isn't steady."
-        : "Red in most windows. Likely one good stretch dragging a losing record into the black." });
+        ? `The recent ${fmtInt(recent.length)} windows (${fmtInt(rWins)} green) are softer than the earlier stretch (${fmtNum(eRate * 100)}% green). The edge may be starting to fade — watch it.`
+        : `The recent ${fmtInt(recent.length)} windows (only ${fmtInt(rWins)} green) are much weaker than the earlier ${fmtNum(eRate * 100)}%. The edge looks like it's decaying — a real red flag for trading it now.` });
   }
 
   // --- Overall verdict from the data-backed gates ---
