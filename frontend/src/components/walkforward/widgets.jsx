@@ -310,6 +310,260 @@ export function WFVerdict({ result }) {
   );
 }
 
+// -- Verdict tab: the full validation gauntlet, gate by gate -----------------
+// Each gate reads numbers ALREADY in the WF result (no new backend). Lights:
+// pass / warn / fail / na. Two gates (holdout, cross-strategy) can't be judged
+// from one run — they show as grey reminders so they're never faked green.
+// Full methodology: docs/plans/validation-checklist.md.
+
+const GATE_TONE = {
+  pass: { dot: "🟢", cls: "border-profit/40 bg-profit/5",      label: "text-profit" },
+  warn: { dot: "🟡", cls: "border-amber-400/40 bg-amber-400/5", label: "text-amber-400" },
+  fail: { dot: "🔴", cls: "border-loss/40 bg-loss/5",          label: "text-loss" },
+  na:   { dot: "⚪", cls: "border-line bg-bg-elev/20",          label: "text-muted" },
+};
+
+function GateCard({ light, title, value, plain }) {
+  const t = GATE_TONE[light] || GATE_TONE.na;
+  return (
+    <div className={`rounded-lg border p-3 ${t.cls}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-text flex items-center gap-1.5">
+          <span>{t.dot}</span>{title}
+        </div>
+        {value != null && <div className={`text-xs font-mono ${t.label}`}>{value}</div>}
+      </div>
+      <div className="text-[11px] text-muted mt-1 leading-relaxed">{plain}</div>
+    </div>
+  );
+}
+
+// Per-window green/red strip — see sub-period consistency at a glance.
+function WindowConsistencyStrip({ windows }) {
+  if (!windows.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {windows.map((w) => {
+        const sh = w.oos_stats?.sharpe ?? 0;
+        const good = sh > 0;
+        return (
+          <div
+            key={w.window_idx}
+            title={`Window ${w.window_idx}: OOS Sharpe ${fmtNum(sh)} · ${fmtPct(w.oos_stats?.total_return_pct ?? 0)}`}
+            className={`w-4 h-4 rounded-sm ${good ? "bg-profit/70" : "bg-loss/70"}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+export function WFVerdictPanel({ result }) {
+  const s = result.stats || {};
+  const windows = result.windows || [];
+  const adv = result.analytics?.advanced || {};
+  const rob = adv.robustness || {};
+  const dist = adv.distribution || {};
+  const tstats = adv.trade_stats || {};
+  const hasSearchSpace = (result?.wf_spec?.search_space || []).length > 0;
+
+  // --- Gate data ---
+  const positiveWins = windows.filter((w) => (w.oos_stats?.sharpe ?? 0) > 0).length;
+  const pctPositive = windows.length ? positiveWins / windows.length : 0;
+
+  // Stitched buy-and-hold return (compound each window's B&H %).
+  let bhVal = 100, hasBh = false;
+  for (const w of windows) {
+    if (w.bh_return_pct == null) continue;
+    hasBh = true;
+    bhVal *= (1 + w.bh_return_pct / 100);
+  }
+  const bhReturnPct = hasBh ? bhVal - 100 : null;
+  const stratReturnPct = s.total_return_pct ?? 0;
+
+  const nTrades = s.trades ?? 0;
+  const stability = rob.parameter_stability_score;   // 0..1 or null
+  const deflated = rob.deflated_sharpe_probability;  // 0..1 or null (only when metric=sharpe)
+  const sig = dist.significance;                      // 'significant'|'marginal'|'not_significant'
+  const pval = dist.t_pvalue;
+  const top10 = tstats.top10_winners_share;          // 0..1 or null
+  const luckWins = tstats.luck_dependent_wins;
+
+  const gates = [];
+
+  // 1 — Parameter plateau
+  if (!hasSearchSpace) {
+    gates.push({ light: "na", title: "Parameter plateau", value: "—",
+      plain: "No parameters were optimized in this run, so there's nothing to be robust to. Add a search space to test plateau vs. spike." });
+  } else if (stability == null) {
+    gates.push({ light: "na", title: "Parameter plateau", value: "—",
+      plain: "Stability score unavailable (need ≥10 Optuna trials). Run more trials per window to judge this." });
+  } else {
+    const light = stability >= 0.7 ? "pass" : stability >= 0.4 ? "warn" : "fail";
+    gates.push({ light, title: "Parameter plateau", value: fmtNum(stability),
+      plain: light === "pass"
+        ? "The best params sit on a flat plateau — neighbors perform similarly. That's a structural edge, not a lucky single setting."
+        : light === "warn"
+        ? "Params are somewhat sensitive. The edge partly depends on the exact numbers — treat with caution."
+        : "The winning params are a lone spike — nudge them and it collapses. Classic curve-fit warning." });
+  }
+
+  // 2 — Out-of-sample holds
+  {
+    const light = pctPositive >= 0.7 ? "pass" : pctPositive >= 0.5 ? "warn" : "fail";
+    const wfe = rob.walk_forward_efficiency;
+    gates.push({ light, title: "Holds out-of-sample",
+      value: `${fmtInt(positiveWins)}/${fmtInt(windows.length)}${wfe != null ? ` · WFE ${fmtNum(wfe)}` : ""}`,
+      plain: light === "pass"
+        ? `${fmtNum(pctPositive * 100)}% of unseen windows made money. The edge generalizes past the data it was tuned on.`
+        : light === "warn"
+        ? `Only ${fmtNum(pctPositive * 100)}% of unseen windows were profitable — a coin-flip edge, not a reliable one.`
+        : `Most unseen windows lost money (${fmtNum(pctPositive * 100)}% positive). The in-sample promise didn't survive out-of-sample.` });
+  }
+
+  // 3 — Enough trades
+  {
+    const light = nTrades >= 100 ? "pass" : nTrades >= 30 ? "warn" : "fail";
+    gates.push({ light, title: "Enough trades", value: fmtInt(nTrades),
+      plain: light === "pass"
+        ? `${fmtInt(nTrades)} trades is a healthy sample — the stats above mean something.`
+        : light === "warn"
+        ? `${fmtInt(nTrades)} trades is a thin sample. Metrics can swing on a few trades — don't over-trust them yet.`
+        : `Only ${fmtInt(nTrades)} trades. Any great-looking number here is likely noise, not skill.` });
+  }
+
+  // 4 — Statistically significant (average trade ≠ 0)
+  if (sig == null) {
+    gates.push({ light: "na", title: "Distinguishable from zero", value: "—",
+      plain: "Not enough trades to run the significance test." });
+  } else {
+    const light = sig === "significant" ? "pass" : sig === "marginal" ? "warn" : "fail";
+    gates.push({ light, title: "Distinguishable from zero",
+      value: pval != null ? `p=${fmtNum(pval)}` : sig,
+      plain: light === "pass"
+        ? "The average trade is statistically different from zero — unlikely to be pure luck."
+        : light === "warn"
+        ? "Borderline significance. The edge might be real, might be chance — more data would settle it."
+        : "The average trade is NOT statistically different from zero. This could easily be luck." });
+  }
+
+  // 5 — Beats buy-and-hold
+  if (!hasBh) {
+    gates.push({ light: "na", title: "Beats buy-and-hold", value: "—",
+      plain: "No buy-and-hold benchmark available for these windows." });
+  } else {
+    const edge = stratReturnPct - bhReturnPct;
+    const light = edge > Math.abs(bhReturnPct) * 0.1 && edge > 0 ? "pass" : edge >= 0 ? "warn" : "fail";
+    gates.push({ light, title: "Beats buy-and-hold",
+      value: `${fmtPct(stratReturnPct)} vs ${fmtPct(bhReturnPct)}`,
+      plain: light === "pass"
+        ? "The strategy beat simply holding the asset — the complexity earned its keep."
+        : light === "warn"
+        ? "Roughly ties buy-and-hold. All that machinery bought you little over just holding."
+        : "Underperforms buy-and-hold. You'd have done better doing nothing — rethink or shelve it." });
+  }
+
+  // 6 — Survives the many-trials penalty (deflated Sharpe)
+  if (deflated == null) {
+    gates.push({ light: "na", title: "Survives trial-count penalty", value: "—",
+      plain: "Deflated Sharpe only applies when optimizing on Sharpe. Switch the metric to Sharpe to judge this." });
+  } else {
+    const light = deflated >= 0.9 ? "pass" : deflated >= 0.6 ? "warn" : "fail";
+    gates.push({ light, title: "Survives trial-count penalty", value: `${fmtNum(deflated * 100)}%`,
+      plain: light === "pass"
+        ? "Even after penalizing for how many parameter combos were tried, the Sharpe holds up as real."
+        : light === "warn"
+        ? "The Sharpe partly survives the many-trials penalty, but some of it may be luck-of-search."
+        : "Once you account for how many combos were tested, this Sharpe is probably a lucky draw." });
+  }
+
+  // 7 — Not luck-dependent (P&L concentration)
+  if (top10 == null) {
+    gates.push({ light: "na", title: "Not carried by a few trades", value: "—",
+      plain: "Not enough winning trades to measure concentration." });
+  } else {
+    const light = !luckWins && top10 <= 0.5 ? "pass" : top10 <= 0.7 ? "warn" : "fail";
+    gates.push({ light, title: "Not carried by a few trades", value: `top10 = ${fmtNum(top10 * 100)}%`,
+      plain: light === "pass"
+        ? "Profit is spread across many trades, not a couple of jackpots. Repeatable, not lucky."
+        : light === "warn"
+        ? `The top 10 winners are ${fmtNum(top10 * 100)}% of all profit — leans a bit on a few big trades.`
+        : `The top 10 winners are ${fmtNum(top10 * 100)}% of all profit. Remove those and the edge may vanish.` });
+  }
+
+  // 8 — Sub-period consistency (its own card with the strip below)
+  {
+    const light = pctPositive >= 0.7 ? "pass" : pctPositive >= 0.5 ? "warn" : "fail";
+    gates.push({ light, title: "Consistent across sub-periods",
+      value: `${fmtInt(positiveWins)}/${fmtInt(windows.length)} green`,
+      plain: light === "pass"
+        ? "Green across most windows — not one lucky period carrying the whole record."
+        : light === "warn"
+        ? "Mixed across windows. Some periods work, some don't — the edge isn't steady."
+        : "Red in most windows. Likely one good stretch dragging a losing record into the black." });
+  }
+
+  // --- Overall verdict from the data-backed gates ---
+  const scored = gates.filter((g) => g.light !== "na");
+  const val = { pass: 1, warn: 0.5, fail: 0 };
+  const ratio = scored.length ? scored.reduce((a, g) => a + val[g.light], 0) / scored.length : 0;
+  const fails = scored.filter((g) => g.light === "fail").map((g) => g.title);
+  const warns = scored.filter((g) => g.light === "warn").map((g) => g.title);
+
+  let tone, headline;
+  if (ratio >= 0.75 && fails.length === 0) { tone = "profit"; headline = "🟢 Looks Real — a deploy candidate worth the locked-holdout test"; }
+  else if (ratio >= 0.5) { tone = "amber"; headline = "🟡 Fragile — has an edge but leans on something; size small and keep watching"; }
+  else { tone = "loss"; headline = "🔴 Likely Overfit / Luck — most gates failed; kill or rework before trusting it"; }
+
+  const toneClasses = {
+    profit: "border-profit/40 bg-profit/5 text-profit",
+    amber:  "border-amber-400/40 bg-amber-400/5 text-amber-400",
+    loss:   "border-loss/40 bg-loss/5 text-loss",
+  };
+
+  return (
+    <section className="space-y-4">
+      {/* Headline */}
+      <div className={`rounded-xl border p-4 ${toneClasses[tone]}`}>
+        <div className="text-[10px] uppercase tracking-wider opacity-70">Overall verdict</div>
+        <div className="text-base font-semibold mt-0.5">{headline}</div>
+        {(fails.length > 0 || warns.length > 0) && (
+          <div className="text-xs font-mono opacity-90 mt-1.5">
+            {fails.length > 0 && <>Failing: {fails.join(", ")}. </>}
+            {warns.length > 0 && <>Watch: {warns.join(", ")}.</>}
+          </div>
+        )}
+        <div className="text-[11px] text-muted mt-2">
+          A verdict, not a guarantee. Read the gates together — full method in docs/plans/validation-checklist.md.
+        </div>
+      </div>
+
+      {/* The eight data-backed gates */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {gates.map((g) => <GateCard key={g.title} {...g} />)}
+      </div>
+
+      {/* Sub-period strip */}
+      <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-muted">Per-window consistency</div>
+        <WindowConsistencyStrip windows={windows} />
+        <div className="text-[11px] text-muted">
+          Each square is one out-of-sample window, in time order. Green = made money, red = lost. You want a
+          mostly-green row, not one green patch doing all the work.
+        </div>
+      </div>
+
+      {/* The two gates a single run can't judge — reminders, never auto-green */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <GateCard light="na" title="Locked holdout (do this last)" value="manual"
+          plain="Reserve the most recent ~6–12 months, never touch it during research, then run the finished strategy on it exactly once. The only data your tuning never saw — the strongest test there is." />
+        <GateCard light="na" title="Cross-strategy honesty" value="manual"
+          plain="Deflated Sharpe only penalizes trials within THIS run. It doesn't know how many other strategies / symbols / timeframes you tried. The more you've tested, the higher this winner must clear the bar." />
+      </div>
+    </section>
+  );
+}
+
 // -- KPI tile (smaller variant for WF result grid) ---------------------------
 
 export function Kpi({ title, value, sub, positive }) {

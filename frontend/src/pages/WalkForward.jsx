@@ -23,7 +23,7 @@ import { TabBar } from "../components/analytics/primitives.jsx";
 import {
   Field, NumInput, BudgetHint,
   ProgressPanel, RobustnessProgress, RobustnessResults,
-  WFVerdict, Kpi,
+  WFVerdict, WFVerdictPanel, Kpi,
   BestParamRankings, TopCombinations, WindowRankings, WindowHeatmap,
   PnlHeatmapGrid, SessionsEditor,
   useParamStats,
@@ -42,6 +42,7 @@ const TF_SECONDS = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "
 const TABS = [
   { id: "setup",      label: "Setup" },
   { id: "overview",   label: "Overview" },
+  { id: "verdict",    label: "Verdict" },
   { id: "folds",      label: "Folds" },
   { id: "parameters", label: "Parameters" },
   { id: "optuna",     label: "Optuna" },
@@ -614,6 +615,7 @@ export default function WalkForward() {
 
           {tab === "setup"      && <SetupTab {...setupProps} />}
           {tab === "overview"   && result && <OverviewTab   result={result} />}
+          {tab === "verdict"    && result && <WFVerdictPanel result={result} />}
           {tab === "folds"      && result && <FoldsTab      result={result} onCheckMonteCarlo={onCheckMonteCarlo} />}
           {tab === "parameters" && result && <ParametersTab result={result} />}
           {tab === "optuna"     && result && <OptunaTab     result={result} />}
