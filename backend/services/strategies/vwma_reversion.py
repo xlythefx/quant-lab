@@ -438,20 +438,45 @@ class VwmaReversionStrategy(Strategy):
         out["lower_band"] = mean - std * p["z_threshold"]
         return out
 
+    def _regime_ok_live(self, df: pd.DataFrame, p) -> bool:
+        """Whether the CURRENT bar's regime allows a new entry/add (mirrors the
+        backtest's `long_cond & in_regime`). Exits ignore this."""
+        method = _regime_method(p)
+        if method == "five":
+            rp = _regime_params({
+                "adx_period": p["regime_adx_period"],
+                "adx_trend_thresh": p["regime_adx_threshold"],
+            })
+            last_label = _regime_labels(df, rp)[-1]
+            allowed = [k for k, on in (p.get("allowed_regimes") or {}).items() if on]
+            return last_label in allowed
+        if method == "hmm":
+            # HMM gating is backtest-only (re-fitting a rolling HMM every closed bar
+            # is impractical) — live does NOT gate on HMM, so an HMM-gated backtest
+            # will diverge live. Use ADX / 5-Regime for live regime gating.
+            return True
+        rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
+        return rd.last_adx(df) < p["regime_adx_threshold"]
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """
-        State keys we maintain:
-          buf:        list of recent {time,o,h,l,c,v} dicts (len <= warmup)
-          pos:        0 / 1 / -1
-          entry_p:    float
-          atr_at_entry: float
+        Multi-tranche live path — mirrors the backtest's pyramiding.
 
-        NOTE: Single-position only. The backtest engine supports pyramiding
-        (see backtest_engine.py — tranches list), but this live path holds
-        at most one position at a time. If you trade live with pyramiding>1
-        in risk_config, live behavior will NOT match the backtest equity
-        curve. Extend `state` to a tranches list to align them.
+        Each closed bar the entry condition fires, open ANOTHER tranche (one
+        BUY/SELL webhook), up to `pyramiding` — one tranche per bar, so live
+        stacks the same way the backtest does. The WHOLE stack exits together
+        with a single EXIT on mean-revert (close back through the VWMA) or a
+        shared ATR stop anchored to the base (first) tranche.
+
+        The flatten-all exit MATCHES the backtest's mean-revert, which closes
+        every open tranche on the same bar (backtest_engine.py — the shared
+        `bxl_a[t-1]` mean_revert branch). The only divergence is the backtest's
+        rare PER-tranche ATR stops (atr_mult is wide, so they seldom fire): a
+        single webhook can't close one tranche and keep the rest, so live uses
+        the shared base stop instead.
+
+        State: buf, pos (0/1/-1), count (open tranches), base_entry, base_atr.
         """
         if not bool(candle.get("isClosed", False)):
             return None  # only act on closed bars
@@ -519,67 +544,60 @@ class VwmaReversionStrategy(Strategy):
                     in_sess = True
                     break
 
-        pos = state.get("pos", 0)
-        entry_p = state.get("entry_p", np.nan)
-        atr_at_entry = state.get("atr_at_entry", np.nan)
+        # position state (migrate old single-position keys if a live position
+        # predates this multi-tranche version).
+        pos = int(state.get("pos", 0))
+        count = int(state.get("count", 1 if pos != 0 else 0))
+        base_entry = state.get("base_entry", state.get("entry_p", np.nan))
+        base_atr = state.get("base_atr", state.get("atr_at_entry", np.nan))
+        atr_on = bool(p.get("atr_stop", True))
         sides = p["sides"]
 
-        if p.get("use_regime") and pos == 0:
-            method = _regime_method(p)
-            if method == "five":
-                rp = _regime_params({
-                    "adx_period": p["regime_adx_period"],
-                    "adx_trend_thresh": p["regime_adx_threshold"],
-                })
-                last_label = _regime_labels(df, rp)[-1]
-                allowed = [k for k, on in (p.get("allowed_regimes") or {}).items() if on]
-                if last_label not in allowed:
-                    return None  # current regime not allowed — block new entries; exits still fire
-            elif method == "hmm":
-                # HMM gating is backtest-only — re-fitting a rolling HMM on every
-                # closed bar live is impractical. So live does NOT gate on HMM
-                # (entries pass through); live will diverge from an HMM-gated
-                # backtest. Use ADX/5-Regime for live regime gating.
-                pass
-            else:
-                rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
-                if rd.last_adx(df) >= p["regime_adx_threshold"]:
-                    return None  # trending — block new entries; exits still fire below
+        def _flat():
+            state["pos"] = 0; state["count"] = 0
+            state["base_entry"] = np.nan; state["base_atr"] = np.nan
 
-        if pos == 0:
-            if not in_sess:
-                return None
-            if sides.get("long") and z < -p["z_threshold"] and r < p["rsi_long_max"]:
-                state["pos"] = 1
-                state["entry_p"] = c
-                state["atr_at_entry"] = a
-                return Signal(side="long", kind="entry", price=c, time=ts, reason="z_long")
-            if sides.get("short") and z > p["z_threshold"] and r > p["rsi_short_min"]:
-                state["pos"] = -1
-                state["entry_p"] = c
-                state["atr_at_entry"] = a
-                return Signal(side="short", kind="entry", price=c, time=ts, reason="z_short")
-            return None
-
-        atr_on = bool(p.get("atr_stop", True))
-        if pos == 1:
-            stop_hit = (atr_on and np.isfinite(atr_at_entry) and np.isfinite(entry_p)
-                        and c <= entry_p - p["atr_mult"] * atr_at_entry)
+        # ---- EXIT the whole stack (always — ignores session/regime) ----
+        if pos == 1 and count > 0:
+            stop_hit = (atr_on and np.isfinite(base_atr) and np.isfinite(base_entry)
+                        and c <= base_entry - p["atr_mult"] * base_atr)
             if c >= m or stop_hit:
-                state["pos"] = 0
-                state["entry_p"] = np.nan
-                state["atr_at_entry"] = np.nan
+                _flat()
                 return Signal(side="long", kind="exit", price=c, time=ts,
                               reason="atr_stop" if stop_hit else "z_revert")
-            return None
+        elif pos == -1 and count > 0:
+            stop_hit = (atr_on and np.isfinite(base_atr) and np.isfinite(base_entry)
+                        and c >= base_entry + p["atr_mult"] * base_atr)
+            if c <= m or stop_hit:
+                _flat()
+                return Signal(side="short", kind="exit", price=c, time=ts,
+                              reason="atr_stop" if stop_hit else "z_revert")
 
-        # pos == -1
-        stop_hit = (atr_on and np.isfinite(atr_at_entry) and np.isfinite(entry_p)
-                    and c >= entry_p + p["atr_mult"] * atr_at_entry)
-        if c <= m or stop_hit:
-            state["pos"] = 0
-            state["entry_p"] = np.nan
-            state["atr_at_entry"] = np.nan
-            return Signal(side="short", kind="exit", price=c, time=ts,
-                          reason="atr_stop" if stop_hit else "z_revert")
-        return None
+        # ---- ENTRY / ADD a tranche (session + regime + count < pyramiding) ----
+        if not in_sess:
+            return None
+        max_tranches = max(1, int(p.get("pyramiding", 1)))
+        long_ok  = bool(sides.get("long"))  and z < -p["z_threshold"] and r < p["rsi_long_max"]
+        short_ok = bool(sides.get("short")) and z >  p["z_threshold"] and r > p["rsi_short_min"]
+
+        want = ((pos == 0 and (long_ok or short_ok))
+                or (pos == 1  and count < max_tranches and long_ok)
+                or (pos == -1 and count < max_tranches and short_ok))
+        if not want:
+            return None
+        if p.get("use_regime") and not self._regime_ok_live(df, p):
+            return None  # regime blocks new entries/adds; exits already handled above
+
+        if pos == 0:
+            if long_ok:
+                state["pos"] = 1; state["count"] = 1
+                state["base_entry"] = c; state["base_atr"] = a
+                return Signal(side="long", kind="entry", price=c, time=ts, reason="z_long")
+            state["pos"] = -1; state["count"] = 1
+            state["base_entry"] = c; state["base_atr"] = a
+            return Signal(side="short", kind="entry", price=c, time=ts, reason="z_short")
+        if pos == 1:
+            state["count"] = count + 1
+            return Signal(side="long", kind="entry", price=c, time=ts, reason="z_long_add")
+        state["count"] = count + 1
+        return Signal(side="short", kind="entry", price=c, time=ts, reason="z_short_add")
