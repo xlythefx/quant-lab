@@ -29,8 +29,7 @@ export default function ParamForm({ schema = [], params = {}, onChange, lockedNo
           <div className="lt-panel-title" style={{ marginBottom: 6 }}>{group}</div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 14px" }}>
             {specs.map((spec) => {
-              const locked = spec.name === "pyramiding";
-              const v = locked ? 1 : val(spec);
+              const v = val(spec);
               const custom = params[spec.name] !== undefined && params[spec.name] !== null
                 && JSON.stringify(params[spec.name]) !== JSON.stringify(spec.default);
               const labelCls = custom ? "lt-cyan" : "lt-muted";
@@ -104,7 +103,7 @@ export default function ParamForm({ schema = [], params = {}, onChange, lockedNo
               return (
                 <label key={spec.name} title={spec.description || ""} style={{ minWidth: 0 }}>
                   <span className={`lt-field-label ${custom ? "lt-cyan" : ""}`}>
-                    {spec.name}{locked ? " (locked)" : ""}
+                    {spec.name}
                   </span>
                   <input
                     className="lt-input"
@@ -113,7 +112,6 @@ export default function ParamForm({ schema = [], params = {}, onChange, lockedNo
                     min={spec.min ?? undefined}
                     max={spec.max ?? undefined}
                     step={spec.step ?? (spec.type === "int" ? 1 : 0.01)}
-                    disabled={locked}
                     onChange={(e) => {
                       const raw = e.target.value;
                       if (raw === "") return set(spec.name, spec.default);

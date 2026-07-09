@@ -20,6 +20,7 @@ from websocket import WebSocketApp, WebSocketConnectionClosedException
 
 from config import BINANCE_WS_BASE
 from services.stream_base import CandleStream
+from services.live import live_store
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,17 @@ class BinanceKlineStream(CandleStream):
 
     def _on_open(self, _ws):
         log.info("[%s] ws open", self._name())
+        # First connect is _attempts == 0; anything above means we dropped and
+        # recovered — record it in the activity "black box" so silent reconnects
+        # leave a trail. Never let a logging hiccup disturb the stream.
+        if self._attempts > 0:
+            try:
+                live_store.add_activity(
+                    "reconnect", symbol=self.symbol,
+                    detail=f"{self.timeframe} stream reconnected (attempt {self._attempts})",
+                )
+            except Exception:
+                log.debug("[%s] reconnect activity log failed", self._name(), exc_info=True)
 
     def stop(self):
         super().stop()

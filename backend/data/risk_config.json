@@ -1,8 +1,8 @@
 {
   "starting_capital": 100000.0,
   "fee_flat": 0.0,
-  "fee_pct": 0.0,
+  "fee_pct": 0.04,
   "futures_commission": 0.0,
-  "slippage_bps": 0.0,
+  "slippage_bps": 1.0,
   "pyramiding": 10.0
 }

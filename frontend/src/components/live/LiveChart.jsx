@@ -65,7 +65,7 @@ export default function LiveChart({ candles, markers = [], progress = 1 }) {
     const n = candles.length;
 
     // Visible fraction for the draw-in (frame is full, series reveal L→R).
-    const lastIdx = Math.max(1, Math.min(n - 1, Math.floor(progress * (n - 1))));
+    const lastIdx = Math.min(n - 1, Math.max(0, Math.floor(progress * (n - 1))));
 
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < n; i++) {

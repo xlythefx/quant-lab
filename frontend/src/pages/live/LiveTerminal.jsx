@@ -15,7 +15,7 @@ import AlertsView from "../../components/live/AlertsView.jsx";
 import { setKillSwitch } from "../../components/live/liveApi.js";
 import { DataModeProvider, useDataMode } from "../../components/live/dataMode.jsx";
 import { useEnterStagger } from "../../components/live/animations.js";
-import { useGateway, useInstruments, useDeployments, usePositionsRisk } from "../../components/live/hooks.js";
+import { useGateway, useInstruments, useDeployments, useMasterAccount } from "../../components/live/hooks.js";
 import { exitLive } from "../../services/appMode.js";
 
 /** Backtest → live handoff: read + clear the deploy prefill left by the
@@ -92,15 +92,17 @@ function TerminalInner() {
   const deploy = useDeployments();
   const runningCount = deploy.deployments.filter((d) => d.status === "RUNNING").length;
   const [prefill, setPrefill] = useState(() => takeDeployPrefill());
-  const [account, setAccount] = useState(() => {
+  // Account scope for the (transitional) Positions/Risk panels. The top-bar
+  // account toggle was removed — the headline now shows the master account.
+  const [account] = useState(() => {
     try { return localStorage.getItem("ql.live_account") === "live" ? "live" : "demo"; } catch { return "demo"; }
   });
-  useEffect(() => { try { localStorage.setItem("ql.live_account", account); } catch { /* ignore */ } }, [account]);
 
-  // Top-bar equity / day P&L: only shown when REAL (WAMP reachable) — a
-  // simulated number in the headline would be misleading.
-  const { risk, simulated: riskSim } = usePositionsRisk(account);
-  const headline = !riskSim && risk?.cards ? risk.cards : null;
+  // Top-bar headline = the master Binance account (name='master') read from the
+  // LOCAL deployed DB (167 / localhost). Null until real, so the number is never
+  // faked. QuantLab can't reach 156, so master is always this host's DB.
+  const master = useMasterAccount();
+  const headline = master?.ok ? master : null;
 
   // Backtest handoff: if the research side left a prefill, open Strategies.
   useEffect(() => {
@@ -148,8 +150,6 @@ function TerminalInner() {
         onToggleDataMode={toggleDataMode}
         killed={deploy.killswitch}
         onToggleKill={toggleKill}
-        account={account}
-        onAccount={setAccount}
       />
       <WorkspaceTabs active={view === "workspaces" ? ws : null} onSelect={selectWs} onCommand={() => setPaletteOpen(true)} />
       <div className="lt-content">

@@ -24,7 +24,7 @@ export function rng(seedStr) {
   };
 }
 
-export const BASE_PRICE = { BTCUSDT: 68120, LTCUSDT: 94.6, ETHUSDT: 3480, DEFAULT: 100 };
+export const BASE_PRICE = { BTCUSDT: 68120, LTCUSDT: 94.6, ETHUSDT: 3480, SOLUSDT: 168, FETUSDT: 1.35, DEFAULT: 100 };
 export const basePrice = (symbol) => BASE_PRICE[symbol] ?? BASE_PRICE.DEFAULT;
 
 const TF_SECONDS = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 };
@@ -223,5 +223,63 @@ export function mockRisk(account = "demo") {
       distPct: (1 / p.leverage) * 100,
       uPnl: p.upnl,
     })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Instrument-class panels (adaptPanels): stock key-stats, index breadth, FX
+// carry. All SIMULATED — QuantLab has no fundamentals/breadth/rates feed yet.
+// ---------------------------------------------------------------------------
+
+/** Equity fundamentals for a stock instrument. */
+export function mockKeyStats(symbol) {
+  const r = rng(`${symbol}|keystats`);
+  const price = basePrice(symbol);
+  return {
+    marketCapB: 8 + r() * 900,
+    peRatio: 9 + r() * 34,
+    eps: 0.5 + r() * 12,
+    divYieldPct: r() * 3.4,
+    beta: 0.6 + r() * 1.3,
+    avgVolM: 1 + r() * 40,
+    low52: price * (0.62 + r() * 0.15),
+    high52: price * (1.08 + r() * 0.35),
+    price,
+    nextEarningsSec: Math.floor((Date.now() + (5 + Math.floor(r() * 60)) * 86400000) / 1000),
+  };
+}
+
+/** Market breadth for an index instrument. */
+export function mockBreadth(symbol) {
+  const r = rng(`${symbol}|breadth|${new Date().getUTCHours()}`);
+  const total = 500;
+  const advancers = Math.round(total * (0.3 + r() * 0.45));
+  const decliners = Math.max(0, total - advancers - Math.round(r() * 20));
+  return {
+    advancers,
+    decliners,
+    unchanged: Math.max(0, total - advancers - decliners),
+    pctAbove50: 30 + r() * 55,
+    pctAbove200: 30 + r() * 55,
+    newHighs: Math.round(r() * 60),
+    newLows: Math.round(r() * 40),
+    trin: 0.6 + r() * 1.2,
+  };
+}
+
+/** Interest-rate carry for an FX pair. */
+export function mockCarry(symbol) {
+  const r = rng(`${symbol}|carry`);
+  const baseRate = 0.5 + r() * 5;
+  const quoteRate = 0.5 + r() * 5;
+  const diff = baseRate - quoteRate;
+  return {
+    baseCcy: symbol.slice(0, 3),
+    quoteCcy: symbol.slice(3, 6) || "USD",
+    baseRate,
+    quoteRate,
+    differential: diff,
+    swapLong: diff * 0.27,    // points/day (mock)
+    swapShort: -diff * 0.31,
   };
 }

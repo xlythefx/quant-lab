@@ -34,6 +34,11 @@ Binance endpoints are already researched in
 - [x] **Risk** workspace + **Positions** panel: build the layout here, but the data is REAL and wired in **phase 09** (read from the `sinegu-api` WAMP position tables), NOT simulated. Only VaR/maint-margin (which we can't derive) may stay labeled-derived. Falls back to SIMULATED when WAMP is down.
 - [x] **Blotter → Order Entry**: ticket UI (BUY/SELL, type, price, size, leverage, notional/margin, SUBMIT) that, per the chosen model, **routes to the webhook** (06) rather than an in-app OMS — or is disabled with a clear "webhook-only" note.
 - [x] Panel adaptation by instrument class (`adaptPanels`): stock→key-stats, index→breadth, fx→carry — SIMULATED.
+      *(Built Jul 06, 2026: `frontend/src/components/live/adaptPanels.jsx` picks the
+      Trading row-2 panel set from the selected instrument's `cls`; new SIMULATED
+      panels `KeyStatsPanel`/`BreadthPanel`/`CarryPanel` + `simFeed` generators
+      `mockKeyStats`/`mockBreadth`/`mockCarry`. Crypto is the fallback, so nothing
+      changes until a non-crypto instrument is catalogued.)*
 - [x] Audit: every non-real number on screen has a SIMULATED marker. No exceptions.
 
 ## Done when

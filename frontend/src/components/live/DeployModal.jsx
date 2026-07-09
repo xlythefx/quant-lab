@@ -28,7 +28,7 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
       symbol: prefill?.symbol || instruments[0]?.symbol || "BTCUSDT",
       timeframe: prefill?.timeframe || "1h",
       preset: "",
-      params: prefill?.params ? { ...prefill.params, pyramiding: 1 } : {},
+      params: prefill?.params ? { ...prefill.params } : {},
       account: "demo",
       webhook_url: "",
       secret: "",
@@ -40,8 +40,11 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
     // own endpoints — same backend the old page uses).
     getLiveAlerts()
       .then((rules) => {
-        setUrlPresets([...new Set((rules || []).map((r) => r.webhook_url).filter(Boolean))]);
-        setSecretPresets([...new Set((rules || []).map((r) => r.secret).filter(Boolean))]);
+        const rs = rules || [];
+        setUrlPresets([...new Set(rs.map((r) => r.webhook_url).filter(Boolean))]);
+        // Secrets come back masked. Reference the source rule by name; the backend
+        // restores the real secret on save (it never reaches the browser).
+        setSecretPresets(rs.filter((r) => r.secret).map((r) => ({ name: r.name, hint: r.secret })));
       })
       .catch(() => {});
   }, [open, prefill, instruments]);
@@ -61,15 +64,15 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
     upd({
       strategy_id: id,
       strategy_alias: s?.name || id,
-      params: { pyramiding: 1 },
+      params: {},
       preset: "",
       name: draft.name || (s ? `${s.name} ${draft.symbol} ${draft.account}` : ""),
     });
   };
 
   const applyPreset = (presetName) => {
-    if (!presetName) return upd({ preset: "", params: { pyramiding: 1 } });
-    upd({ preset: presetName, params: { ...(presets[presetName] || {}), pyramiding: 1 } });
+    if (!presetName) return upd({ preset: "", params: {} });
+    upd({ preset: presetName, params: { ...(presets[presetName] || {}) } });
   };
 
   const validate = () => {
@@ -183,13 +186,16 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
                   <span className="lt-field-label">Secret</span>
                   {secretPresets.length > 0 && (
                     <select className="lt-select" style={{ marginBottom: 4 }} value=""
-                            onChange={(e) => { if (e.target.value) upd({ secret: e.target.value }); }}>
-                      <option value="">— pick existing —</option>
-                      {secretPresets.map((s) => <option key={s} value={s}>{s.slice(0, 3)}…{s.slice(-2)}</option>)}
+                            onChange={(e) => {
+                              const src = secretPresets.find((p) => p.name === e.target.value);
+                              if (src) upd({ secret: src.hint, secret_source: src.name });
+                            }}>
+                      <option value="">— reuse a secret —</option>
+                      {secretPresets.map((p) => <option key={p.name} value={p.name}>{p.name} ({p.hint})</option>)}
                     </select>
                   )}
                   <input className="lt-input" type="password" value={draft.secret}
-                         onChange={(e) => upd({ secret: e.target.value })} placeholder="shared token" />
+                         onChange={(e) => upd({ secret: e.target.value, secret_source: "" })} placeholder="shared token" />
                 </label>
 
                 <label>
@@ -204,8 +210,8 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
                   <ParamForm
                     schema={strat.schema || []}
                     params={draft.params}
-                    onChange={(p) => upd({ params: { ...p, pyramiding: 1 }, preset: "" })}
-                    lockedNote="pyramiding locked to 1 — live matches the backtest only at a single position"
+                    onChange={(p) => upd({ params: { ...p }, preset: "" })}
+                    lockedNote="Increments (pyramiding > 1) allowed — validate on 156 (staging) before production"
                   />
                 </div>
               )}

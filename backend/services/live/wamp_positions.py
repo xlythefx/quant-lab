@@ -253,6 +253,39 @@ def get_risk(account: str = "demo") -> dict:
     }
 
 
+# ---- master account (headline equity) -----------------------------------------
+
+def get_master_account() -> dict:
+    """The master Binance account (name='master') from the LOCAL sinegu_db —
+    whatever environment QuantLab is deployed on. Read-only, a SINGLE account
+    (not the demo/live sum in get_risk).
+      equity = balance + unrealized_pnl
+      dayPnl = today's (UTC) realized for this account + current unrealized
+    """
+    rows = _query(
+        "SELECT api_key, balance, unrealized_pnl, initial_deposit, currency_type "
+        "FROM binance_accounts WHERE name='master' AND deleted_at IS NULL LIMIT 1")
+    if not rows:
+        raise WampUnavailable("no master Binance account (name='master')")
+    a = rows[0]
+    balance = _f(a["balance"])
+    upnl = _f(a["unrealized_pnl"])
+    midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    mstr = midnight.strftime("%Y-%m-%d %H:%M:%S")
+    day = _query(
+        "SELECT COALESCE(SUM(realized_pnl),0) s FROM binance_pastpositions "
+        "WHERE api_key=%s AND closed_at >= %s", (a["api_key"], mstr))[0]["s"]
+    return {
+        "name": "master",
+        "equity": balance + upnl,
+        "dayPnl": _f(day) + upnl,
+        "balance": balance,
+        "unrealizedPnl": upnl,
+        "initialDeposit": _f(a["initial_deposit"]),
+        "currency": a.get("currency_type") or "USDT",
+    }
+
+
 # ---- reconciliation -----------------------------------------------------------
 
 _ENTRY_ACTIONS = ("BUY", "SELL")

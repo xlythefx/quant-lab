@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 
-from services import risk_config
+from services import risk_config, quant_metrics
 from services.backtest_engine import _compute_stats
 from services.live import live_store
 
@@ -50,6 +50,48 @@ def _rows_to_trades(rows: list[dict]) -> list[dict]:
             "r": r.get("r"),
         })
     return out
+
+
+def _monthly_returns(rows: list[dict]) -> list[dict]:
+    """Realized P&L bucketed by exit month (UTC) — journal-only, no bar data."""
+    buckets: dict[str, float] = {}
+    for r in rows:
+        ts = int(r.get("ts") or 0)
+        if ts <= 0:
+            continue
+        key = time.strftime("%Y-%m", time.gmtime(ts))
+        buckets[key] = buckets.get(key, 0.0) + float(r.get("pnl_usd") or 0.0)
+    return [{"month": k, "pnl": v} for k, v in sorted(buckets.items())]
+
+
+def _streaks(trades: list[dict]) -> dict:
+    """Longest consecutive win / loss run (trades are time-ordered ascending)."""
+    max_win = cur_win = max_loss = cur_loss = 0
+    for t in trades:
+        if t["pnl_dollars"] > 0:
+            cur_win += 1; cur_loss = 0
+            max_win = max(max_win, cur_win)
+        elif t["pnl_dollars"] < 0:
+            cur_loss += 1; cur_win = 0
+            max_loss = max(max_loss, cur_loss)
+        else:
+            cur_win = cur_loss = 0
+    return {"max_win_streak": max_win, "max_loss_streak": max_loss}
+
+
+def _best_worst(rows: list[dict]):
+    """Single best / worst realized trade by P&L."""
+    best = worst = None
+    for r in rows:
+        pnl = float(r.get("pnl_usd") or 0.0)
+        item = {"pnl": pnl, "symbol": r.get("symbol"),
+                "strategy": r.get("strategy") or r.get("strategy_id"),
+                "ts": int(r.get("ts") or 0)}
+        if best is None or pnl > best["pnl"]:
+            best = item
+        if worst is None or pnl < worst["pnl"]:
+            worst = item
+    return best, worst
 
 
 def _equity_series(trades: list[dict], starting_capital: float):
@@ -93,6 +135,25 @@ def compute(period: str = "ALL", group: str = "strategy",
     stats["avg_hold_min"] = float(np.mean(holds)) if holds else None
     stats["expectancy_usd"] = stats["avg_pnl_dollars"]
     stats["expectancy_r"] = float(np.mean(rs)) if rs else None
+
+    # Advanced quant block — REUSE the exact backtest math (quant_metrics) over
+    # the live journal so live and backtest report the SAME formulas: sortino,
+    # calmar, expectancy, ulcer, distribution, etc. The equity curve is trade-exit
+    # indexed (live has no per-bar MTM), annualized from exit spacing — the same
+    # basis as the Sharpe above. Bar-dependent outputs (exposure %, per-bar DD
+    # duration) are intentionally NOT fed; quant_metrics is safe on sparse input.
+    equity_curve = [{"time": int(t), "equity": float(e)}
+                    for t, e in zip(time_a.tolist(), eq_arr.tolist())]
+    for t in trades:
+        # equity-impact % per trade — what quant_metrics' distribution/omega read.
+        t["pnl_pct_equity"] = (t["pnl_dollars"] / cap * 100.0) if cap > 0 else 0.0
+    bpy = quant_metrics.infer_bars_per_year(time_a)
+    stats["advanced"] = quant_metrics.compute(trades, equity_curve, cap, bpy) if trades else None
+    stats["monthly_returns"] = _monthly_returns(rows)
+    stats["streaks"] = _streaks(trades)
+    best, worst = _best_worst(rows)
+    stats["best_trade"] = best
+    stats["worst_trade"] = worst
 
     curve = [{"t": int(t), "eq": float(e)} for t, e in zip(time_a.tolist(), eq_arr.tolist())] if trades else []
 

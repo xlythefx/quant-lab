@@ -3,10 +3,7 @@ import Panel from "./Panel.jsx";
 import LiveChart from "./LiveChart.jsx";
 import OrderBookPanel from "./OrderBookPanel.jsx";
 import TapePanel from "./TapePanel.jsx";
-import PositionsPanel from "./PositionsPanel.jsx";
-import LiquidationsPanel from "./LiquidationsPanel.jsx";
-import FundingPanel from "./FundingPanel.jsx";
-import NewsPanel from "./NewsPanel.jsx";
+import { adaptPanels } from "./adaptPanels.jsx";
 import { useEnterStagger, useDrawProgress } from "./animations.js";
 import { useInstruments, useLiveCandles, useTicker } from "./hooks.js";
 import { onLiveSignal } from "./liveChannels.js";
@@ -59,6 +56,13 @@ export default function TradingWorkspace({ symbol, timeframe, onSymbol, onTimefr
   const armedHere = useMemo(
     () => deployments.filter((d) => d.symbol === symbol),
     [deployments, symbol],
+  );
+  // Row-2 panels adapt to the instrument's asset class (crypto perps vs stock/
+  // index/fx). Everything is crypto today, so this is the current set until a
+  // non-crypto instrument is catalogued.
+  const cls = useMemo(
+    () => instruments.find((i) => i.symbol === symbol)?.cls || "crypto",
+    [instruments, symbol],
   );
 
   return (
@@ -169,13 +173,15 @@ export default function TradingWorkspace({ symbol, timeframe, onSymbol, onTimefr
         <TapePanel symbol={symbol} lastPrice={price} />
       </div>
 
-      {/* Row 2 */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 1, background: "var(--lt-border)", minHeight: 0 }}>
-        <PositionsPanel account={account} compact />
-        <LiquidationsPanel symbol={symbol} lastPrice={price} />
-        <FundingPanel symbol={symbol} />
-        <NewsPanel />
-      </div>
+      {/* Row 2 — panel set adapts to the instrument's asset class (adaptPanels) */}
+      {(() => {
+        const { cols, panels } = adaptPanels(cls, { symbol, price, account });
+        return (
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 1, background: "var(--lt-border)", minHeight: 0 }}>
+            {panels}
+          </div>
+        );
+      })()}
     </div>
   );
 }

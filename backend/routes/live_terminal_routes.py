@@ -16,18 +16,41 @@ from threading import Lock
 
 from flask import Blueprint, jsonify, request
 
-from services import market_data, event_bus, live_alerts_config, live_alerter, alerts_daemon
+from services import market_data, event_bus, live_alerts_config, live_alerter, alerts_daemon, assets
 from services.live import live_engine, live_store
 from utils.validators import validate_symbol, validate_timeframe, validate_limit, ValidationError
 
 log = logging.getLogger(__name__)
 live_bp = Blueprint("live_terminal", __name__, url_prefix="/api/live")
 
-# First instruments (per plan 01): BTCUSDT + LTCUSDT on Binance spot.
-INSTRUMENTS = [
-    {"symbol": "BTCUSDT", "venue": "BINANCE", "cls": "crypto", "label": "Bitcoin / USDT",  "priceDecimals": 2},
-    {"symbol": "LTCUSDT", "venue": "BINANCE", "cls": "crypto", "label": "Litecoin / USDT", "priceDecimals": 2},
-]
+# Live Terminal instruments = the crypto spot pairs catalogued for Binance
+# (backend/data/assets/binance.json). Add a pair there and it shows up in the
+# chart's symbol switcher automatically after a backend restart — no code change
+# here. The candle/ticker endpoints + socket kline stream already work for any
+# valid Binance pair, so the catalog is the one place that curates the list.
+def _price_decimals(tick_size: float) -> int:
+    """0.01 -> 2, 0.0001 -> 4. Defaults to 2 when uncatalogued (tick 0)."""
+    if not tick_size or tick_size >= 1:
+        return 2
+    return len(f"{tick_size:.10f}".rstrip("0").split(".")[1])
+
+
+def _build_instruments() -> list[dict]:
+    out = []
+    for sym, meta in sorted(assets.for_broker("binance").items()):
+        if meta.asset_class != "crypto":
+            continue
+        label = f"{meta.base} / {meta.quote}" if meta.base and meta.quote else sym
+        out.append({
+            "symbol": sym, "venue": "BINANCE", "cls": "crypto",
+            "label": label, "priceDecimals": _price_decimals(meta.tick_size),
+        })
+    # Never hand back an empty list — the terminal must always have a chart.
+    return out or [{"symbol": "BTCUSDT", "venue": "BINANCE", "cls": "crypto",
+                    "label": "BTC / USDT", "priceDecimals": 2}]
+
+
+INSTRUMENTS = _build_instruments()
 _INSTRUMENT_SYMBOLS = {i["symbol"] for i in INSTRUMENTS}
 
 # Timeframes offered by the terminal's chart (subset of config.TIMEFRAMES).
@@ -117,9 +140,8 @@ def _mask_url(url: str) -> str:
 
 
 def _redact_secret(secret: str) -> str:
-    if not secret:
-        return ""
-    return "***" if len(secret) <= 8 else f"{secret[:3]}…{secret[-2:]}"
+    # One masking convention across the app (see live_alerts_config.mask_secret).
+    return live_alerts_config.mask_secret(secret or "")
 
 
 def _deployment_view(rule: dict, rt: dict) -> dict:
@@ -172,9 +194,11 @@ def deployments_create():
         return jsonify({"error": f"a deployment named '{name}' already exists"}), 400
 
     params = dict(body.get("params") or {})
-    # Live parity with the backtest: single position only (memory: live-vs-backtest-parity).
-    if "pyramiding" in params:
-        params["pyramiding"] = 1
+    # Increments (pyramiding > 1) are ALLOWED. The strategy self-limits to its schema
+    # max and emits one entry per trigger; QuantLab throws one webhook each and the
+    # Flask receiver sizes/counts/caps execution. Default stays 1 via the schema, and
+    # only strategies whose live on_candle emits multiple entries actually stack
+    # (e.g. vwap_deviation). Validate on 156 (staging) before any 167 deployment.
 
     rule = {
         "name": name,
@@ -189,6 +213,9 @@ def deployments_create():
         "payload_template": body.get("payload_template") or None,
         "params": params,
         "account": str(body.get("account") or "demo"),
+        # Optional: reuse another rule's real secret without exposing it to the
+        # browser. save_rules() resolves this by name, then drops the field.
+        "secret_source": str(body.get("secret_source") or "").strip(),
     }
     saved = live_alerts_config.save_rules(rules + [rule])
     alerts_daemon.refresh()
@@ -218,8 +245,7 @@ def deployments_patch(name):
               "strategy_alias", "timeframe", "payload_template", "enabled"):
         if k in body and body[k] is not None:
             rule[k] = body[k]
-    if isinstance(rule.get("params"), dict) and "pyramiding" in rule["params"]:
-        rule["params"]["pyramiding"] = 1
+    # pyramiding > 1 allowed here too (see deployments_create) — no forcing.
 
     rules[idx] = rule
     live_alerts_config.save_rules(rules)
@@ -362,6 +388,21 @@ def analytics():
 
 def _account_arg() -> str:
     return "live" if (request.args.get("account") or "demo").lower() == "live" else "demo"
+
+
+@live_bp.get("/master-account")
+def live_master_account():
+    """Headline equity: the master Binance account (name='master') read from the
+    LOCAL sinegu_db QuantLab is deployed on. Read-only; {ok:false} when WAMP is
+    down so the top bar can hide the number rather than show a fake one."""
+    from services.live import wamp_positions
+    try:
+        out = wamp_positions.get_master_account()
+        out["ok"] = True
+        out["source"] = "sinegu-api"
+        return jsonify(out)
+    except wamp_positions.WampUnavailable as e:
+        return jsonify({"ok": False, "error": f"WAMP unreachable: {e}"})
 
 
 @live_bp.get("/positions")

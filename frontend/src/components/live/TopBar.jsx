@@ -12,6 +12,15 @@ export function useUtcClock() {
   return `${p(now.getUTCHours())}:${p(now.getUTCMinutes())}:${p(now.getUTCSeconds())}`;
 }
 
+/** Which SaaS environment this QuantLab is deployed on (mirrors sinequal api.ts). */
+function envLabel() {
+  const h = typeof window !== "undefined" ? window.location.hostname : "";
+  if (h === "localhost" || h === "127.0.0.1" || h.endsWith(".local")) return "LOCAL";
+  if (h.includes("andrea-orcelinvest")) return "156";
+  if (h.includes("sinegualfamily")) return "167";
+  return h || "—";
+}
+
 /**
  * Top bar (54px): wordmark + venue chip | equity + day P&L | data-mode toggle,
  * kill switch, LIVE dot, clock, bell (alerts), Exit Live.
@@ -19,7 +28,6 @@ export function useUtcClock() {
 export default function TopBar({
   equity, dayPnl, bellCount, alertsActive, onBell, onExitLive,
   dataMode, onToggleDataMode, killed, onToggleKill,
-  account, onAccount,
 }) {
   const clock = useUtcClock();
   const pnlCls = dayPnl == null ? "lt-muted" : dayPnl >= 0 ? "lt-green" : "lt-red";
@@ -28,21 +36,11 @@ export default function TopBar({
       <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
         <div className="lt-wordmark"><b>XlytheAI</b> <span>Terminal</span></div>
         <div className="lt-venue-chip">● BINANCE</div>
-        {onAccount && (
-          <button
-            className="lt-topbtn"
-            style={account === "live" ? { color: "var(--lt-red)", borderColor: "rgba(255,77,109,0.5)" } : { color: "var(--lt-cyan)", borderColor: "rgba(34,211,238,0.5)" }}
-            title="Which account the Positions/Risk/Reconciliation panels read (Demo = fake money)"
-            onClick={() => onAccount(account === "live" ? "demo" : "live")}
-          >
-            ACCT: {String(account || "demo").toUpperCase()}
-          </button>
-        )}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 26 }}>
         <div className="lt-stat-block">
-          <div className="lbl">Account Equity</div>
+          <div className="lbl">Master Equity · {envLabel()}</div>
           <div className="val">{equity == null ? "—" : fmtUsd(equity)}</div>
         </div>
         <div className="lt-stat-block">

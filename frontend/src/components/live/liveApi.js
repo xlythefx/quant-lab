@@ -117,3 +117,9 @@ export async function getLiveReconciliation(account) {
   const { data } = await api.get("/api/live/reconciliation", { params: { account } });
   return data;
 }
+
+// ---- master account (headline equity, read from the LOCAL deployed DB) -------
+export async function getMasterAccount() {
+  const { data } = await api.get("/api/live/master-account");
+  return data; // {ok, equity, dayPnl, balance, unrealizedPnl, currency, ...}
+}

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useDataMode } from "./dataMode.jsx";
 import {
   getLiveInstruments, getLiveCandles, getLiveTicker, getDeployments,
-  getLiveRisk, getLivePositions,
+  getLiveRisk, getLivePositions, getMasterAccount,
 } from "./liveApi.js";
 import {
   subscribeLiveCandles, subscribeOrderBook, onGateway, onSocketReconnect,
@@ -16,6 +16,20 @@ import * as sim from "./simFeed.js";
  * The returned `simulated` flag drives the SIMULATED badge — always truthful.
  */
 
+/** Master account headline (equity + day P&L) from the LOCAL deployed DB. Polls
+ * ~20s. Returns the payload or null; `.ok` is false when WAMP is unreachable. */
+export function useMasterAccount() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    const pull = () => getMasterAccount().then((d) => { if (!dead) setData(d); }).catch(() => {});
+    pull();
+    const t = setInterval(pull, 20_000);
+    return () => { dead = true; clearInterval(t); };
+  }, []);
+  return data;
+}
+
 export function useInstruments() {
   const [data, setData] = useState({ instruments: [], timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"] });
   useEffect(() => {
@@ -25,8 +39,11 @@ export function useInstruments() {
       .catch(() => {
         if (!dead) setData({
           instruments: [
-            { symbol: "BTCUSDT", venue: "BINANCE", cls: "crypto", label: "Bitcoin / USDT", priceDecimals: 2 },
-            { symbol: "LTCUSDT", venue: "BINANCE", cls: "crypto", label: "Litecoin / USDT", priceDecimals: 2 },
+            { symbol: "BTCUSDT", venue: "BINANCE", cls: "crypto", label: "BTC / USDT", priceDecimals: 2 },
+            { symbol: "ETHUSDT", venue: "BINANCE", cls: "crypto", label: "ETH / USDT", priceDecimals: 2 },
+            { symbol: "SOLUSDT", venue: "BINANCE", cls: "crypto", label: "SOL / USDT", priceDecimals: 2 },
+            { symbol: "LTCUSDT", venue: "BINANCE", cls: "crypto", label: "LTC / USDT", priceDecimals: 2 },
+            { symbol: "FETUSDT", venue: "BINANCE", cls: "crypto", label: "FET / USDT", priceDecimals: 4 },
           ],
           timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"],
         });
@@ -124,7 +141,7 @@ export function useTicker(symbol) {
     }
     const pull = () => getLiveTicker(symbol).then((t) => { if (!dead) setTicker(t); }).catch(() => {});
     pull();
-    const t = setInterval(pull, 30_000);
+    const t = setInterval(pull, 10_000);
     return () => { dead = true; clearInterval(t); };
   }, [symbol, mock]);
 

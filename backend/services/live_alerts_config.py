@@ -131,27 +131,119 @@ def _coerce_rules(rules) -> list[dict]:
     return out
 
 
-def load_rules() -> list[dict]:
+# ---------------------------------------------------------------------------
+# Secret masking (never send plaintext secrets to the browser)
+#
+# GET /api/live-alerts serves `masked_rules()`; the edit forms round-trip those
+# masked values straight back on save/toggle/delete. `save_rules()` detects a
+# masked/blank secret and restores the real one from the stored rule of the same
+# name — so masking on read can't corrupt the stored secret. `MASK_SENTINEL`
+# ("…") is what makes a masked value recognisable on the way back.
+# ---------------------------------------------------------------------------
+MASK_SENTINEL = "…"
+
+
+def mask_secret(secret: str) -> str:
+    """Redact a secret for display (same format as the terminal's deployment hint)."""
+    if not secret:
+        return ""
+    return "***" if len(secret) <= 8 else f"{secret[:3]}{MASK_SENTINEL}{secret[-2:]}"
+
+
+def mask_webhook_url(url: str) -> str:
+    """Strip the query string (may carry ?secret=…) for display; keep the base path."""
+    if not url:
+        return ""
+    return url.split("?")[0]
+
+
+def _looks_masked_secret(s: str) -> bool:
+    """True when `s` is one of our masked/blank forms (so save should preserve)."""
+    if not s:
+        return True
+    return s == "***" or MASK_SENTINEL in s
+
+
+def masked_rules() -> list[dict]:
+    """Rules for client display: secret redacted and webhook_url query stripped.
+    Safe to edit and resubmit — `save_rules` restores the real values by name."""
+    out = []
+    for r in load_rules():
+        r = dict(r)
+        r["secret"] = mask_secret(r.get("secret") or "")
+        r["webhook_url"] = mask_webhook_url(r.get("webhook_url") or "")
+        out.append(r)
+    return out
+
+
+def _restore_masked_secrets(rules, current_by_name: dict) -> list:
+    """Backfill real secrets/URLs before persisting.
+
+    For each incoming rule whose secret is blank or masked, restore it from the
+    stored rule of the same `name`; a brand-new rule may name a donor via
+    `secret_source` (the DeployModal "reuse an existing webhook" preset). If the
+    webhook_url lost its `?secret=` query but the base path is unchanged, re-attach
+    the original query. A real (freshly typed) secret is left untouched.
+    """
+    if not isinstance(rules, list):
+        return rules
+    out = []
+    for r in rules:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        r = dict(r)
+        name = str(r.get("name") or "").strip()
+        src = current_by_name.get(name)
+        donor_name = str(r.pop("secret_source", "") or "").strip()
+        donor = current_by_name.get(donor_name) if donor_name else None
+        ref = src or donor
+
+        # A masked/blank secret means "keep the real one." Restore it from the
+        # same-name rule (edit/toggle/delete) or the named donor (DeployModal
+        # reuse). If neither exists (a new rule with a masked secret we can't
+        # resolve), blank it so _coerce_rule DROPS the rule rather than persist a
+        # fake secret — fail safe, never save a broken one.
+        if _looks_masked_secret(str(r.get("secret") or "")):
+            r["secret"] = ref["secret"] if (ref and ref.get("secret")) else ""
+
+        inc_url = str(r.get("webhook_url") or "")
+        if inc_url and "?" not in inc_url and ref:
+            ref_url = str(ref.get("webhook_url") or "")
+            if "?" in ref_url and ref_url.split("?")[0] == inc_url:
+                r["webhook_url"] = ref_url
+        out.append(r)
+    return out
+
+
+def _current_locked() -> list[dict]:
+    """Return the current stored rules (real secrets). Assumes _LOCK is held."""
     global _cache
+    if _cache is not None:
+        return _cache
+    if os.path.exists(_PATH):
+        try:
+            with open(_PATH, "r") as f:
+                data = json.load(f)
+            _cache = _coerce_rules(data.get("rules") if isinstance(data, dict) else data)
+            return _cache
+        except Exception as e:
+            log.warning("could not read %s: %s — falling back to empty rule list", _PATH, e)
+    _cache = []
+    return _cache
+
+
+def load_rules() -> list[dict]:
     with _LOCK:
-        if _cache is not None:
-            return [dict(r) for r in _cache]
-        if os.path.exists(_PATH):
-            try:
-                with open(_PATH, "r") as f:
-                    data = json.load(f)
-                _cache = _coerce_rules(data.get("rules") if isinstance(data, dict) else data)
-                return [dict(r) for r in _cache]
-            except Exception as e:
-                log.warning("could not read %s: %s — falling back to empty rule list", _PATH, e)
-        _cache = []
-        return []
+        return [dict(r) for r in _current_locked()]
 
 
 def save_rules(rules) -> list[dict]:
     global _cache
     with _LOCK:
-        coerced = _coerce_rules(rules)
+        current_by_name = {r["name"]: r for r in _current_locked()}
+        restored = _restore_masked_secrets(rules, current_by_name)
+        coerced = _coerce_rules(restored)
         atomic_write_json(_PATH, {"rules": coerced})
         _cache = coerced
         log.info("live_alerts saved: %d rule(s)", len(coerced))

@@ -10,16 +10,21 @@ live_alerts_bp = Blueprint("live_alerts", __name__, url_prefix="/api")
 
 @live_alerts_bp.get("/live-alerts")
 def get_live_alerts():
-    return jsonify({"rules": live_alerts_config.load_rules()})
+    # Never ship plaintext secrets to the browser. save_rules() restores the real
+    # secret from the stored rule of the same name, so these masked values can be
+    # edited and resubmitted safely (edit / enabled-toggle / delete all round-trip).
+    return jsonify({"rules": live_alerts_config.masked_rules()})
 
 
 @live_alerts_bp.put("/live-alerts")
 def put_live_alerts():
     body = request.get_json(silent=True) or {}
     rules = body.get("rules") if isinstance(body, dict) else body
-    saved = live_alerts_config.save_rules(rules or [])
+    live_alerts_config.save_rules(rules or [])
     alerts_daemon.refresh()
-    return jsonify({"rules": saved})
+    # Return masked rules (same as GET) so the save round-trip never echoes
+    # plaintext secrets back to the browser.
+    return jsonify({"rules": live_alerts_config.masked_rules()})
 
 
 @live_alerts_bp.post("/live-alerts/test")
