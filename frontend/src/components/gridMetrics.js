@@ -13,10 +13,12 @@ import { fmtNum, fmtInt, fmtPct } from "../services/format.js";
 export const METRIC_COLUMNS = [
   { id: "sharpe",            label: "Sharpe",        fmt: (v) => fmtNum(v),       sortable: true,  signed: false },
   { id: "total_return_pct",  label: "Return %",      fmt: (v) => fmtPct(v),       sortable: true,  signed: true  },
-  // Drawdown vs STARTING capital (the engine also computes a peak-relative
-  // variant, max_drawdown_pct_peak, not shown here).
-  { id: "max_drawdown_pct",  label: "Max DD %",      fmt: (v) => fmtPct(v, false),sortable: true,  signed: true,
-    title: "Max drawdown as % of starting capital" },
+  // Peak-relative max drawdown (worst decline from a running equity peak) — the
+  // industry-standard definition, and the same number the Dashboard shows. The
+  // engine also computes max_drawdown_pct (vs starting capital), which balloons
+  // to thousands of percent on a compounded curve, so it's deliberately not shown.
+  { id: "max_drawdown_pct_peak",  label: "Max DD %",      fmt: (v) => fmtPct(v, false),sortable: true,  signed: true,
+    title: "Max drawdown from the running equity peak (peak-to-trough) — matches the Dashboard" },
   { id: "win_rate",          label: "Win Rate",      fmt: (v) => `${fmtNum((v ?? 0) * 100)}%`, sortable: true, signed: false },
   { id: "trades",            label: "Trades",        fmt: (v) => fmtInt(v),       sortable: true,  signed: false },
   { id: "profit_factor",     label: "Profit Factor", fmt: (v) => v == null ? "∞" : fmtNum(v), sortable: true, signed: false },

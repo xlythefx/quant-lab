@@ -33,6 +33,7 @@ def start_job():
             "metric":      body.get("metric"),
             "target_trades":     body.get("target_trades"),
             "target_trades_tol": body.get("target_trades_tol"),
+            "n_workers":   body.get("n_workers"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")

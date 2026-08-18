@@ -102,11 +102,13 @@ export async function runBacktest({ strategy_id, symbol, timeframe, params, star
  *           stats, analytics, per_strategy: {sid: {trades, equity, stats,
  *           analytics, candles, overlays, spec}}}`.
  */
-export async function runPortfolioBacktest({ strategies, start_time, end_time, sid }) {
+export async function runPortfolioBacktest({ strategies, start_time, end_time, sid, risk_overrides }) {
   // `sid` (socket id) lets the backend stream live stage/HMM-refit progress back
   // to just this client while the (blocking) run computes. Optional.
+  // `risk_overrides` applies per-run cost overrides (e.g. a zero-cost variant for
+  // the equity compare) WITHOUT changing the saved Risk Settings.
   const { data } = await api.post("/api/backtest/portfolio", {
-    strategies, start_time, end_time, sid,
+    strategies, start_time, end_time, sid, risk_overrides,
   }, { timeout: 900_000 });
   return data;
 }
@@ -193,6 +195,40 @@ export async function getGridSearchLastResult() {
 export async function estimateGridSearch(spec) {
   const { data } = await api.post("/api/grid_search/estimate", spec);
   return data; // {combos, projected_seconds, warn, refuse, error?}
+}
+
+// ---------------------------------------------------------------------------
+// Overnight Run (multi-asset grid / walk-forward batch)
+// ---------------------------------------------------------------------------
+
+export async function startOvernightRun(spec) {
+  const { data } = await api.post("/api/overnight_run/start", spec);
+  return data; // {job_id, ok}
+}
+
+export async function cancelOvernightRun() {
+  const { data } = await api.post("/api/overnight_run/cancel");
+  return data; // {ok}
+}
+
+export async function getOvernightStatus() {
+  const { data } = await api.get("/api/overnight_run/status");
+  return data;
+}
+
+export async function getOvernightLastResult() {
+  const { data } = await api.get("/api/overnight_run/last_result");
+  return data.result;
+}
+
+export async function getOvernightHistory() {
+  const { data } = await api.get("/api/overnight_run/history");
+  return data.runs;
+}
+
+export async function estimateOvernightRun(spec) {
+  const { data } = await api.post("/api/overnight_run/estimate", spec);
+  return data; // {combos_per_asset, n_assets, total_combos, projected_grid_seconds, refuse, warn}
 }
 
 // ---------------------------------------------------------------------------

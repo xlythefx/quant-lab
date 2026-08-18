@@ -67,7 +67,7 @@ export default function GridDetailModal({ open, onClose, row, gridParams = [], b
                   sub={fmtUsd(s.total_return_dollars)} />
             <Stat label="Sharpe" value={fmtNum(s.sharpe)} />
             <Stat label="Profit Factor" value={pf} />
-            <Stat label="Max DD" value={fmtPct(s.max_drawdown_pct, false)} cls="text-loss"
+            <Stat label="Max DD" value={fmtPct(s.max_drawdown_pct_peak, false)} cls="text-loss"
                   sub={fmtUsd(s.max_drawdown_dollars)} />
           </div>
 
@@ -82,7 +82,7 @@ export default function GridDetailModal({ open, onClose, row, gridParams = [], b
             <KV k="Gross Profit"     v={fmtUsd(s.gross_profit)} cls="text-profit" />
             <KV k="Gross Loss"       v={fmtUsd(s.gross_loss)} cls="text-loss" />
             <KV k="Avg Trade %"      v={fmtPct(s.avg_pnl_pct)} />
-            <KV k="Peak-rel. Max DD" v={fmtPct(s.max_drawdown_pct_peak, false)} />
+            <KV k="Max DD (vs start capital)" v={fmtPct(s.max_drawdown_pct, false)} />
           </Section>
 
           {/* Trade distribution */}

@@ -137,6 +137,15 @@ export function underwaterSeries(r) {
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export { MONTH_LABELS };
 
+// A month's % return must be measured against the equity at the START of that
+// month, not the original starting capital — once the curve compounds the two
+// diverge by (equity / starting capital), which turned a normal +22% month into
+// "+2,052%". `equity_start` comes from the backend; older cached results without
+// it fall back to the previous (starting-capital) behaviour.
+function monthBase(m, sc) {
+  return typeof m?.equity_start === "number" && m.equity_start > 0 ? m.equity_start : sc;
+}
+
 export function monthlyReturnsGrid(monthly, sc) {
   if (!Array.isArray(monthly) || !sc) return { rows: [], maxAbs: 0 };
   const byYear = new Map();
@@ -147,7 +156,7 @@ export function monthlyReturnsGrid(monthly, sc) {
     const year = Number(yStr);
     const mo = Number(moStr); // 1..12
     if (!year || !mo) continue;
-    const pct = (m.pnl_dollars / sc) * 100;
+    const pct = (m.pnl_dollars / monthBase(m, sc)) * 100;
     if (!byYear.has(year)) byYear.set(year, { year, months: {}, ytdPct: 0 });
     const row = byYear.get(year);
     row.months[mo] = pct;
@@ -165,7 +174,7 @@ export function bestWorstMonth(monthly, sc) {
   let worst = null;
   for (const m of monthly) {
     if (!m?.month) continue;
-    const pct = (m.pnl_dollars / sc) * 100;
+    const pct = (m.pnl_dollars / monthBase(m, sc)) * 100;
     const cur = { month: m.month, pct };
     if (!best || pct > best.pct) best = cur;
     if (!worst || pct < worst.pct) worst = cur;

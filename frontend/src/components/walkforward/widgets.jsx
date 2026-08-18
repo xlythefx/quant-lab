@@ -3,7 +3,7 @@
 // State (useState) lives in the widgets themselves where it was inline.
 
 import { useMemo, useRef, useState } from "react";
-import { fmtUsd, fmtNum, fmtPct, fmtInt } from "../../services/format.js";
+import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../../services/format.js";
 import { aiAnalyzeWalkForward } from "../../services/api.js";
 
 export function fmtDate(epoch) {
@@ -358,6 +358,85 @@ function WindowConsistencyStrip({ windows }) {
   );
 }
 
+// Render one param value the way a human reads it (on/off, "long + short", etc.).
+function fmtParamValue(v) {
+  if (typeof v === "boolean") return v ? "on" : "off";
+  if (typeof v === "number") return fmtNum(v);
+  if (v && typeof v === "object") {
+    const allBool = Object.values(v).every((x) => typeof x === "boolean");
+    if (allBool) {
+      const on = Object.entries(v).filter(([, x]) => x).map(([k]) => k);
+      return on.length ? on.join(" + ") : "none";
+    }
+    return "custom";   // nested config (e.g. sessions) — too much to inline
+  }
+  return String(v);
+}
+
+/**
+ * "Recommended parameters to deploy" — the settings from the MOST RECENT
+ * walk-forward window. WF re-optimizes every window, so there is no single
+ * chosen set; the latest re-tune is what you'd actually deploy now. Trust note
+ * mirrors the plateau/stability gate so a drifting set is flagged as shaky.
+ */
+export function RecommendedParams({ result, stability }) {
+  const [copied, setCopied] = useState(false);
+  const windows = result.windows || [];
+  const last = windows.length ? windows[windows.length - 1] : null;
+  const params = last?.best_params || {};
+  const names = Object.keys(params);
+  if (!last || !names.length) return null;
+
+  const tunedNames = new Set((result?.wf_spec?.search_space || []).map((s) => s.name));
+  const ordered = [...names.filter((n) => tunedNames.has(n)), ...names.filter((n) => !tunedNames.has(n))];
+
+  const copy = () => {
+    try {
+      navigator.clipboard.writeText(JSON.stringify(params, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked — no-op */ }
+  };
+
+  const trust = stability == null ? null
+    : stability >= 0.7 ? { cls: "text-profit", txt: "Parameter plateau is stable — these settings sit on solid ground." }
+    : stability >= 0.4 ? { cls: "text-amber-400", txt: "Parameters are somewhat sensitive across windows — deploy small and watch." }
+    : { cls: "text-loss", txt: "Parameters drift a lot window-to-window — treat these as a starting point, not gospel." };
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-muted">Recommended parameters to deploy</div>
+          <div className="text-[11px] text-muted mt-0.5">
+            From the most recent re-tune · window {last.window_idx} ({fmtDateLong(last.oos_start)} – {fmtDateLong(last.oos_end)})
+          </div>
+        </div>
+        <button
+          onClick={copy}
+          className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-line text-muted hover:text-text hover:border-muted transition-colors"
+        >
+          {copied ? "Copied ✓" : "Copy JSON"}
+        </button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {ordered.map((n) => {
+          const isTuned = tunedNames.has(n);
+          return (
+            <div key={n} className={`rounded-md border px-2.5 py-1.5 ${isTuned ? "border-line bg-bg-elev/40" : "border-line/40"}`}>
+              <div className="text-[10px] text-muted font-mono truncate" title={n}>
+                {n}{isTuned ? "" : " · fixed"}
+              </div>
+              <div className={`text-sm font-mono ${isTuned ? "text-text" : "text-muted"}`}>{fmtParamValue(params[n])}</div>
+            </div>
+          );
+        })}
+      </div>
+      {trust && <div className={`text-[11px] ${trust.cls}`}>{trust.txt}</div>}
+    </div>
+  );
+}
+
 export function WFVerdictPanel({ result }) {
   const s = result.stats || {};
   const windows = result.windows || [];
@@ -550,6 +629,9 @@ export function WFVerdictPanel({ result }) {
           A verdict, not a guarantee. Read the gates together — full method in docs/plans/validation-checklist.md.
         </div>
       </div>
+
+      {/* Recommended params to deploy (latest re-tune) */}
+      <RecommendedParams result={result} stability={stability} />
 
       {/* The eight data-backed gates */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

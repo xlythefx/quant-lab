@@ -891,8 +891,23 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
         ym = datetime.fromtimestamp(t["entry_time"], tz=timezone.utc).strftime("%Y-%m")
         monthly_dict[ym] += t["pnl_dollars"]
         monthly_trades[ym] += 1
+
+    # Opening equity per month, so a month's % return can be measured against the
+    # capital actually at risk THAT month. Dividing by starting_capital instead
+    # inflates every month by (equity / starting_capital) once the curve
+    # compounds — a 93x account turns a normal +22% month into "+2,052%".
+    month_open_eq: dict = {}
+    prev_eq = float(starting_capital)
+    for pt in (equity_curve or []):
+        ym = datetime.fromtimestamp(pt["time"], tz=timezone.utc).strftime("%Y-%m")
+        if ym not in month_open_eq:
+            month_open_eq[ym] = prev_eq
+        prev_eq = float(pt.get("equity", prev_eq))
+
     monthly_returns = sorted(
-        [{"month": m, "pnl_dollars": v, "trades": monthly_trades[m]} for m, v in monthly_dict.items()],
+        [{"month": m, "pnl_dollars": v, "trades": monthly_trades[m],
+          "equity_start": float(month_open_eq.get(m, starting_capital))}
+         for m, v in monthly_dict.items()],
         key=lambda x: x["month"],
     )
 

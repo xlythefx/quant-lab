@@ -25,6 +25,7 @@ from routes.portfolio_routes import portfolio_bp
 from routes.settings_routes import settings_bp
 from routes.walkforward_routes import walkforward_bp
 from routes.grid_search_routes import grid_search_bp
+from routes.overnight_run_routes import overnight_run_bp
 from routes.cost_sweep_routes import cost_sweep_bp
 from routes.monte_carlo_routes import monte_carlo_bp
 from routes.market_lab_routes import market_lab_bp
@@ -63,6 +64,7 @@ def create_app():
     app.register_blueprint(settings_bp)
     app.register_blueprint(walkforward_bp)
     app.register_blueprint(grid_search_bp)
+    app.register_blueprint(overnight_run_bp)
     app.register_blueprint(cost_sweep_bp)
     app.register_blueprint(monte_carlo_bp)
     app.register_blueprint(market_lab_bp)

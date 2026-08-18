@@ -17,6 +17,7 @@ const PRIMARY = [
   { view: "dashboardv2",  href: "#dashboardv2",  label: "Dashboard V2",  icon: IconChart },
   { view: "marketlab",    href: "#marketlab",    label: "Market Lab",    icon: IconFlask },
   { view: "reportimport", href: "#reportimport", label: "Report Import", icon: IconImport },
+  { view: "downloads",    href: "#downloads",    label: "Downloads",     icon: IconDownload },
   { view: "skills",       href: "#skills",       label: "Skills",        icon: IconSparkles },
   { view: "strategies",   href: "#strategies",   label: "Strategies",    icon: IconLayers },
   { view: "livealerts",   href: "#livealerts",   label: "Live Alerts",   icon: IconBell },
@@ -202,6 +203,7 @@ function IconGrid() { return (<svg {...S}><rect x="3" y="3" width="7" height="7"
 function IconChart() { return (<svg {...S}><path d="M3 3v18h18" /><path d="M7 14l3-4 3 3 5-7" /></svg>); }
 function IconFlask() { return (<svg {...S}><path d="M9 3h6" /><path d="M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3" /><path d="M7 16h10" /></svg>); }
 function IconImport() { return (<svg {...S}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>); }
+function IconDownload() { return (<svg {...S}><path d="M12 3v12" /><polyline points="7 10 12 15 17 10" /><line x1="5" y1="21" x2="19" y2="21" /></svg>); }
 function IconSparkles() { return (<svg {...S}><path d="M12 3l1.8 4.7L18.5 9l-4.7 1.8L12 15l-1.8-4.2L5.5 9l4.7-1.3z" /><path d="M19 14l.8 2 .2.2 2 .8-2 .8-.2.2-.8 2-.8-2-.2-.2-2-.8 2-.8.2-.2z" /></svg>); }
 function IconLayers() { return (<svg {...S}><polygon points="12 2 22 8.5 12 15 2 8.5 12 2" /><polyline points="2 14 12 20.5 22 14" /></svg>); }
 function IconBell() { return (<svg {...S}><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.7 21a2 2 0 0 1-3.4 0" /></svg>); }

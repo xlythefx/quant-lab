@@ -9,6 +9,7 @@ import BrandAtom from "./BrandAtom.jsx";
 const VALIDATION_ITEMS = [
   { href: "#walkforward", view: "walkforward", label: "Walk-Forward" },
   { href: "#gridsearch",  view: "gridsearch",  label: "Grid Search" },
+  { href: "#overnight",   view: "overnight",   label: "Overnight" },
   { href: "#montecarlo",  view: "montecarlo",  label: "Monte Carlo" },
   { href: "#costsweep",   view: "costsweep",   label: "Cost Sweep" },
   { href: "#reportimport", view: "reportimport", label: "Report Import" },
@@ -42,6 +43,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
           <NavLink href="#dashboardv2" active={view === "dashboardv2"}>Dashboard V2</NavLink>
           <NavDropdown label="Validation" items={VALIDATION_ITEMS} view={view} />
           <NavLink href="#marketlab"   active={view === "marketlab"}>Market Lab</NavLink>
+          <NavLink href="#downloads"   active={view === "downloads"}>Downloads</NavLink>
           <NavLink href="#skills"      active={view === "skills"}>Skills</NavLink>
           <NavLink href="#strategies"  active={view === "strategies"}>Strategies</NavLink>
           <NavLink href="#livealerts"  active={view === "livealerts"}>Live Alerts</NavLink>

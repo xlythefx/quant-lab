@@ -35,6 +35,9 @@ backend/data/live_alerts.json
 # Live Terminal runtime store (journal / alert history / activity log)
 backend/data/live_terminal.db*
 
+# Overnight Run results (machine-specific per-asset best params / plateaus)
+backend/data/overnight_runs.json
+
 # VPS deployment scripts and configs (may contain credentials/IPs)
 vps-deployment/
 nginx_eu_current.conf

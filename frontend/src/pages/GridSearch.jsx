@@ -7,6 +7,7 @@ import ConfirmModal from "../components/ConfirmModal.jsx";
 import GridSearchParamEditor from "../components/GridSearchParamEditor.jsx";
 import GridResultsPanel from "../components/GridResultsPanel.jsx";
 import CostAssumptions from "../components/CostAssumptions.jsx";
+import { CpuMeter } from "../components/walkforward/widgets.jsx";
 import {
   getSymbols, getStrategies,
   startGridSearch, cancelGridSearch,
@@ -56,6 +57,12 @@ export default function GridSearch() {
   // at the first combo whose trade count lands within ±tol of the target.
   const [targetTrades, setTargetTrades] = usePersistentState("ql.gs.targetTrades", "");
   const [targetTol, setTargetTol]       = usePersistentState("ql.gs.targetTol", "0");
+  const [nWorkers, setNWorkers]         = usePersistentState("ql.gs.n_workers", 1);
+  const maxWorkers = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 8;
+  // Early-stop is order-dependent → forced single-core (see backend). The slider
+  // still shows, but the effective worker count is 1 while a trade target is set.
+  const earlyStop = targetTrades !== "";
+  const effWorkers = earlyStop ? 1 : Math.min(nWorkers, maxWorkers);
 
   // Per-strategy params (reset when strategy changes).
   const [baseParams, setBaseParams] = usePersistentState("ql.gs.base", {});
@@ -161,6 +168,16 @@ export default function GridSearch() {
       onTargetHit: (p) => {
         setJobState((prev) => ({ ...(prev || {}), target_match: p }));
       },
+      onResources: (p) => {
+        setJobState((prev) => ({
+          ...(prev || {}),
+          cpu_percent: p.cpu_percent,
+          cpu_percent_percore: p.cpu_percent_percore,
+          active_workers: p.active_workers,
+          n_workers: p.n_workers,
+          eta_seconds: p.eta_seconds,
+        }));
+      },
       onCancelled: () => {
         setJobState((prev) => ({ ...(prev || {}), state: "cancelled" }));
       },
@@ -179,12 +196,12 @@ export default function GridSearch() {
         setEstimate({ combos: 0, projected_seconds: 0, warn: false, refuse: false });
         return;
       }
-      estimateGridSearch({ grid_params: gridParams })
+      estimateGridSearch({ grid_params: gridParams, n_workers: effWorkers })
         .then(setEstimate)
         .catch(() => {});
     }, 250);
     return () => clearTimeout(t);
-  }, [gridParams]);
+  }, [gridParams, effWorkers]);
 
   const activeStrategy = useMemo(
     () => strategies.find((s) => s.id === strategyId) || null,
@@ -208,6 +225,7 @@ export default function GridSearch() {
         metric,
         target_trades: targetTrades === "" ? null : Number(targetTrades),
         target_trades_tol: Number(targetTol) || 0,
+        n_workers: effWorkers,
       });
     } catch (e) {
       setError(e?.response?.data?.error || e.message);
@@ -303,6 +321,26 @@ export default function GridSearch() {
                 disabled={targetTrades === ""}
                 className="w-14 px-2 py-1.5 text-sm font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue disabled:opacity-40"
               />
+            </Field>
+
+            <Field label="Workers (CPUs)">
+              <input
+                type="range"
+                min={1}
+                max={maxWorkers}
+                step={1}
+                value={Math.min(nWorkers, maxWorkers)}
+                onChange={(e) => setNWorkers(parseInt(e.target.value, 10) || 1)}
+                disabled={running || earlyStop}
+                title="Combos are split across this many CPU cores. Results are identical at any worker count — only the wall-clock changes."
+                className="w-32 accent-accent-blue disabled:opacity-40"
+              />
+              <span className="font-mono text-xs tabular-nums text-muted w-10 text-right shrink-0">
+                {effWorkers}/{maxWorkers}
+              </span>
+              {earlyStop && (
+                <span className="text-[11px] text-muted/70">single-core (early-stop)</span>
+              )}
             </Field>
           </div>
 
@@ -444,6 +482,12 @@ function ProgressPanel({ jobState }) {
           <div className="h-full bg-accent-grad transition-all" style={{ width: `${pct}%` }} />
         </div>
       </div>
+      <CpuMeter
+        cpu={jobState?.cpu_percent}
+        percore={jobState?.cpu_percent_percore || []}
+        active={jobState?.active_workers}
+        workers={jobState?.n_workers}
+      />
       {jobState?.current_best_metric != null && (
         <div className="text-xs font-mono text-muted">
           best so far: <span className="text-text">{fmtNum(jobState.current_best_metric)}</span>

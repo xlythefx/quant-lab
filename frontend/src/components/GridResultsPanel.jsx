@@ -28,7 +28,7 @@ function exportCsv(rows, gridParams) {
       ...gridParams.map((gp) => r.params[gp.name] ?? ""),
       s.sharpe?.toFixed(3) ?? "",
       s.total_return_pct?.toFixed(2) ?? "",
-      s.max_drawdown_pct?.toFixed(2) ?? "",
+      s.max_drawdown_pct_peak?.toFixed(2) ?? "",
       ((s.win_rate ?? 0) * 100).toFixed(1),
       s.trades ?? "",
       s.profit_factor == null ? "inf" : (s.profit_factor?.toFixed(3) ?? ""),
@@ -128,6 +128,10 @@ function ResultsTable({ rows, gridParams, defaultMetric, baseParams }) {
   const [sortKey, setSortKey] = useState(defaultMetric);
   const [sortDir, setSortDir] = useState("desc"); // desc by default for metrics
   const [detail, setDetail] = useState(null); // row object shown in the modal
+  // "Find a combo" — one filter per swept param ("" = any). Lets you pin an exact
+  // combination (e.g. rsi_length=25, z_threshold=1.5) to locate the row that
+  // matches a Dashboard run and compare the two engines side-by-side.
+  const [filters, setFilters] = useState({});
 
   const sorted = useMemo(() => {
     const isParam = gridParams.some((gp) => gp.name === sortKey);
@@ -146,6 +150,16 @@ function ResultsTable({ rows, gridParams, defaultMetric, baseParams }) {
     return arr;
   }, [rows, sortKey, sortDir, gridParams]);
 
+  // Apply the "Find a combo" filters. Compare stringified so a select's string
+  // value matches the numeric param exactly (1.5 select value === 1.5 param).
+  const activeFilters = Object.entries(filters).filter(([, v]) => v !== "" && v != null);
+  const visible = useMemo(() => {
+    if (activeFilters.length === 0) return sorted;
+    return sorted.filter((r) =>
+      activeFilters.every(([name, v]) => String(r.params[name]) === String(v))
+    );
+  }, [sorted, filters]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const clickHeader = (key) => {
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -157,8 +171,16 @@ function ResultsTable({ rows, gridParams, defaultMetric, baseParams }) {
 
   return (
     <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
+      <ComboFinder
+        gridParams={gridParams}
+        filters={filters}
+        setFilters={setFilters}
+        shown={visible.length}
+        total={sorted.length}
+      />
       <div className="px-3 py-2 text-[10px] text-muted/70 border-b border-line/30">
-        Click any row for full analytics (trade counts, long/short split, drawdown…).
+        Click any row for full analytics (trade counts, long/short split, drawdown…) and its full
+        fixed params — use that to verify a combo against a Dashboard run.
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs font-mono">
@@ -178,7 +200,14 @@ function ResultsTable({ rows, gridParams, defaultMetric, baseParams }) {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((r) => (
+            {visible.length === 0 ? (
+              <tr>
+                <td colSpan={1 + gridParams.length + METRIC_COLUMNS.length}
+                    className="px-3 py-4 text-center text-muted">
+                  No combo matches this filter.
+                </td>
+              </tr>
+            ) : visible.map((r) => (
               <Row
                 key={r.combo_idx}
                 row={r}
@@ -198,6 +227,52 @@ function ResultsTable({ rows, gridParams, defaultMetric, baseParams }) {
         gridParams={gridParams}
         baseParams={baseParams}
       />
+    </div>
+  );
+}
+
+// "Find a combo" filter bar — one dropdown per swept param, listing that param's
+// actual grid values. Pin the exact combination you ran on the Dashboard to
+// locate its row here and confirm the two engines agree.
+function ComboFinder({ gridParams, filters, setFilters, shown, total }) {
+  const anyActive = Object.values(filters).some((v) => v !== "" && v != null);
+  const setOne = (name, value) =>
+    setFilters((f) => ({ ...f, [name]: value }));
+
+  return (
+    <div className="px-3 py-2.5 border-b border-line/30 bg-bg-elev/20 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <span className="text-[10px] uppercase tracking-wider text-muted">Find a combo</span>
+      {gridParams.map((gp) => {
+        const values = [...(gp.values || [])].sort((a, b) => a - b);
+        return (
+          <label key={gp.name} className="flex items-center gap-1.5 text-[11px] font-mono text-muted">
+            <span className="text-text">{gp.name}</span>
+            <select
+              value={filters[gp.name] ?? ""}
+              onChange={(e) => setOne(gp.name, e.target.value)}
+              className="px-1.5 py-0.5 rounded bg-bg border border-line text-text focus:outline-none focus:border-accent-blue"
+            >
+              <option value="">any</option>
+              {values.map((v) => (
+                <option key={v} value={v}>
+                  {gp.type === "int" ? fmtInt(v) : fmtNum(v)}
+                </option>
+              ))}
+            </select>
+          </label>
+        );
+      })}
+      <span className="text-[11px] font-mono text-muted/70">
+        showing {fmtInt(shown)} of {fmtInt(total)}
+      </span>
+      {anyActive && (
+        <button
+          onClick={() => setFilters({})}
+          className="text-[11px] text-accent-blue hover:underline"
+        >
+          clear
+        </button>
+      )}
     </div>
   );
 }

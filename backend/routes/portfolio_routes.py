@@ -62,6 +62,18 @@ def run_backtest_portfolio():
         end_time   = body.get("end_time")
         if start_time is not None: start_time = int(start_time)
         if end_time   is not None: end_time   = int(end_time)
+        # Optional per-run cost overrides (does NOT touch the saved Risk Settings).
+        # Used by the equity-curve compare (e.g. a zero-cost variant). Only known
+        # numeric cost keys are honored — everything else is ignored.
+        risk_overrides = None
+        raw_ov = body.get("risk_overrides")
+        if isinstance(raw_ov, dict):
+            allowed = ("fee_pct", "fee_flat", "slippage_bps", "futures_commission")
+            risk_overrides = {}
+            for k in allowed:
+                if k in raw_ov and raw_ov[k] is not None:
+                    risk_overrides[k] = float(raw_ov[k])
+            risk_overrides = risk_overrides or None
     except ValidationError as e:
         return jsonify({"error": str(e)}), 400
     except (TypeError, ValueError) as e:
@@ -73,7 +85,8 @@ def run_backtest_portfolio():
 
     try:
         result = portfolio_runner.run_portfolio(specs, start_time=start_time,
-                                                end_time=end_time, sid=client_sid)
+                                                end_time=end_time, sid=client_sid,
+                                                risk_overrides=risk_overrides)
     except KeyError as e:
         return jsonify({"error": str(e)}), 404
     except FileNotFoundError as e:

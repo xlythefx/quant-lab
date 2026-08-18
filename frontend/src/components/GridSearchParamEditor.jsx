@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /**
  * Grid-search param editor.
@@ -25,7 +25,6 @@ export default function GridSearchParamEditor({ schema, baseParams, gridParams, 
   const groups = useMemo(() => {
     const g = {};
     for (const s of schema || []) {
-      if (s.name === "risk_pct") continue;
       (g[s.group] ||= []).push(s);
     }
     return g;
@@ -37,7 +36,6 @@ export default function GridSearchParamEditor({ schema, baseParams, gridParams, 
     let touched = false;
     const next = { ...(baseParams || {}) };
     for (const s of schema) {
-      if (s.name === "risk_pct") continue;
       if (next[s.name] === undefined) {
         next[s.name] = s.default;
         touched = true;
@@ -84,10 +82,14 @@ export default function GridSearchParamEditor({ schema, baseParams, gridParams, 
     <div className="space-y-4">
       <div className="text-[11px] text-muted space-y-1">
         <div>
-          Toggle <span className="text-text">Grid</span> on a param and enter a comma-separated
-          list of values to test. Every combination is backtested exhaustively.
-          Position sizing (<span className="font-mono">risk_pct</span>) is per-strategy and
-          not swept — edit it on the Strategies page.
+          Toggle <span className="text-text">Grid</span> on a param, then enter a{" "}
+          <span className="text-text">List</span> of values — or switch to{" "}
+          <span className="text-text">Range</span> and type <span className="font-mono">from</span> /{" "}
+          <span className="font-mono">to</span> / <span className="font-mono">jump</span>{" "}
+          (e.g. 0.5 – 1.0 jump 0.1) to auto-fill them. Every combination is backtested
+          exhaustively. Position sizing (<span className="font-mono">risk_pct</span>) is
+          a fixed single value here — it's applied to every combo but never swept, since
+          it scales size, not the edge.
         </div>
         {gridParams && gridParams.length > 0 ? (
           <div>
@@ -126,6 +128,9 @@ export default function GridSearchParamEditor({ schema, baseParams, gridParams, 
 
 function ParamRow({ spec, baseValue, gridEntry, onSetBase, onToggleGrid, onSetValues }) {
   const numeric = spec.type === "int" || spec.type === "float";
+  // risk_pct is numeric but sizing-only — editable as a fixed value, never swept
+  // (see the note in GridSearchParamEditor's header text for the why).
+  const gridable = numeric && spec.name !== "risk_pct";
   const gridding = !!gridEntry;
 
   return (
@@ -141,7 +146,7 @@ function ParamRow({ spec, baseValue, gridEntry, onSetBase, onToggleGrid, onSetVa
           )}
         </div>
 
-        {numeric ? (
+        {gridable ? (
           <label className="flex items-center gap-2 text-[11px] text-muted shrink-0">
             <input
               type="checkbox"
@@ -156,8 +161,8 @@ function ParamRow({ spec, baseValue, gridEntry, onSetBase, onToggleGrid, onSetVa
         )}
       </div>
 
-      {numeric && gridding ? (
-        <ValueListInput type={spec.type} values={gridEntry.values || []} onChange={onSetValues} />
+      {gridable && gridding ? (
+        <ValueListInput spec={spec} values={gridEntry.values || []} onChange={onSetValues} />
       ) : numeric ? (
         <div className="mt-2 flex items-center gap-2 text-xs font-mono">
           <span className="text-muted text-[10px] uppercase">value</span>
@@ -208,32 +213,60 @@ function ParamRow({ spec, baseValue, gridEntry, onSetBase, onToggleGrid, onSetVa
   );
 }
 
-function ValueListInput({ type, values, onChange }) {
-  // Local controlled text mirrors the parent's value list, but we only
-  // re-parse on blur so the user can freely edit between commas.
+function ValueListInput({ spec, values, onChange }) {
+  const [mode, setMode] = useState("list"); // "list" | "range"
+
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-muted text-[10px] uppercase">values</span>
+        <div className="flex rounded border border-line overflow-hidden">
+          {["list", "range"].map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              className={`px-2 py-0.5 text-[10px] capitalize ${
+                mode === m ? "bg-accent-blue/20 text-text" : "text-muted hover:text-text"
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {mode === "list" ? (
+        <ListRow type={spec.type} values={values} onChange={onChange} />
+      ) : (
+        <RangeRow spec={spec} values={values} onChange={onChange} />
+      )}
+    </div>
+  );
+}
+
+// Comma / space separated list — re-parsed on blur so mid-edit typing is free.
+function ListRow({ type, values, onChange }) {
   const text = (values || []).join(", ");
 
   const handleBlur = (raw) => {
     const tokens = raw.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
     const parsed = [];
-    const errors = [];
     const seen = new Set();
     for (const tok of tokens) {
       const n = type === "int" ? parseInt(tok, 10) : parseFloat(tok);
-      if (!Number.isFinite(n)) { errors.push(tok); continue; }
+      if (!Number.isFinite(n)) continue;
       if (seen.has(n)) continue;
       seen.add(n);
       parsed.push(n);
     }
     parsed.sort((a, b) => a - b);
     onChange(parsed);
-    return errors;
   };
 
   return (
-    <div className="mt-2 space-y-1">
+    <>
       <div className="flex items-center gap-2">
-        <span className="text-muted text-[10px] uppercase shrink-0">values</span>
         <input
           type="text"
           defaultValue={text}
@@ -249,7 +282,131 @@ function ValueListInput({ type, values, onChange }) {
       <div className="text-[10px] text-muted/70 font-mono">
         Comma- or space-separated. Duplicates removed, sorted ascending on blur.
       </div>
-    </div>
+    </>
+  );
+}
+
+// from / to / jump → expands to a value list. e.g. 0.5–1.0 jump 0.1 → 0.5..1.0.
+const RANGE_MAX = 1000; // guard against a runaway list freezing the browser
+
+function stepDecimals(stepStr) {
+  const s = String(stepStr).trim();
+  const dot = s.indexOf(".");
+  return dot === -1 ? 0 : s.length - dot - 1;
+}
+
+function genRange(type, fromStr, toStr, stepStr) {
+  const f = parseFloat(fromStr), t = parseFloat(toStr), s = parseFloat(stepStr);
+  if (![f, t, s].every(Number.isFinite)) return { values: [], error: null };
+  if (s <= 0) return { values: [], error: "jump must be > 0" };
+  if (t < f) return { values: [], error: "to must be ≥ from" };
+  // Round each step to the jump's decimal places so float drift (0.7000001) is
+  // cleaned up; ints just round to whole numbers.
+  const dec = type === "int" ? 0 : stepDecimals(stepStr);
+  const pow = Math.pow(10, dec);
+  const seen = new Set();
+  const out = [];
+  let clamped = false;
+  // +s*1e-9 tolerance so the endpoint (e.g. 1.0) is included despite drift.
+  for (let v = f; v <= t + s * 1e-9; v += s) {
+    const val = type === "int" ? Math.round(v) : Math.round(v * pow) / pow;
+    if (!seen.has(val)) { seen.add(val); out.push(val); }
+    if (out.length >= RANGE_MAX) { clamped = true; break; }
+  }
+  return { values: out, error: clamped ? `capped at ${RANGE_MAX} values` : null };
+}
+
+function rangePreview(arr) {
+  if (arr.length <= 6) return arr.join(", ");
+  return `${arr.slice(0, 4).join(", ")}, …, ${arr[arr.length - 1]}`;
+}
+
+// Round a raw step up to a "nice" 1/2/5 × 10^k value, so suggested jumps read
+// cleanly (0.5, 2, 20…) instead of 0.583 or 32.5.
+function niceStep(raw) {
+  if (!(raw > 0)) return 0.1;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag; // in [1, 10)
+  const nice = norm < 1.5 ? 1 : norm < 3.5 ? 2 : norm < 7.5 ? 5 : 10;
+  return nice * mag;
+}
+
+// Suggest a COARSE from/to/jump for Range mode from the schema bounds — aim for
+// ~6-8 values across [min, max] (coarse-to-fine: map the terrain first, refine
+// later). Mirrors WalkForwardParamEditor's schema seeding but chooses a wider
+// jump because a grid expands to an explicit list. Falls back to a default-
+// centered span when the schema has no min/max.
+function suggestRange(spec) {
+  const isInt = spec?.type === "int";
+  let min = spec?.min, max = spec?.max;
+  const def = Number.isFinite(spec?.default) ? spec.default : null;
+  if (!(Number.isFinite(min) && Number.isFinite(max) && max > min)) {
+    if (def == null) return { from: "", to: "", step: isInt ? "1" : "" };
+    const half = Math.abs(def) * 0.5 || (isInt ? 3 : 1);
+    min = def - half; max = def + half;
+    if (isInt) { min = Math.max(0, Math.round(min)); max = Math.round(max); if (max <= min) max = min + 1; }
+  }
+  const schemaStep = Number.isFinite(spec?.step) ? spec.step : null;
+  let jump = niceStep((max - min) / 6);
+  if (isInt) jump = Math.max(1, Math.round(jump));
+  else if (schemaStep && jump < schemaStep) jump = schemaStep;
+  const fmt = (x) => (isInt ? String(Math.round(x)) : String(parseFloat(x.toFixed(6))));
+  return { from: fmt(min), to: fmt(max), step: String(jump) };
+}
+
+function RangeRow({ spec, values, onChange }) {
+  const type = spec.type;
+  // Pre-fill from/to/jump with a coarse schema-derived suggestion the moment
+  // Range mode is opened (this component remounts on the List↔Range switch).
+  const seed = useMemo(() => suggestRange(spec), [spec]);
+  const [from, setFrom] = useState(seed.from);
+  const [to, setTo] = useState(seed.to);
+  const [step, setStep] = useState(seed.step);
+
+  const { values: preview, error } = useMemo(
+    () => genRange(type, from, to, step),
+    [type, from, to, step]
+  );
+  const ready = preview.length > 0;
+  const apply = () => { if (ready) onChange(preview); };
+  const onKey = (e) => { if (e.key === "Enter") { e.preventDefault(); apply(); } };
+
+  const numCls =
+    "w-16 px-2 py-1 rounded bg-bg border border-line font-mono text-xs text-right focus:outline-none focus:border-accent-blue";
+
+  return (
+    <>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <input type="number" value={from} onChange={(e) => setFrom(e.target.value)} onKeyDown={onKey}
+               placeholder="from" className={numCls} />
+        <span className="text-muted text-xs">–</span>
+        <input type="number" value={to} onChange={(e) => setTo(e.target.value)} onKeyDown={onKey}
+               placeholder="to" className={numCls} />
+        <span className="text-muted text-[10px] uppercase ml-1">jump</span>
+        <input type="number" value={step} onChange={(e) => setStep(e.target.value)} onKeyDown={onKey}
+               placeholder={type === "int" ? "1" : "0.1"} className={numCls} />
+        <button
+          type="button"
+          onClick={apply}
+          disabled={!ready}
+          className="px-2 py-1 rounded text-[11px] bg-accent-blue/20 text-text hover:bg-accent-blue/30 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Generate →
+        </button>
+        <span className="text-[10px] font-mono text-muted shrink-0">
+          {values.length} value{values.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="text-[10px] text-muted/70 font-mono">
+        {error ? (
+          <span className="text-loss">{error}</span>
+        ) : ready ? (
+          <>→ {preview.length} value{preview.length === 1 ? "" : "s"}: {rangePreview(preview)}</>
+        ) : (
+          "Enter from, to & jump — e.g. 0.5 – 1.0 jump 0.1 → 0.5, 0.6, … 1.0"
+        )}
+      </div>
+    </>
   );
 }
 

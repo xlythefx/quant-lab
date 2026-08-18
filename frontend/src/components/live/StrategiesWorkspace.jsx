@@ -29,6 +29,7 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
   const [strategies, setStrategies] = useState([]);
   const [deployOpen, setDeployOpen] = useState(false);
   const [deployPrefill, setDeployPrefill] = useState(null);
+  const [editDeployment, setEditDeployment] = useState(null);
   const [testMenu, setTestMenu] = useState(null); // deployment name
   const [confirmKill, setConfirmKill] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -91,7 +92,7 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
       {/* Roster */}
       <Panel
         title={`Strategy Roster · QuantLab Registry · ${strategies.filter((s) => !s.archived).length}`}
-        right={<button className="lt-btn primary small" onClick={() => { setDeployPrefill(null); setDeployOpen(true); }}>+ DEPLOY</button>}
+        right={<button className="lt-btn primary small" onClick={() => { setDeployPrefill(null); setEditDeployment(null); setDeployOpen(true); }}>+ DEPLOY</button>}
       >
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 1, background: "var(--lt-border)" }}>
           {strategies.filter((s) => !s.archived).map((s, i) => {
@@ -111,7 +112,7 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
                   <button
                     className="lt-btn small"
                     style={{ borderColor: accent, color: accent }}
-                    onClick={() => { setDeployPrefill({ strategy_id: s.id }); setDeployOpen(true); }}
+                    onClick={() => { setEditDeployment(null); setDeployPrefill({ strategy_id: s.id }); setDeployOpen(true); }}
                   >
                     DEPLOY
                   </button>
@@ -190,6 +191,9 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
                         <button className="lt-btn small" disabled={busy} onClick={() => setStatus(d, running ? "PAUSED" : "RUNNING")}>
                           {running ? "PAUSE" : "RESUME"}
                         </button>
+                        <button className="lt-btn small" disabled={busy} onClick={() => { setDeployPrefill(null); setEditDeployment(d); setDeployOpen(true); }}>
+                          EDIT
+                        </button>
                         <button className="lt-btn small cyan" disabled={busy} onClick={() => setTestMenu(testMenu === d.name ? null : d.name)}>
                           TEST ▾
                         </button>
@@ -222,11 +226,12 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
 
       <DeployModal
         open={deployOpen}
-        onClose={() => setDeployOpen(false)}
+        onClose={() => { setDeployOpen(false); setEditDeployment(null); }}
         onDeployed={refresh}
         strategies={strategies}
         instruments={instruments}
         prefill={deployPrefill}
+        editing={editDeployment}
       />
 
       {confirmKill && (

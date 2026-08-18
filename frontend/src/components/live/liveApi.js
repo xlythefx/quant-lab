@@ -53,6 +53,15 @@ export async function testDeploymentSignal(name, { action = "BUY", dry_run = tru
   return data;
 }
 
+export async function previewPayload({ strategy_alias, leverage, symbol, payload_template } = {}) {
+  // Exact JSON this deployment will POST (secret masked), built by the real
+  // backend build_payload() — for cross-checking before arming.
+  const { data } = await api.post("/api/live/payload-preview", {
+    strategy_alias, leverage, symbol, payload_template,
+  });
+  return data; // {symbol, secret_masked, payloads:{BUY, SELL, EXIT_LONG, EXIT_SHORT}}
+}
+
 // ---- phase 06: kill switch, alerts history, activity ------------------------
 export async function getKillSwitch() {
   const { data } = await api.get("/api/live/killswitch");

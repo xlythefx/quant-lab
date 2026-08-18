@@ -245,17 +245,34 @@ def deployments_patch(name):
               "strategy_alias", "timeframe", "payload_template", "enabled"):
         if k in body and body[k] is not None:
             rule[k] = body[k]
+    # Symbol may change in place (kept upper-case like create).
+    if body.get("symbol"):
+        rule["symbol"] = str(body["symbol"]).strip().upper()
     # pyramiding > 1 allowed here too (see deployments_create) — no forcing.
+
+    # Rename: `name` is the deployment's identity (key in the rules file + how the
+    # daemon tracks it). A rename is an in-place field change here — the daemon
+    # refresh swaps the runner. Runtime/journal history keyed by the OLD name is
+    # left as-is (self-use tradeoff), so we log the rename explicitly.
+    new_name = str(body.get("name") or "").strip()
+    renamed = bool(new_name and new_name != name)
+    if renamed:
+        if any(r["name"] == new_name for j, r in enumerate(rules) if j != idx):
+            return jsonify({"error": f"a deployment named '{new_name}' already exists"}), 400
+        rule["name"] = new_name
 
     rules[idx] = rule
     live_alerts_config.save_rules(rules)
     alerts_daemon.refresh()
-    if "status" in body:
+    if renamed:
+        live_store.add_activity("info", rule_name=new_name,
+                                detail=f"renamed from '{name}'", symbol=rule.get("symbol", ""))
+    elif "status" in body:
         kind = "armed" if rule["enabled"] else "paused"
-        live_store.add_activity(kind, rule_name=name, symbol=rule.get("symbol", ""))
+        live_store.add_activity(kind, rule_name=rule["name"], symbol=rule.get("symbol", ""))
     else:
-        live_store.add_activity("info", rule_name=name, detail="deployment updated")
-    event_bus.emit("deployments_changed", {"name": name, "op": "patched"})
+        live_store.add_activity("info", rule_name=rule["name"], detail="deployment updated")
+    event_bus.emit("deployments_changed", {"name": rule["name"], "op": "patched"})
     rt = live_engine.runtime_state()
     return jsonify({"deployment": _deployment_view(rule, rt)})
 
@@ -271,6 +288,29 @@ def deployments_delete(name):
     live_store.add_activity("killed", rule_name=name)
     event_bus.emit("deployments_changed", {"name": name, "op": "deleted"})
     return jsonify({"ok": True})
+
+
+_PREVIEW_ACTIONS = ("BUY", "SELL", "EXIT_LONG", "EXIT_SHORT")
+_PREVIEW_SECRET = "••••••"   # placeholder so the secret's SHAPE shows, never a real token
+
+
+@live_bp.post("/payload-preview")
+def payload_preview():
+    """The EXACT JSON body this deployment will POST, for cross-checking before
+    arming. Runs the real live_alerter.build_payload() (default shape OR a custom
+    payload_template) so the preview can't drift from what actually fires. The
+    secret is a masked placeholder — the real token is never involved here."""
+    body = request.get_json(silent=True) or {}
+    fake_rule = {
+        "name": str(body.get("name") or "preview"),
+        "secret": _PREVIEW_SECRET,
+        "strategy_alias": str(body.get("strategy_alias") or "").strip(),
+        "leverage": body.get("leverage", 1),
+        "payload_template": body.get("payload_template") or None,
+    }
+    symbol = str(body.get("symbol") or "BTCUSDT").strip().upper()
+    payloads = {a: live_alerter.build_payload(fake_rule, a, symbol) for a in _PREVIEW_ACTIONS}
+    return jsonify({"symbol": symbol, "secret_masked": _PREVIEW_SECRET, "payloads": payloads})
 
 
 @live_bp.post("/deployments/<path:name>/test-signal")

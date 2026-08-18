@@ -8,6 +8,7 @@ import RiskSettings from "./pages/RiskSettings.jsx";
 import Analytics from "./pages/Analytics.jsx";
 import WalkForward from "./pages/WalkForward.jsx";
 import GridSearch from "./pages/GridSearch.jsx";
+import Overnight from "./pages/Overnight.jsx";
 import MonteCarlo from "./pages/MonteCarlo.jsx";
 import CostSweep from "./pages/CostSweep.jsx";
 import MarketLab from "./pages/MarketLab.jsx";
@@ -70,6 +71,7 @@ export default function App() {
   if (view === "analytics")   return <Analytics />;
   if (view === "walkforward")  return <WalkForward />;
   if (view === "gridsearch")   return <GridSearch />;
+  if (view === "overnight")    return <Overnight />;
   if (view === "montecarlo")   return <MonteCarlo />;
   if (view === "costsweep")    return <CostSweep />;
   if (view === "marketlab")    return <MarketLab />;

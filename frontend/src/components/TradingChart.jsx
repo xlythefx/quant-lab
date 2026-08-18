@@ -4,6 +4,7 @@ import { getOHLCV, getBacktestSeed, marketLabRegimeHmm } from "../services/api.j
 import { subscribeCandles, socket } from "../services/socket.js";
 import { usePersistentState } from "../services/usePersistentState.js";
 import { REGIME_COLORS, ADX_REGIME_COLORS, buildRegimeColors } from "./marketlab/charts.jsx";
+import { collapseMarkers } from "../services/chartMarkers.js";
 
 // Regime lenses shown on the chart. 5-Mood and ADX ship with the backtest;
 // HMM is fetched lazily (Market Lab endpoint) the first time it's selected.
@@ -91,6 +92,10 @@ export default function TradingChart({
   const volProfileLayerRef = useRef(null);
   const vpCandlesRef = useRef(null);       // mirror of staticData.candles for scroll handlers
   const showVolProfileRef = useRef(false);
+  // Folded exit-stack counts: bar-time -> { count, wins, losses }. Populated when
+  // markers are set; read by the crosshair handler to show "N exits" on hover.
+  const exitCountsRef = useRef(new Map());
+  const tooltipRef = useRef(null);         // floating "N exits (xW / yL)" tooltip div
 
   const [last, setLast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -438,9 +443,25 @@ export default function TradingChart({
     ts.subscribeVisibleLogicalRangeChange(handleVisibleRange);
     ts.subscribeVisibleTimeRangeChange(handleVisibleTimeRange);
 
+    // Hover tooltip for folded exit stacks: when the crosshair is over a bar whose
+    // exits were collapsed into one square, show how many closed there.
+    const handleCrosshair = (param) => {
+      const tip = tooltipRef.current;
+      if (!tip) return;
+      const info = param?.time != null ? exitCountsRef.current.get(param.time) : null;
+      if (!info || !param.point) { tip.style.display = "none"; return; }
+      const wl = (info.wins || info.losses) ? `  ·  ${info.wins}W / ${info.losses}L` : "";
+      tip.textContent = `${info.count} exits${wl}`;
+      tip.style.display = "block";
+      tip.style.left = `${param.point.x + 14}px`;
+      tip.style.top = `${Math.max(4, param.point.y - 10)}px`;
+    };
+    chart.subscribeCrosshairMove(handleCrosshair);
+
     return () => {
       ts.unsubscribeVisibleLogicalRangeChange(handleVisibleRange);
       ts.unsubscribeVisibleTimeRangeChange(handleVisibleTimeRange);
+      chart.unsubscribeCrosshairMove(handleCrosshair);
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
@@ -502,14 +523,16 @@ export default function TradingChart({
       }
     }
 
-    // Markers — merge across strategies.
+    // Markers — merge across strategies, then fold same-bar exit stacks into one
+    // square each (hover shows how many closed together).
     const markersByStrat = staticData.markersByStrategy || {};
     const merged = [];
     for (const list of Object.values(markersByStrat)) {
       for (const m of list || []) merged.push(m);
     }
-    merged.sort((a, b) => a.time - b.time);
-    try { series.setMarkers(merged); } catch {}
+    const { markers: collapsed, counts } = collapseMarkers(merged);
+    exitCountsRef.current = counts;
+    try { series.setMarkers(collapsed); } catch {}
 
     // Show the last ~300 bars by default.
     const ts = chart.timeScale();
@@ -699,8 +722,9 @@ export default function TradingChart({
     for (const list of Object.values(markersByStrategy)) {
       for (const m of list || []) merged.push(m);
     }
-    merged.sort((a, b) => a.time - b.time);
-    try { series.setMarkers(merged); } catch {}
+    const { markers: collapsed, counts } = collapseMarkers(merged);
+    exitCountsRef.current = counts;
+    try { series.setMarkers(collapsed); } catch {}
   }, [isStatic, markersByStrategy]);
 
   // Regime overlay availability + legend entries for the active lens.
@@ -724,6 +748,12 @@ export default function TradingChart({
       <div ref={regimeBandsLayerRef} className="absolute inset-0 pointer-events-none z-[4]" />
       {/* Session bands overlay — rendered imperatively, positioned by chart timeScale. */}
       <div ref={bandsLayerRef} className="absolute inset-0 pointer-events-none z-[5]" />
+      {/* Folded exit-stack hover tooltip — positioned at the crosshair point. */}
+      <div
+        ref={tooltipRef}
+        style={{ display: "none" }}
+        className="absolute z-20 pointer-events-none px-2 py-1 rounded-md border border-line bg-bg-elev/95 text-[11px] font-mono text-text whitespace-nowrap shadow-lg"
+      />
 
       <div className="absolute top-3 left-3 flex items-center gap-3 z-10 pointer-events-none">
         <span

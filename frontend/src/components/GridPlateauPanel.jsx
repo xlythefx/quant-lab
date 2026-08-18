@@ -195,7 +195,7 @@ function Tile({ cell, type, isBest, medMin, medMax }) {
       style={{ background: bg }}
       title={tipParts.join(" · ")}
     >
-      <div className="text-muted">{fmtVal(cell.value, type)}</div>
+      <div className="text-white/80">{fmtVal(cell.value, type)}</div>
       <div className="text-text">{display}</div>
     </div>
   );

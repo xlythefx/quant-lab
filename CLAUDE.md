@@ -106,6 +106,27 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
 - **Old `#livealerts` page stays fully working** until the cutover soak completes
   (plans/10) — don't remove it before then.
 
+## Pine Script conversions (Python → TradingView)
+
+When converting a QuantLab strategy to Pine Script, ALWAYS map to the four canonical
+live actions QuantLab uses (from `_ACTION_MAP` in
+[backend/services/live_alerter.py](backend/services/live_alerter.py)) — there is no
+bare `LONG`/`SHORT` action:
+
+- `("long","entry")` → **BUY**  → `strategy.entry("Long", strategy.long)`
+- `("short","entry")` → **SELL** → `strategy.entry("Short", strategy.short)`
+- `("long","exit")` → **EXIT_LONG**  → `strategy.close("Long")`
+- `("short","exit")` → **EXIT_SHORT** → `strategy.close("Short")`
+
+To make the Pine webhook-ready (fire the same payload as `build_payload`:
+`{secret, strategy, leverage, action, symbol}`), attach `alert_message` to each call
+and alert on **"Order fills only"** with `{{strategy.order.alert_message}}`. Faithfulness
+rules that keep a Pine port comparable to the QuantLab engine: use `ta.vwma`/`ta.rsi`
+(match `_vwma`/`_rsi`), keep `process_orders_on_close = false` (fill next bar open =
+QuantLab honest mode / look_ahead OFF), test at `pyramiding = 1` (parity-safe — stacking
+diverges), and match costs on both sides. A flip (long→short same bar) emits SELL and
+closes the long in one order, where QuantLab would emit EXIT_LONG then SELL.
+
 ## Data
 
 - `market_data.load_parquet(symbol, timeframe, broker=None)` returns a DataFrame with columns

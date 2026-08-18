@@ -12,7 +12,9 @@
       "trade_24_7": false,
       "sessions": {
         "london": {
-          "enabled": true
+          "enabled": true,
+          "end": "12:30",
+          "start": "05:00"
         },
         "ny_am": {
           "enabled": true,
@@ -20,7 +22,9 @@
           "start": "12:30"
         },
         "ny_pm": {
-          "enabled": false
+          "enabled": false,
+          "end": "20:00",
+          "start": "17:00"
         },
         "tokyo": {
           "enabled": false,
@@ -33,15 +37,22 @@
         "short": true
       },
       "use_regime": false,
+      "regime_method": "adx",
       "regime_adx_period": 20,
       "regime_adx_threshold": 40,
-      "use_five_regime": false,
       "allowed_regimes": {
         "Choppy-Range": true,
         "High-Volatility": false,
         "Quiet": true,
         "Trending Down": false,
         "Trending Up": false
+      },
+      "allowed_hmm_moods": {
+        "Bearish Normal": true,
+        "Bearish Volatile": false,
+        "Bullish Normal": true,
+        "Bullish Volatile": false,
+        "Ranging": true
       },
       "pyramiding": 10,
       "risk_pct": 10

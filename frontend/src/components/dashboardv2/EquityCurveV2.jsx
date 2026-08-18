@@ -97,7 +97,7 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
       }
       const last = pts[pts.length - 1];
       if (!isLog || last.value > 0) d += "L" + xOf(last.time).toFixed(1) + "," + yOf(last.value).toFixed(1);
-      return { id: s.id, color: s.color, d };
+      return { id: s.id, color: s.color, d, dash: s.dash || "" };
     });
   }, [strategies, pointsByStrategy, tMin, tMax, dMin, dMax, innerW, innerH, isLog]);
 
@@ -193,7 +193,7 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
         </text>
 
         {paths.map((p) => (
-          <path key={p.id} d={p.d} fill="none" stroke={p.color} strokeWidth={1.5} />
+          <path key={p.id} d={p.d} fill="none" stroke={p.color} strokeWidth={1.5} strokeDasharray={p.dash} />
         ))}
 
         {hover && hasData && (

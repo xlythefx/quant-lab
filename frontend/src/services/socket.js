@@ -234,7 +234,7 @@ export function subscribeCostSweep({ onProgress, onComplete, onCancelled, onErro
  *   onCancelled({job_id})
  *   onError({job_id, message})
  */
-export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onError, onTargetHit } = {}) {
+export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onError, onTargetHit, onResources } = {}) {
   const wrap = (fn) => (fn ? (p) => fn(p) : null);
   const h = {
     gs_progress:   wrap(onProgress),
@@ -242,6 +242,28 @@ export function subscribeGridSearch({ onProgress, onComplete, onCancelled, onErr
     gs_cancelled:  wrap(onCancelled),
     gs_error:      wrap(onError),
     gs_target_hit: wrap(onTargetHit),
+    gs_resources:  wrap(onResources),
+  };
+  for (const [evt, fn] of Object.entries(h)) {
+    if (fn) socket.on(evt, fn);
+  }
+  return () => {
+    for (const [evt, fn] of Object.entries(h)) {
+      if (fn) socket.off(evt, fn);
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Overnight Run events (multi-asset grid / walk-forward batch)
+// ---------------------------------------------------------------------------
+export function subscribeOvernight({ onProgress, onComplete, onCancelled, onError } = {}) {
+  const wrap = (fn) => (fn ? (p) => fn(p) : null);
+  const h = {
+    overnight_progress:  wrap(onProgress),
+    overnight_complete:  wrap(onComplete),
+    overnight_cancelled: wrap(onCancelled),
+    overnight_error:     wrap(onError),
   };
   for (const [evt, fn] of Object.entries(h)) {
     if (fn) socket.on(evt, fn);

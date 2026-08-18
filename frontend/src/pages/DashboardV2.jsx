@@ -95,6 +95,16 @@ export default function DashboardV2() {
   const [laCompare, setLaCompare] = useState(null);
   const inflightRef = useRef(0);
 
+  // Equity-curve compare: overlay the selected entity's equity under 3 regimes.
+  //   reality    = honest fills + real (configured) costs  ← the main run
+  //   no_cost    = honest fills + ZERO costs               ← isolates cost drag
+  //   look_ahead = perfect fills + real costs              ← isolates fill fantasy
+  // Extra lines are fetched LAZILY the first time toggled on, then cached until
+  // the run changes. reality defaults on; the other two off.
+  const [showVariant, setShowVariant] = useState({ reality: true, no_cost: false, look_ahead: false });
+  const [variantData, setVariantData] = useState({ no_cost: null, look_ahead: null });
+  const [variantLoading, setVariantLoading] = useState({ no_cost: false, look_ahead: false });
+
   const catalogById = useMemo(() => {
     const m = {}; for (const s of catalog) m[s.id] = s; return m;
   }, [catalog]);
@@ -258,6 +268,53 @@ export default function DashboardV2() {
   // Clear results when the run inputs change so we never show stale numbers.
   useEffect(() => { setResult(null); setError(null); }, [symbol, broker, timeframe, active.length]);
 
+  // ---- equity-curve variants (no-cost / look-ahead overlays) ----
+  const COST_ZERO = { fee_pct: 0, fee_flat: 0, slippage_bps: 0, futures_commission: 0 };
+  const isZeroCost = (rc) =>
+    !!rc && ["fee_pct", "fee_flat", "slippage_bps", "futures_commission"].every((k) => !Number(rc[k]));
+
+  // A fresh run invalidates any cached variant overlays.
+  useEffect(() => { setVariantData({ no_cost: null, look_ahead: null }); }, [result]);
+
+  const fetchVariant = async (kind) => {
+    if (!result || variantData[kind] || variantLoading[kind]) return;
+    // Respect cost = 0: the no-cost curve IS the reality curve — reuse it, no run.
+    if (kind === "no_cost" && isZeroCost(result.risk_config)) {
+      setVariantData((v) => ({ ...v, no_cost: result }));
+      return;
+    }
+    const { start_time, end_time } = rangeToWindow(rangeKey, bounds, customRange);
+    const strategies = active.map((s, i) => ({
+      strategy_id: s.id, symbol, timeframe,
+      params: kind === "look_ahead" ? { ...s.params, look_ahead: true } : s.params,
+      priority: i + 1, broker: broker || undefined,
+    }));
+    setVariantLoading((l) => ({ ...l, [kind]: true }));
+    try {
+      const res = await runPortfolioBacktest({
+        strategies, start_time, end_time,
+        risk_overrides: kind === "no_cost" ? COST_ZERO : undefined,
+      });
+      setVariantData((v) => ({ ...v, [kind]: res }));
+    } catch {
+      setShowVariant((s) => ({ ...s, [kind]: false }));   // drop the overlay, keep reality
+    } finally {
+      setVariantLoading((l) => ({ ...l, [kind]: false }));
+    }
+  };
+
+  // Fetch any toggled-on overlay that isn't cached yet (covers "just toggled on"
+  // and "result changed while toggled on").
+  useEffect(() => {
+    if (!result) return;
+    for (const kind of ["no_cost", "look_ahead"]) {
+      if (showVariant[kind] && !variantData[kind] && !variantLoading[kind]) fetchVariant(kind);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, showVariant, variantData, variantLoading]);
+
+  const toggleVariant = (kind) => setShowVariant((s) => ({ ...s, [kind]: !s[kind] }));
+
   // ---- selection slice resolution ----
   const sliceFor = (id) => {
     if (!result) return null;
@@ -314,6 +371,44 @@ export default function DashboardV2() {
       points: { [selectedId]: mapPoints(result.per_strategy?.[selectedId]?.equity) },
     };
   }, [result, selectedId, active, catalogById]);
+
+  // The selected entity's equity from a variant run (portfolio aggregate or one strategy).
+  const variantPoints = (res) => {
+    if (!res) return null;
+    return selectedId === PORTFOLIO_ID
+      ? mapPoints(res.equity)
+      : mapPoints(res.per_strategy?.[selectedId]?.equity);
+  };
+
+  // Reality (base chart) + optional no-cost / look-ahead overlays for the equity panel.
+  const VARIANT_META = {
+    no_cost:    { color: "#22c55e", label: "No cost",    dash: "5 4" },
+    look_ahead: { color: "#f59e0b", label: "Look-ahead", dash: "2 3" },
+  };
+  const equityChart = useMemo(() => {
+    const strategies = [];
+    const points = {};
+    if (showVariant.reality) {
+      strategies.push(...chart.strategies);
+      Object.assign(points, chart.points);
+    }
+    for (const kind of ["no_cost", "look_ahead"]) {
+      if (!showVariant[kind]) continue;
+      const pts = variantPoints(variantData[kind]);
+      if (!pts || !pts.length) continue;
+      const id = `__var_${kind}__`;
+      strategies.push({ id, ...VARIANT_META[kind] });
+      points[id] = pts;
+    }
+    return { strategies, points };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chart, showVariant, variantData, selectedId]);
+
+  const noCostIsReality = isZeroCost(result?.risk_config);
+  const variantCtl = {
+    show: showVariant, toggle: toggleVariant, loading: variantLoading,
+    meta: VARIANT_META, noCostIsReality,
+  };
 
   const isPortfolio = selectedId === PORTFOLIO_ID;
   // Deep-dive link: the cache was populated on run under these exact keys, and
@@ -558,7 +653,8 @@ export default function DashboardV2() {
               <PerformanceTab
                 derived={derived}
                 sc={sc}
-                chart={chart}
+                chart={equityChart}
+                variantCtl={variantCtl}
                 scale={scale}
                 setScale={setScale}
                 underwater={underwater}
@@ -810,7 +906,42 @@ function GhostReport() {
   );
 }
 
-function PerformanceTab({ derived, sc, chart, scale, setScale, underwater, monthGrid, interpText, hasAdvanced }) {
+// Three toggles above the equity curve: With cost (reality) / No cost / Look-ahead.
+// The gap between lines is the teaching point — cost drag and fill fantasy made visible.
+function EquityVariantToggles({ ctl }) {
+  const { show, toggle, loading, meta, noCostIsReality } = ctl;
+  const Item = ({ kind, label, color, dash, hint }) => {
+    const on = show[kind];
+    const busy = loading?.[kind];
+    return (
+      <button
+        onClick={() => toggle(kind)}
+        title={hint}
+        className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] transition ${on ? "border-line bg-bg-elev text-text" : "border-line/50 text-muted hover:text-text"}`}
+      >
+        <svg width="18" height="6" aria-hidden="true">
+          <line x1="0" y1="3" x2="18" y2="3" stroke={color} strokeWidth="2" strokeDasharray={dash || ""} opacity={on ? 1 : 0.35} />
+        </svg>
+        <span>{label}</span>
+        {busy && <span className="text-muted animate-pulse">…</span>}
+        {kind === "no_cost" && noCostIsReality && <span className="text-muted/70">(= with cost · costs are 0)</span>}
+      </button>
+    );
+  };
+  return (
+    <div className="flex items-center gap-2 mb-2 flex-wrap">
+      <span className="text-[10px] uppercase tracking-widest text-muted">Compare</span>
+      <Item kind="reality" label="With cost" color="#e5e7eb" dash=""
+            hint="Honest fills + your configured trading costs — what's actually tradeable." />
+      <Item kind="no_cost" label={meta.no_cost.label} color={meta.no_cost.color} dash={meta.no_cost.dash}
+            hint="Honest fills, zero trading costs — the gap to 'With cost' is what fees + slippage eat." />
+      <Item kind="look_ahead" label={meta.look_ahead.label} color={meta.look_ahead.color} dash={meta.look_ahead.dash}
+            hint="Fictitious perfect fills (diagnostic) — the gap to 'With cost' is pure fill fantasy." />
+    </div>
+  );
+}
+
+function PerformanceTab({ derived, sc, chart, variantCtl, scale, setScale, underwater, monthGrid, interpText, hasAdvanced }) {
   const d = derived || {};
   return (
     <div className="space-y-5">
@@ -833,6 +964,7 @@ function PerformanceTab({ derived, sc, chart, scale, setScale, underwater, month
       {/* equity + risk panel */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
         <Section title="Equity Curve" hint="value as % of starting capital">
+          {variantCtl && <EquityVariantToggles ctl={variantCtl} />}
           <div className="rounded-xl border border-line bg-bg-panel/40 relative" style={{ height: 320 }}>
             <div className="absolute top-2 right-3 z-10 flex items-center gap-1 p-0.5 rounded-md border border-line bg-bg-elev">
               {["linear", "log"].map((sv) => (
