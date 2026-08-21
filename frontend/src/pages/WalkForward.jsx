@@ -615,7 +615,7 @@ export default function WalkForward() {
 
           {tab === "setup"      && <SetupTab {...setupProps} />}
           {tab === "overview"   && result && <OverviewTab   result={result} />}
-          {tab === "verdict"    && result && <WFVerdictPanel result={result} />}
+          {tab === "verdict"    && result && <WFVerdictPanel result={result} strategies={strategies} />}
           {tab === "folds"      && result && <FoldsTab      result={result} onCheckMonteCarlo={onCheckMonteCarlo} />}
           {tab === "parameters" && result && <ParametersTab result={result} />}
           {tab === "optuna"     && result && <OptunaTab     result={result} />}

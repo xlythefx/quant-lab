@@ -5,6 +5,8 @@
 import { useMemo, useRef, useState } from "react";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../../services/format.js";
 import { aiAnalyzeWalkForward } from "../../services/api.js";
+import { resolveDefaultParams } from "../dashboardv2/metrics.js";
+import { getUserDefaults } from "../../services/strategiesStore.js";
 
 export function fmtDate(epoch) {
   if (!epoch) return "—";
@@ -437,7 +439,62 @@ export function RecommendedParams({ result, stability }) {
   );
 }
 
-export function WFVerdictPanel({ result }) {
+/**
+ * "Currently used parameters" — the SAME defaults the strategy runs with on
+ * Dashboard V2 (resolveDefaultParams: schema defaults → timeframe/symbol presets
+ * → your saved overrides), shown next to RecommendedParams so you can compare
+ * default-vs-recommended. Cells that DIFFER from the recommendation are highlighted
+ * (amber) with the recommended value inline.
+ */
+export function CurrentParams({ result, strategies }) {
+  const windows = result.windows || [];
+  const last = windows.length ? windows[windows.length - 1] : null;
+  const recommended = last?.best_params || {};
+  const names = Object.keys(recommended);
+  if (!last || !names.length) return null;
+
+  const strat = (strategies || []).find((s) => s.id === result.strategy_id);
+  // Exactly what Dashboard V2 runs this strategy with for its symbol/timeframe.
+  const current = resolveDefaultParams(
+    strat, result.symbol, result.timeframe, getUserDefaults(result.strategy_id),
+  );
+
+  const tunedNames = new Set((result?.wf_spec?.search_space || []).map((s) => s.name));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const ordered = [...names.filter((n) => tunedNames.has(n)), ...names.filter((n) => !tunedNames.has(n))];
+  const nChanged = ordered.filter((n) => !same(current[n], recommended[n])).length;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+      <div className="text-[11px] uppercase tracking-wider text-muted">Currently used parameters</div>
+      <div className="text-[11px] text-muted -mt-1.5">
+        The defaults this strategy runs with on Dashboard V2 ({result.symbol} · {result.timeframe}) — compare against the recommendation above.
+        {nChanged > 0 && <span className="text-amber-400"> · {nChanged} differ</span>}
+        {nChanged === 0 && <span className="text-profit"> · already matches the recommendation</span>}
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {ordered.map((n) => {
+          const isTuned = tunedNames.has(n);
+          const cur = current[n];
+          const rec = recommended[n];
+          const changed = !same(cur, rec);
+          const hasCur = cur !== undefined && cur !== null;
+          return (
+            <div key={n} className={`rounded-md border px-2.5 py-1.5 ${changed ? "border-amber-400/50 bg-amber-400/5" : isTuned ? "border-line bg-bg-elev/40" : "border-line/40"}`}>
+              <div className="text-[10px] text-muted font-mono truncate" title={n}>{n}{isTuned ? "" : " · fixed"}</div>
+              <div className={`text-sm font-mono ${changed ? "text-amber-400" : isTuned ? "text-text" : "text-muted"}`}>
+                {hasCur ? fmtParamValue(cur) : "—"}
+                {changed && <span className="text-muted/70"> → {fmtParamValue(rec)}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function WFVerdictPanel({ result, strategies }) {
   const s = result.stats || {};
   const windows = result.windows || [];
   const adv = result.analytics?.advanced || {};
@@ -630,8 +687,9 @@ export function WFVerdictPanel({ result }) {
         </div>
       </div>
 
-      {/* Recommended params to deploy (latest re-tune) */}
+      {/* Recommended params to deploy (latest re-tune) + current-vs-recommended */}
       <RecommendedParams result={result} stability={stability} />
+      <CurrentParams result={result} strategies={strategies} />
 
       {/* The eight data-backed gates */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
