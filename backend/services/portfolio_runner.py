@@ -279,12 +279,119 @@ def _counterfactual_pnl(stream: _Stream, signal_idx: int, side: str,
 # Public runner
 # ---------------------------------------------------------------------------
 
+def _benchmark_closes(sig_df: pd.DataFrame, n: int = 400) -> list[dict]:
+    """A tiny buy-and-hold reference series: [{time, close}] downsampled to ~n.
+
+    Buy-and-hold is one of the validation gates ("does the strategy beat simply
+    holding the asset?"), and the Analytics chart that draws it already samples
+    to 400 points — so shipping all 221k bars just to draw 400 was waste. First
+    and last bars are always kept, so the total buy-and-hold return computed
+    from the endpoints is exact, not approximated.
+    """
+    m = len(sig_df)
+    if m == 0:
+        return []
+    idx = sorted(set(np.linspace(0, m - 1, min(n, m)).astype(int).tolist()) | {0, m - 1})
+    t = sig_df["time"].to_numpy()
+    c = sig_df["close"].to_numpy(dtype=float)
+    return [{"time": int(t[i]), "close": float(c[i])} for i in idx]
+
+
+def _load_spec_df(spec: StrategySpec, strategy,
+                  start_time: Optional[int], end_time: Optional[int],
+                  injected: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Load (or accept) this spec's OHLCV and apply the request window plus any
+    per-symbol backtest floor/cap the strategy declares.
+
+    Factored out of run_portfolio so `chart_data()` can reproduce EXACTLY the
+    same bar window without running the portfolio walk.
+    """
+    df = injected.copy() if injected is not None else market_data.load_parquet(
+        spec.symbol, spec.timeframe, broker=spec.broker)
+    if start_time is not None:
+        df = df[df["time"] >= int(start_time)]
+    if end_time is not None:
+        df = df[df["time"] <= int(end_time)]
+    df = df.reset_index(drop=True)
+
+    # Per-symbol backtest start floor declared by the strategy (e.g. Lunar on
+    # ES restricts the dashboard to 2018+ to match the TS reference). Only
+    # applied when no explicit start_time was passed (date picker overrides).
+    sym_start = getattr(strategy, "SYMBOL_BACKTEST_START", {}).get(spec.symbol)
+    if sym_start and start_time is None and not df.empty:
+        from datetime import datetime, timezone
+        floor_ts = int(datetime.strptime(sym_start, "%Y-%m-%d")
+                       .replace(tzinfo=timezone.utc).timestamp())
+        df = df[df["time"] >= floor_ts].reset_index(drop=True)
+
+    # Symmetric end cap (e.g. Lunar on ES restricts to TS's window ~Apr 2026).
+    sym_end = getattr(strategy, "SYMBOL_BACKTEST_END", {}).get(spec.symbol)
+    if sym_end and end_time is None and not df.empty:
+        from datetime import datetime, timezone
+        cap_ts = int(datetime.strptime(sym_end, "%Y-%m-%d")
+                     .replace(tzinfo=timezone.utc).timestamp())
+        df = df[df["time"] <= cap_ts].reset_index(drop=True)
+    return df
+
+
+def chart_data(specs: list[StrategySpec],
+               start_time: Optional[int] = None,
+               end_time: Optional[int] = None) -> dict:
+    """Per-bar CHART data only — candles, overlays, regime bands. No walk.
+
+    The dashboard fetches this lazily when the Chart tab opens, instead of the
+    portfolio response carrying it for every strategy on every run (that was
+    ~180 MB of the old 649 MB payload — see portfolio_routes._slim_for_wire).
+
+    Candles are emitted ONCE per (symbol, timeframe, broker) dataset rather
+    than once per strategy: strategies sharing a dataset share byte-identical
+    OHLCV, so N copies were pure duplication.
+
+    Returns {candles_by_dataset, dataset_key_by_strategy,
+             overlays_by_strategy, regime_segments_by_strategy}.
+    """
+    candles_by_dataset: dict[str, list] = {}
+    dataset_key_by_strategy: dict[str, str] = {}
+    overlays_by_strategy: dict[str, list] = {}
+    regime_by_strategy: dict[str, dict] = {}
+
+    for spec in specs:
+        cls = get_strategy_class(spec.strategy_id)
+        strategy = cls(spec.params or {})
+        df = _load_spec_df(spec, strategy, start_time, end_time)
+        sig_df = strategy.vectorized(df) if not df.empty else df
+        if sig_df.empty:
+            overlays_by_strategy[spec.strategy_id] = []
+            regime_by_strategy[spec.strategy_id] = {}
+            continue
+
+        key = f"{spec.symbol}|{spec.timeframe}|{spec.broker or ''}"
+        dataset_key_by_strategy[spec.strategy_id] = key
+        if key not in candles_by_dataset:
+            candles_by_dataset[key] = backtest_engine._serialize_candles(
+                sig_df[["time", "open", "high", "low", "close", "volume"]])
+
+        time_a = sig_df["time"].to_numpy(dtype=np.int64)
+        overlays_by_strategy[spec.strategy_id] = backtest_engine._build_overlays(
+            strategy, sig_df, time_a)
+        regime_by_strategy[spec.strategy_id] = backtest_engine._regime_segments(
+            sig_df, strategy.p)
+
+    return {
+        "candles_by_dataset": candles_by_dataset,
+        "dataset_key_by_strategy": dataset_key_by_strategy,
+        "overlays_by_strategy": overlays_by_strategy,
+        "regime_segments_by_strategy": regime_by_strategy,
+    }
+
+
 def run_portfolio(specs: list[StrategySpec],
                   start_time: Optional[int] = None,
                   end_time: Optional[int] = None,
                   risk_overrides: Optional[dict] = None,
                   df_by_spec: Optional[dict] = None,
-                  sid: Optional[str] = None) -> dict:
+                  sid: Optional[str] = None,
+                  with_chart_data: bool = True) -> dict:
     """Walk 1..N strategies through a single shared cash pool.
 
     Same-bar conflicts resolved by `spec.priority` (low number wins). When a
@@ -296,6 +403,12 @@ def run_portfolio(specs: list[StrategySpec],
     is used directly instead of `market_data.load_parquet(...)`. Synthetic
     Monte Carlo uses this to inject simulated OHLC without monkey-patching
     the loader.
+
+    `with_chart_data=False` skips building the per-bar candles / overlays /
+    regime bands in each per_strategy block. Callers that only need equity,
+    trades and stats (the dashboard endpoint, Monte Carlo) should pass False —
+    building them for 6 strategies over 221k bars cost ~180 MB of payload and
+    ~17s of serialization. Fetch them via `chart_data()` instead.
     """
     if not specs:
         raise ValueError("at least one StrategySpec is required")
@@ -334,30 +447,7 @@ def run_portfolio(specs: list[StrategySpec],
         if sid:
             strategy._progress = {"sid": sid, "label": _label, "index": _i + 1, "total": n_specs}
         injected = df_by_spec.get(orig_idx) if df_by_spec else None
-        df = injected.copy() if injected is not None else market_data.load_parquet(spec.symbol, spec.timeframe, broker=spec.broker)
-        if start_time is not None:
-            df = df[df["time"] >= int(start_time)]
-        if end_time is not None:
-            df = df[df["time"] <= int(end_time)]
-        df = df.reset_index(drop=True)
-
-        # Per-symbol backtest start floor declared by the strategy (e.g. Lunar on
-        # ES restricts the dashboard to 2018+ to match the TS reference). Only
-        # applied when no explicit start_time was passed (date picker overrides).
-        sym_start = getattr(strategy, "SYMBOL_BACKTEST_START", {}).get(spec.symbol)
-        if sym_start and start_time is None and not df.empty:
-            from datetime import datetime, timezone
-            floor_ts = int(datetime.strptime(sym_start, "%Y-%m-%d")
-                           .replace(tzinfo=timezone.utc).timestamp())
-            df = df[df["time"] >= floor_ts].reset_index(drop=True)
-
-        # Symmetric end cap (e.g. Lunar on ES restricts to TS's window ~Apr 2026).
-        sym_end = getattr(strategy, "SYMBOL_BACKTEST_END", {}).get(spec.symbol)
-        if sym_end and end_time is None and not df.empty:
-            from datetime import datetime, timezone
-            cap_ts = int(datetime.strptime(sym_end, "%Y-%m-%d")
-                         .replace(tzinfo=timezone.utc).timestamp())
-            df = df[df["time"] <= cap_ts].reset_index(drop=True)
+        df = _load_spec_df(spec, strategy, start_time, end_time, injected)
 
         sig_df = strategy.vectorized(df) if not df.empty else df
         st = _Stream(spec, strategy, sig_df)
@@ -593,13 +683,16 @@ def run_portfolio(specs: list[StrategySpec],
             "equity": eq_curve,
             "stats": stats_s,
             "analytics": analytics_s,
+            # Always present (a few KB) — buy-and-hold is a validation gate, so
+            # it must survive `with_chart_data=False`.
+            "benchmark": _benchmark_closes(s.sig_df),
             "candles": backtest_engine._serialize_candles(
                 s.sig_df[["time", "open", "high", "low", "close", "volume"]]
-            ) if not s.sig_df.empty else [],
+            ) if (with_chart_data and not s.sig_df.empty) else [],
             "overlays": backtest_engine._build_overlays(s.strategy, s.sig_df, s.time_a)
-                        if not s.sig_df.empty else [],
+                        if (with_chart_data and not s.sig_df.empty) else [],
             "regime_segments": backtest_engine._regime_segments(s.sig_df, s.strategy.p)
-                        if not s.sig_df.empty else {},
+                        if (with_chart_data and not s.sig_df.empty) else {},
         }
 
     log.info("[portfolio] %d strategies, %d unified bars, %d aggregate trades, "

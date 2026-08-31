@@ -147,8 +147,10 @@ class VwmaReversionStrategy(Strategy):
         ParamSpec("rsi_length",   ParamType.INT,   25,  min=5,  max=50,  step=1, group="RSI"),
         ParamSpec("rsi_long_max", ParamType.INT,   35,  min=25, max=40,  step=1, group="RSI"),
         ParamSpec("rsi_short_min",ParamType.INT,   65,  min=60, max=75,  step=1, group="RSI"),
-        ParamSpec("atr_stop",     ParamType.BOOL,  True, group="Stop",
-                  description="Use ATR-based stop loss. Turn off to exit only on mean reversion."),
+        ParamSpec("atr_stop",     ParamType.BOOL,  False, group="Stop",
+                  description="Use ATR-based stop loss. OFF by default — the reference TradingView "
+                              "version has no stop, so the exit is mean-reversion only. Turn on to "
+                              "add an ATR stop (then QuantLab will no longer match the Pine)."),
         ParamSpec("atr_length",   ParamType.INT,   10,  min=5,  max=50,  step=1, group="Stop"),
         ParamSpec("atr_mult",     ParamType.FLOAT, 6.0, min=1,  max=20,  step=0.5, group="Stop"),
         ParamSpec("trade_24_7", ParamType.BOOL, False, group="Sessions",
@@ -364,7 +366,7 @@ class VwmaReversionStrategy(Strategy):
         # gates only the drawn line, not the exit logic below — kept separate so
         # backtest behaviour is unchanged. At pyramiding=1 (default) the line
         # tracks the real trade; with pyramiding>1 it reflects the base position.
-        atr_on = bool(p.get("atr_stop", True))
+        atr_on = bool(p.get("atr_stop", False))
 
         for t in range(n):
             m = mean_a[t]
@@ -430,7 +432,7 @@ class VwmaReversionStrategy(Strategy):
         out["bar_exit_short"] = (close <= mean).fillna(False).astype(bool)
         # Emit atr only when the stop is enabled. The engine gates ATR-stop
         # logic on "atr" column presence, so omitting it cleanly disables it.
-        if bool(p.get("atr_stop", True)):
+        if bool(p.get("atr_stop", False)):
             out["atr"] = atr
         # Overlay columns referenced by OVERLAYS:
         out["vwma"] = mean
@@ -550,7 +552,7 @@ class VwmaReversionStrategy(Strategy):
         count = int(state.get("count", 1 if pos != 0 else 0))
         base_entry = state.get("base_entry", state.get("entry_p", np.nan))
         base_atr = state.get("base_atr", state.get("atr_at_entry", np.nan))
-        atr_on = bool(p.get("atr_stop", True))
+        atr_on = bool(p.get("atr_stop", False))
         sides = p["sides"]
 
         def _flat():

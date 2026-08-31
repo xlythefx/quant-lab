@@ -15,7 +15,7 @@ import CostBreakdownModal from "../components/CostBreakdownModal.jsx";
 import LookAheadComparisonModal from "../components/LookAheadComparisonModal.jsx";
 import {
   getSymbols, prepareBacktest, getStrategies, getOHLCV, runBacktest,
-  runPortfolioBacktest, getRiskConfig,
+  runPortfolioBacktest, getPortfolioChartData, getRiskConfig,
 } from "../services/api.js";
 import {
   setSpeed as wsSetSpeed,
@@ -415,17 +415,23 @@ export default function Dashboard() {
     setHindsightLoading(true);
 
     try {
-      const candlesP = getOHLCV({ symbol, timeframe, mode: "backtest", limit: 200000, broker: broker || undefined });
-      const portfolioP = runPortfolioBacktest({
-        strategies: active.map((s, i) => ({
-          strategy_id: s.id, symbol, timeframe,
-          params: s.params, priority: i + 1, broker: broker || undefined,
-        })),
+      const specs = active.map((s, i) => ({
+        strategy_id: s.id, symbol, timeframe,
+        params: s.params, priority: i + 1, broker: broker || undefined,
+      }));
+      const window = {
         start_time: dateStrToEpoch(hrange.start),
         end_time:   dateStrToEpoch(hrange.end, true),
-      });
+      };
+      const candlesP = getOHLCV({ symbol, timeframe, mode: "backtest", limit: 200000, broker: broker || undefined });
+      const portfolioP = runPortfolioBacktest({ strategies: specs, ...window });
+      // Overlays + regime bands no longer ride along with the portfolio result
+      // (they were the bulk of a payload too large for the browser to parse —
+      // see routes/portfolio_routes.py). v1 draws its chart immediately on run,
+      // so fetch them in parallel rather than lazily like v2 does.
+      const chartP = getPortfolioChartData({ strategies: specs, ...window });
 
-      const [candles, portfolio] = await Promise.all([candlesP, portfolioP]);
+      const [candles, portfolio, chart] = await Promise.all([candlesP, portfolioP, chartP]);
       if (myReq !== inflightRef.current) return;  // stale
 
       const overlaysByStrategy = {};
@@ -434,14 +440,20 @@ export default function Dashboard() {
       const statsLocal = {};
       let regimeSegments = null;   // {five,adx,default} from the primary (first) strategy
 
+      // Written in ONE batch at the end: setLastResult re-serializes the whole
+      // cache on every call, so a per-strategy loop cost N full stringifies.
+      const cacheEntries = [];
+
       for (const s of active) {
         const psd = portfolio.per_strategy?.[s.id];
         if (!psd) {
           console.warn("portfolio result missing strategy:", s.id);
           continue;
         }
-        if (!regimeSegments && psd.regime_segments) regimeSegments = psd.regime_segments;
-        overlaysByStrategy[s.id] = psd.overlays || [];
+        const ovs = chart?.overlays_by_strategy?.[s.id] || [];
+        const rs  = chart?.regime_segments_by_strategy?.[s.id] || null;
+        if (!regimeSegments && rs && Object.keys(rs).length) regimeSegments = rs;
+        overlaysByStrategy[s.id] = ovs;
         markersByStrategyLocal[s.id] = tradesToMarkers(psd.trades || []);
         equityLocal[s.id] = (psd.equity || []).map((e) => ({ time: e.time, value: e.value }));
         statsLocal[s.id] = {
@@ -454,23 +466,26 @@ export default function Dashboard() {
         // Cache the per-strategy slice for the Analytics page.
         // Reuse the existing legacy-shape so single-strategy Analytics
         // works unchanged: pull the per_strategy block + risk_config.
-        setLastResult(`${s.id}|${symbol}|${timeframe}`, {
+        cacheEntries.push([`${s.id}|${symbol}|${timeframe}`, {
           strategy_id: s.id, symbol, timeframe,
           risk_config: portfolio.risk_config,
           params: psd.spec?.params || s.params,
-          candles: psd.candles || [],
-          overlays: psd.overlays || [],
-          regime_segments: psd.regime_segments || null,
+          // Compact benchmark series (not full OHLCV) — enough for Analytics'
+          // buy-and-hold comparison without carrying 25 MB per strategy.
+          candles: psd.benchmark || [],
+          overlays: [],
+          regime_segments: rs,
           trades: psd.trades || [],
           equity: psd.equity || [],
           stats: psd.stats || {},
           analytics: psd.analytics || {},
-        });
+        }]);
       }
 
       // Cache the FULL portfolio result under a synthetic key so the
       // Analytics page can render the polished portfolio view.
-      setLastResult(`__portfolio__|${symbol}|${timeframe}`, portfolio);
+      cacheEntries.push([`__portfolio__|${symbol}|${timeframe}`, portfolio]);
+      setLastResult(cacheEntries);
 
       setStaticData({ candles, overlaysByStrategy, markersByStrategy: markersByStrategyLocal, regimeSegments });
       setEquityPoints(equityLocal);

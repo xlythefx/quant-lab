@@ -2,19 +2,34 @@
 Opening Range Breakout (ORB) — ride the break of the session's opening range.
 
 The idea, in plain words:
-  1. During the OPENING-RANGE session (e.g. the first 30 min after the open),
+  1. During the OPENING-RANGE session (by default the first 15 min after the open),
      record the high and low. That box (top = green, bottom = red) is frozen
      for the rest of the day.
-  2. During the ENTRY session (the rest of the day), watch for the FIRST bar to
-     CLOSE decisively beyond the box — optionally by break_buffer × ATR so a
-     marginal poke doesn't count.
+  2. During the ENTRY session (the next couple of hours), watch for the FIRST bar to
+     CLOSE decisively beyond the box — optionally by break_buffer × the box's own
+     height, so a marginal poke doesn't count.
   3. We trade WITH the break (continuation — the opposite of a fade):
        - close ABOVE the box → BUY
        - close BELOW the box → SELL
-  4. Stop-loss = entry ∓ atr_mult × ATR (engine-native fixed-ATR stop). There is
-     no fixed profit target: the winner is ridden until the ATR stop OR the
-     SESSION-CLOSE flatten (we go flat at the end of the entry window). One trade
-     per day; whichever side breaks first locks the day.
+  4. Stop-loss = THE OPPOSITE EXTREME OF THE BOX, checked on the close:
+       - long  is out when a bar CLOSES below the range low
+       - short is out when a bar CLOSES above the range high
+     Risk per trade is therefore roughly the box height. There is no fixed profit
+     target: the winner is ridden until that stop OR the SESSION-CLOSE flatten (we
+     go flat at the end of the entry window). One trade per day; whichever side
+     breaks first locks the day.
+
+No ATR anywhere in this file — the box supplies its own ruler for both the break
+buffer and the stop, so the strategy needs no indicator and no warm-up.
+
+SIZING THE OPENING RANGE (read this before setting or_session)
+  The box can never be finer than the bars it is built from. The session filter
+  matches a bar by its START timestamp, half-open [start, end) — so on a 15m chart
+  a window of 13:30–13:35 still selects the bar stamped 13:30, and that bar's
+  high/low is a FULL 15 minutes of range. You would get a box that is labelled 5
+  minutes and is really 15. To get a genuine 5-minute opening range, run the
+  backtest on the 5m timeframe. Defaults here are the honest 15m pairing:
+  13:30–13:45 opening range, 13:45–15:45 entry (2 hours).
 
 This is the mirror image of asia_range_breakout.py (which FADES the sweep). Same
 box/session scaffolding + engine contract; opposite directional bet. ORB tends to
@@ -23,10 +38,17 @@ pay on trending days and bleed on choppy ones — validate per-instrument.
 Engine contract (matches vwma_reversion.py / asia_range_breakout.py so BOTH sim
 loops behave the same):
   - cond_long / cond_short         : per-bar entry conditions (the break bar).
-  - bar_exit_long / bar_exit_short : per-bar forced flat (last entry-session bar).
-  - atr + atr_mult                 : the engine's native fixed-ATR stop.
-The engine owns position state; this file emits stateless per-bar conditions (plus
-display-only entry/exit markers and the box/stop overlays).
+  - bar_exit_long / bar_exit_short : per-bar forced flat — carries BOTH the
+                                     range-edge stop and the session-close flatten.
+The engine acts on bar t-1's condition and fills at bar t's OPEN, so a bar that
+closes beyond the range is exited at the next bar's open — honest, no look-ahead.
+Note a close-based stop means price can travel well past the edge intrabar; the
+realised loss will sometimes exceed the box height. That is the true cost of
+"closed beyond" rather than "touched beyond", and it is deliberate.
+
+We deliberately emit NO `atr` column and hold NO `atr_mult` param, which is what
+switches the engines' built-in fixed-ATR stop OFF (both gate on those two things).
+We also emit no exit_fill_* columns, so exits fill at next-bar open like entries.
 
 Day boundary = UTC calendar day (time // 86400), consistent with the UTC session
 windows. Assumes the opening-range window sits earlier in the same UTC day than
@@ -49,46 +71,34 @@ from services.strategies.session_utils import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Self-contained indicators
-# ---------------------------------------------------------------------------
-
-def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int) -> pd.Series:
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        (high - low).abs(),
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / length, adjust=False).mean()
-
-
 class OpeningRangeBreakoutStrategy(Strategy):
     PARAM_SCHEMA = [
         # ---- Opening range: the box is the high/low of these bars each UTC day ----
         ParamSpec("or_session", ParamType.SESSIONS,
-                  {"open": {"enabled": True, "start": "13:30", "end": "14:00"}},
+                  {"open": {"enabled": True, "start": "13:30", "end": "13:45"}},
                   group="Opening Range",
                   description="UTC window whose high/low form the day's box (the "
-                              "'opening range'). Keep it SHORT — e.g. the first 15-30 "
-                              "min after your instrument's open. Default ~US open."),
+                              "'opening range'). Keep it SHORT — the default is the "
+                              "first 15 min after the US open, i.e. exactly one bar on "
+                              "a 15m chart. The box can never be finer than your "
+                              "timeframe: a 5-min window on a 15m chart still measures "
+                              "the whole 15m bar. For a true 5-min range, run on 5m."),
         # ---- Entry window: breaks are only taken while inside this window ----
         ParamSpec("entry_session", ParamType.SESSIONS,
-                  {"entry": {"enabled": True, "start": "14:00", "end": "20:00"}},
+                  {"entry": {"enabled": True, "start": "13:45", "end": "15:45"}},
                   group="Entry Window",
                   description="UTC window where a break may open a trade. Should start "
                               "at/after the opening-range window ends. The trade is "
-                              "flattened at the END of this window (session-close exit)."),
+                              "flattened at the END of this window (session-close exit). "
+                              "Default = the 2 hours after the opening range."),
         # ---- Break buffer: how far past the box a close must be to count ----
-        ParamSpec("break_buffer", ParamType.FLOAT, 0.0, min=0.0, max=3.0, step=0.1, group="Break",
-                  description="A bar must CLOSE at least this many ATR beyond the box "
-                              "edge to count as a break. 0 = any close beyond the line."),
-        ParamSpec("vol_length", ParamType.INT, 14, min=5, max=100, step=1, group="Break",
-                  description="Lookback for the ATR used by the break buffer and the stop."),
-        # ---- Stop: fixed ATR distance (engine-native). No fixed target — ride to close.
-        ParamSpec("atr_mult", ParamType.FLOAT, 2.0, min=0.5, max=10.0, step=0.5, group="Stop",
-                  description="Stop-loss distance = entry ∓ this × ATR at entry. No profit "
-                              "target: the trade rides until the stop or the session-close flat."),
+        ParamSpec("break_buffer", ParamType.FLOAT, 0.0, min=0.0, max=1.0, step=0.05,
+                  group="Break",
+                  description="A bar must CLOSE at least this fraction of the BOX HEIGHT "
+                              "beyond the box edge to count as a break. Self-scaling — a "
+                              "wide day gets a wide buffer. 0 = any close beyond the line."),
+        # ---- Stop: the opposite extreme of the box, on a close. No ATR, no target. ----
+        # (nothing to configure — the stop level IS the box, see the docstring)
         # ---- Direction toggle (defaults to both) ----
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
@@ -106,8 +116,9 @@ class OpeningRangeBreakoutStrategy(Strategy):
         id="opening_range_breakout",
         name="Opening Range Breakout (ORB)",
         description=("Ride the break of the opening-range box: close above → buy, close "
-                     "below → sell. Break gated by ATR buffer; fixed-ATR stop; flatten at "
-                     "session close; one trade/day; configurable sessions + sides."),
+                     "below → sell. Break gated by a buffer measured in box heights; stop "
+                     "is the OPPOSITE EDGE of the box on a close; flatten at session "
+                     "close; one trade/day; configurable sessions + sides. No ATR."),
         schema=PARAM_SCHEMA,
     )
 
@@ -116,7 +127,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
                     color="#22c55e", line_width=2, line_style="solid"),
         OverlaySpec("box_bot", "Range bottom", from_column="box_bot_disp",
                     color="#ef4444", line_width=2, line_style="solid"),
-        OverlaySpec("atr_stop", "ATR stop", from_column="stop_price",
+        OverlaySpec("box_stop", "Stop (range edge)", from_column="stop_price",
                     color="rgba(239,68,68,0.85)", line_width=1, line_style="dashed"),
     ]
 
@@ -129,8 +140,6 @@ class OpeningRangeBreakoutStrategy(Strategy):
         low = out["low"].astype(float)
         close = out["close"].astype(float)
 
-        atr = _atr(high, low, close, p["vol_length"])
-
         # Session masks (UTC, vectorized). Both params are {name: {enabled,start,end}}.
         ts = pd.to_datetime(out["time"], unit="s", utc=True)
         ts.index = out.index
@@ -141,7 +150,6 @@ class OpeningRangeBreakoutStrategy(Strategy):
         high_a = high.to_numpy()
         low_a = low.to_numpy()
         close_a = close.to_numpy()
-        atr_a = atr.to_numpy()
         day_a = time_a // 86400  # UTC calendar day
 
         sides = p["sides"]
@@ -168,6 +176,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
             box_low = float(np.nanmin(low_a[or_idx]))
             if not (np.isfinite(box_high) and np.isfinite(box_low)) or box_high <= box_low:
                 continue
+            box_h = box_high - box_low
             or_last = int(or_idx.max())
 
             # Paint the box for this day's bars AFTER it froze (overlay only).
@@ -180,6 +189,14 @@ class OpeningRangeBreakoutStrategy(Strategy):
             if entry_idx.size == 0:
                 continue
 
+            # ---- Stop: a close beyond the OPPOSITE extreme of the box. Emitted as a
+            # stateless per-bar condition over the whole entry window — the engine only
+            # acts on it while the matching side is actually open. A long-stop bar and a
+            # long-entry bar can never coincide (a close can't be both above box_high
+            # and below box_low).
+            bar_exit_long[entry_idx] = close_a[entry_idx] < box_low
+            bar_exit_short[entry_idx] = close_a[entry_idx] > box_high
+
             # Session-close flatten: force flat at the LAST entry-session bar of the
             # day (fires regardless of which side, if any, is open).
             last_entry = int(entry_idx.max())
@@ -187,9 +204,9 @@ class OpeningRangeBreakoutStrategy(Strategy):
             bar_exit_short[last_entry] = True
 
             # First decisive close beyond the box locks the day (one trade/day).
+            # Buffer is measured in box heights, so it scales with the day's range.
+            thr = buf * box_h
             for i in entry_idx:
-                a = atr_a[i]
-                thr = 0.0 if buf == 0.0 else (buf * a if np.isfinite(a) else np.inf)
                 broke_up = close_a[i] > box_high + thr
                 broke_dn = close_a[i] < box_low - thr
                 if broke_up and long_on:
@@ -200,57 +217,39 @@ class OpeningRangeBreakoutStrategy(Strategy):
                     break
 
         # ---- Display-only sim: entry/exit markers + the live stop line. Mirrors the
-        # engine's precedence (act on bar t-1's signal, fill at bar t's open, exit on
-        # the forced flat or the fixed-ATR stop). Single-position, for the chart only —
-        # the real P&L comes from the engine reading cond_/bar_exit_/atr above.
+        # engine exactly (act on bar t-1's condition, fill at bar t's open). The stop
+        # needs no state now — it already lives inside bar_exit_*. Single-position, for
+        # the chart only; real P&L comes from the engine reading the columns above.
         entry_long = np.zeros(n, dtype=bool)
         entry_short = np.zeros(n, dtype=bool)
         exit_long = np.zeros(n, dtype=bool)
         exit_short = np.zeros(n, dtype=bool)
         stop_price = np.full(n, np.nan)
-        atr_mult = float(p["atr_mult"])
 
         pos = 0
-        entry_p = np.nan
-        atr_at_entry = np.nan
-        cur_stop = np.nan
         for t in range(1, n):
             if pos == 1:
-                stop_hit = (np.isfinite(atr_at_entry) and np.isfinite(entry_p)
-                            and close_a[t - 1] <= entry_p - atr_mult * atr_at_entry)
-                if bar_exit_long[t - 1] or stop_hit:
+                if bar_exit_long[t - 1]:
                     exit_long[t] = True
                     pos = 0
-                    entry_p = atr_at_entry = cur_stop = np.nan
-                elif np.isfinite(cur_stop):
-                    stop_price[t] = cur_stop
+                else:
+                    stop_price[t] = box_bot_disp[t]
             elif pos == -1:
-                stop_hit = (np.isfinite(atr_at_entry) and np.isfinite(entry_p)
-                            and close_a[t - 1] >= entry_p + atr_mult * atr_at_entry)
-                if bar_exit_short[t - 1] or stop_hit:
+                if bar_exit_short[t - 1]:
                     exit_short[t] = True
                     pos = 0
-                    entry_p = atr_at_entry = cur_stop = np.nan
-                elif np.isfinite(cur_stop):
-                    stop_price[t] = cur_stop
+                else:
+                    stop_price[t] = box_top_disp[t]
 
             if pos == 0:
                 if cond_long[t - 1]:
                     pos = 1
-                    entry_p = float(close_a[t])   # marker/stop reference ≈ fill
-                    atr_at_entry = atr_a[t - 1] if np.isfinite(atr_a[t - 1]) else np.nan
                     entry_long[t] = True
-                    if np.isfinite(atr_at_entry):
-                        cur_stop = entry_p - atr_mult * atr_at_entry
-                        stop_price[t] = cur_stop
+                    stop_price[t] = box_bot_disp[t]
                 elif cond_short[t - 1]:
                     pos = -1
-                    entry_p = float(close_a[t])
-                    atr_at_entry = atr_a[t - 1] if np.isfinite(atr_a[t - 1]) else np.nan
                     entry_short[t] = True
-                    if np.isfinite(atr_at_entry):
-                        cur_stop = entry_p + atr_mult * atr_at_entry
-                        stop_price[t] = cur_stop
+                    stop_price[t] = box_top_disp[t]
 
         out["entry_long"] = entry_long
         out["entry_short"] = entry_short
@@ -262,7 +261,8 @@ class OpeningRangeBreakoutStrategy(Strategy):
         out["cond_short"] = cond_short
         out["bar_exit_long"] = bar_exit_long
         out["bar_exit_short"] = bar_exit_short
-        out["atr"] = atr   # enables the engine's fixed-ATR stop (with atr_mult)
+        # NOTE: no "atr" column on purpose — that (plus no atr_mult param) is what
+        # keeps the engines' built-in fixed-ATR stop switched off.
         # Overlay columns.
         out["box_top_disp"] = box_top_disp
         out["box_bot_disp"] = box_bot_disp
@@ -272,14 +272,15 @@ class OpeningRangeBreakoutStrategy(Strategy):
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """
         Live, stateful mirror of the backtest. State keys:
-          buf              recent bars for ATR
           cur_day          UTC day the box belongs to
           box_high/low     frozen opening-range box for cur_day (None until OR bars seen)
-          or_done          True once we've left the OR window (box is frozen)
           locked           'long'|'short'|None — first break locks the day
           done_today       True once the day's single trade has opened
-          pos, entry_p, atr_at_entry
+          pos              -1 | 0 | 1
+          stop_level       the box edge we get stopped on, captured AT ENTRY so the
+                           daily box reset can never move a live trade's stop
 
+        No indicator buffer and no warm-up — the box is the only input.
         Single-position (like every live path here). Flattens at the last entry-
         session bar. See CLAUDE.md live-vs-backtest note for the pyramiding caveat.
         """
@@ -287,19 +288,6 @@ class OpeningRangeBreakoutStrategy(Strategy):
             return None
 
         p = self.p
-        warmup = int(p["vol_length"]) * 4
-        buf_bars = state.setdefault("buf", [])
-        buf_bars.append({
-            "time": int(candle["time"]),
-            "open": float(candle["open"]),
-            "high": float(candle["high"]),
-            "low": float(candle["low"]),
-            "close": float(candle["close"]),
-            "volume": float(candle.get("volume", 0.0)),
-        })
-        if len(buf_bars) > warmup * 2:
-            del buf_bars[: len(buf_bars) - warmup * 2]
-
         ts = int(candle["time"])
         c = float(candle["close"])
         hi = float(candle["high"])
@@ -335,40 +323,28 @@ class OpeningRangeBreakoutStrategy(Strategy):
             state["box_high"] = hi if bh is None else max(bh, hi)
             state["box_low"] = lo if bl is None else min(bl, lo)
 
-        # ATR from the buffer.
-        if len(buf_bars) < int(p["vol_length"]) + 1:
-            a = np.nan
-        else:
-            dfb = pd.DataFrame(buf_bars)
-            a = float(_atr(dfb["high"], dfb["low"], dfb["close"], p["vol_length"]).iloc[-1])
-
         sides = p["sides"]
         long_on = bool(sides.get("long"))
         short_on = bool(sides.get("short"))
-        atr_mult = float(p["atr_mult"])
         pos = state.get("pos", 0)
 
-        # ---- Manage an open position first (stop any time; flat at entry-session end) ----
+        # ---- Manage an open position first: close beyond the far box edge, or the
+        # session-close flatten once we leave the entry window. ----
         if pos == 1:
-            entry_p = state.get("entry_p", np.nan)
-            aae = state.get("atr_at_entry", np.nan)
-            stop_hit = (np.isfinite(aae) and np.isfinite(entry_p)
-                        and c <= entry_p - atr_mult * aae)
-            # Session-close flatten: once we're past the entry window, go flat.
+            stop_lvl = state.get("stop_level", np.nan)
+            stop_hit = np.isfinite(stop_lvl) and c < stop_lvl
             if stop_hit or not in_entry:
                 state["pos"] = 0
                 return Signal(side="long", kind="exit", price=c, time=ts,
-                              reason="atr_stop" if stop_hit else "session_close")
+                              reason="range_stop" if stop_hit else "session_close")
             return None
         if pos == -1:
-            entry_p = state.get("entry_p", np.nan)
-            aae = state.get("atr_at_entry", np.nan)
-            stop_hit = (np.isfinite(aae) and np.isfinite(entry_p)
-                        and c >= entry_p + atr_mult * aae)
+            stop_lvl = state.get("stop_level", np.nan)
+            stop_hit = np.isfinite(stop_lvl) and c > stop_lvl
             if stop_hit or not in_entry:
                 state["pos"] = 0
                 return Signal(side="short", kind="exit", price=c, time=ts,
-                              reason="atr_stop" if stop_hit else "session_close")
+                              reason="range_stop" if stop_hit else "session_close")
             return None
 
         # ---- Flat: look for the day's first break inside the entry window ----
@@ -382,8 +358,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
         if in_or or not in_entry:
             return None
 
-        buf = float(p["break_buffer"])
-        thr = 0.0 if buf == 0.0 else (buf * a if np.isfinite(a) else np.inf)
+        thr = float(p["break_buffer"]) * (box_high - box_low)
         broke_up = c > box_high + thr
         broke_dn = c < box_low - thr
 
@@ -395,9 +370,9 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
         locked = state.get("locked")
         if locked == "long":
-            state.update({"pos": 1, "entry_p": c, "atr_at_entry": a, "done_today": True})
+            state.update({"pos": 1, "stop_level": box_low, "done_today": True})
             return Signal(side="long", kind="entry", price=c, time=ts, reason="or_break")
         if locked == "short":
-            state.update({"pos": -1, "entry_p": c, "atr_at_entry": a, "done_today": True})
+            state.update({"pos": -1, "stop_level": box_high, "done_today": True})
             return Signal(side="short", kind="entry", price=c, time=ts, reason="or_break")
         return None

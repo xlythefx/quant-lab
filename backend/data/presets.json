@@ -1,15 +1,31 @@
 {
   "vwma_reversion": {
     "FETUSDT": {
-      "vwma_length": 30,
-      "z_threshold": 1.5,
+      "allowed_hmm_moods": {
+        "Bearish Normal": true,
+        "Bearish Volatile": false,
+        "Bullish Normal": true,
+        "Bullish Volatile": false,
+        "Ranging": true
+      },
+      "allowed_regimes": {
+        "Choppy-Range": true,
+        "High-Volatility": false,
+        "Quiet": true,
+        "Trending Down": false,
+        "Trending Up": false
+      },
+      "atr_length": 10,
+      "atr_mult": 6,
+      "atr_stop": false,
+      "pyramiding": 10,
+      "regime_adx_period": 20,
+      "regime_adx_threshold": 40,
+      "regime_method": "adx",
+      "risk_pct": 10,
       "rsi_length": 25,
       "rsi_long_max": 35,
       "rsi_short_min": 65,
-      "atr_stop": false,
-      "atr_length": 10,
-      "atr_mult": 6,
-      "trade_24_7": false,
       "sessions": {
         "london": {
           "enabled": true,
@@ -25,6 +41,47 @@
           "enabled": false,
           "end": "20:00",
           "start": "17:00"
+        },
+        "tokyo": {
+          "enabled": false,
+          "end": "04:00",
+          "start": "00:00"
+        }
+      },
+      "sides": {
+        "long": false,
+        "short": true
+      },
+      "trade_24_7": false,
+      "use_regime": false,
+      "vwma_length": 30,
+      "z_threshold": 1.5
+    },
+    "BICOUSDT": {
+      "vwma_length": 30,
+      "z_threshold": 1.5,
+      "rsi_length": 21,
+      "rsi_long_max": 35,
+      "rsi_short_min": 65,
+      "atr_stop": false,
+      "atr_length": 10,
+      "atr_mult": 6,
+      "trade_24_7": false,
+      "sessions": {
+        "london": {
+          "enabled": false,
+          "end": "12:30",
+          "start": "05:00"
+        },
+        "ny_am": {
+          "enabled": true,
+          "end": "08:00",
+          "start": "04:00"
+        },
+        "ny_pm": {
+          "enabled": true,
+          "end": "12:00",
+          "start": "08:00"
         },
         "tokyo": {
           "enabled": false,
@@ -54,7 +111,7 @@
         "Bullish Volatile": false,
         "Ranging": true
       },
-      "pyramiding": 10,
+      "pyramiding": 3,
       "risk_pct": 10
     }
   },

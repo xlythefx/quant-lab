@@ -101,7 +101,10 @@ export default function Analytics() {
         timeframe: psd.spec?.timeframe || firstSpec.timeframe,
         risk_config: rawResult.risk_config,
         params: psd.spec?.params || {},
-        candles: psd.candles || [],
+        // Full candles when a caller supplied them; otherwise the compact
+        // ~400-point {time, close} benchmark series, which is all the
+        // buy-and-hold comparison actually needs.
+        candles: psd.candles?.length ? psd.candles : (psd.benchmark || []),
         overlays: psd.overlays || [],
         trades: psd.trades || [],
         equity: psd.equity || [],
@@ -1227,7 +1230,14 @@ function MonthlyTab({ result }) {
 // ---------------------------------------------------------------------------
 
 function DrawdownTab({ result }) {
-  const dd = result.analytics?.drawdown_curve || [];
+  // `drawdown_curve` is exactly equity.map(time, drawdown), so the backend no
+  // longer ships it (it was 12 MB per slice on a long backtest). Derive it here
+  // when absent; older cached results that still carry it are used as-is.
+  const dd = useMemo(
+    () => result.analytics?.drawdown_curve
+      || (result.equity || []).map((p) => ({ time: p.time, drawdown: p.drawdown })),
+    [result],
+  );
   const ddShape = result.analytics?.advanced?.drawdown || {};
   const startingCapital = result.stats?.starting_capital ?? result.risk_config?.starting_capital ?? 100000;
 

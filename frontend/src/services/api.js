@@ -96,11 +96,67 @@ export async function runBacktest({ strategy_id, symbol, timeframe, params, star
 }
 
 /**
+ * Expand a columnar equity curve back into the point objects the whole app
+ * expects: {time, equity, value, drawdown, drawdown_dollars}.
+ *
+ * The backend ships only the two INDEPENDENT columns (time, equity) because
+ * the other three are exactly derivable — and shipping them as repeated JSON
+ * keys on 221k points × 7 curves was ~206 MB of the old payload. The peak here
+ * is a running max seeded at starting capital, which is precisely what
+ * portfolio_runner does (PortfolioState.peak_equity / the per-strategy `peak`),
+ * so the reconstructed numbers are identical, not approximate.
+ */
+export function expandEquityCurve(col, startingCapital) {
+  if (!col) return [];
+  if (Array.isArray(col)) return col;            // already the legacy shape
+  const t = col.time || [];
+  const e = col.equity || [];
+  const sc = Number(startingCapital) || 100000;
+  const out = new Array(t.length);
+  let peak = sc;
+  for (let i = 0; i < t.length; i++) {
+    const eq = e[i];
+    if (eq > peak) peak = eq;
+    out[i] = {
+      time: t[i],
+      equity: eq,
+      value: (eq / sc) * 100,
+      drawdown: ((eq - peak) / sc) * 100,
+      drawdown_dollars: eq - peak,
+    };
+  }
+  return out;
+}
+
+/**
+ * Decode the slimmed `columnar_v1` wire shape into the rich in-app shape.
+ * A response without `encoding` is already legacy-shaped and passes through,
+ * so cached/older payloads keep working.
+ */
+function decodePortfolio(data) {
+  if (!data || data.encoding !== "columnar_v1") return data;
+  const sc = data.risk_config?.starting_capital ?? data.stats?.starting_capital ?? 100000;
+  data.equity = expandEquityCurve(data.equity, sc);
+  for (const blk of Object.values(data.per_strategy || {})) {
+    blk.equity = expandEquityCurve(blk.equity, sc);
+    // Chart series now arrive from /backtest/chart-data; keep the keys present
+    // so components that read `psd.candles`/`psd.overlays` see an empty series
+    // rather than undefined.
+    blk.candles = blk.candles || [];
+    blk.overlays = blk.overlays || [];
+  }
+  return data;
+}
+
+/**
  * Portfolio backtest — accepts 1..N strategies sharing one cash pool.
  * `strategies` is `[{strategy_id, symbol, timeframe, params, priority}]`.
  * Returns `{strategies, risk_config, equity, trades, skipped_signals,
  *           stats, analytics, per_strategy: {sid: {trades, equity, stats,
- *           analytics, candles, overlays, spec}}}`.
+ *           analytics, spec}}}`.
+ *
+ * NOTE: per-bar chart data (candles / overlays / regime bands) is NOT in this
+ * response — fetch it with `getPortfolioChartData` when a chart is opened.
  */
 export async function runPortfolioBacktest({ strategies, start_time, end_time, sid, risk_overrides }) {
   // `sid` (socket id) lets the backend stream live stage/HMM-refit progress back
@@ -109,6 +165,20 @@ export async function runPortfolioBacktest({ strategies, start_time, end_time, s
   // the equity compare) WITHOUT changing the saved Risk Settings.
   const { data } = await api.post("/api/backtest/portfolio", {
     strategies, start_time, end_time, sid, risk_overrides,
+  }, { timeout: 900_000 });
+  return decodePortfolio(data);
+}
+
+/**
+ * Per-bar chart data for the strategies currently on screen. Same request
+ * shape as `runPortfolioBacktest`. Returns
+ * `{candles_by_dataset, dataset_key_by_strategy, overlays_by_strategy,
+ *   regime_segments_by_strategy}` — candles appear once per dataset, not once
+ * per strategy.
+ */
+export async function getPortfolioChartData({ strategies, start_time, end_time }) {
+  const { data } = await api.post("/api/backtest/chart-data", {
+    strategies, start_time, end_time,
   }, { timeout: 900_000 });
   return data;
 }

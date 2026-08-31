@@ -11,7 +11,7 @@ import MonthlyReturnsHeatmap from "../components/dashboardv2/MonthlyReturnsHeatm
 import RangeSelector from "../components/dashboardv2/RangeSelector.jsx";
 import RiskReturnPanel from "../components/dashboardv2/RiskReturnPanel.jsx";
 import InterpretationCard from "../components/dashboardv2/InterpretationCard.jsx";
-import { getSymbols, getStrategies, getRiskConfig, runPortfolioBacktest } from "../services/api.js";
+import { getSymbols, getStrategies, getRiskConfig, runPortfolioBacktest, getPortfolioChartData } from "../services/api.js";
 import {
   useActiveStrategies, addStrategy, removeStrategy, updateParams, saveUserDefaults, getUserDefaults,
 } from "../services/strategiesStore.js";
@@ -104,6 +104,14 @@ export default function DashboardV2() {
   const [showVariant, setShowVariant] = useState({ reality: true, no_cost: false, look_ahead: false });
   const [variantData, setVariantData] = useState({ no_cost: null, look_ahead: null });
   const [variantLoading, setVariantLoading] = useState({ no_cost: false, look_ahead: false });
+
+  // Per-bar chart series (candles / overlays / regime bands). NOT part of the
+  // portfolio response any more — it was ~180 MB of it — so the Chart tab
+  // fetches it on first open. Cached as {key, data} where key is the set of
+  // strategies it covers, so selecting a different strategy refetches just
+  // that one instead of carrying all six.
+  const [chartData, setChartData] = useState(null);
+  const [chartLoading, setChartLoading] = useState(false);
 
   const catalogById = useMemo(() => {
     const m = {}; for (const s of catalog) m[s.id] = s; return m;
@@ -225,28 +233,37 @@ export default function DashboardV2() {
       });
       if (myReq !== inflightRef.current) return;
       setResult(portfolio);
+      setChartData(null);          // stale for the new run — refetched on demand
       setLastRun(Math.floor(Date.now() / 1000));
 
       // Cache slices so the Analytics page (which reads lastResultStore) can
       // deep-dive without re-running. Mirrors Dashboard.runHindsight: each
       // per-strategy slice in the legacy single-strategy shape, plus the full
       // portfolio under the __portfolio__ key.
+      //
+      // Written in ONE batch: setLastResult used to re-serialize the entire
+      // cache to sessionStorage on every call, so this loop did N+1 full
+      // stringifies of a growing multi-hundred-MB structure per run.
+      const entries = [];
       for (const s of list) {
         const psd = portfolio.per_strategy?.[s.id];
         if (!psd) continue;
-        setLastResult(`${s.id}|${symbol}|${timeframe}`, {
+        entries.push([`${s.id}|${symbol}|${timeframe}`, {
           strategy_id: s.id, symbol, timeframe,
           risk_config: portfolio.risk_config,
           params: psd.spec?.params || s.params,
-          candles: psd.candles || [],
-          overlays: psd.overlays || [],
+          // Full candles are fetched on demand via /backtest/chart-data; the
+          // compact benchmark series keeps Analytics' buy-and-hold line alive.
+          candles: psd.benchmark || [],
+          overlays: [],
           trades: psd.trades || [],
           equity: psd.equity || [],
           stats: psd.stats || {},
           analytics: psd.analytics || {},
-        });
+        }]);
       }
-      setLastResult(`__portfolio__|${symbol}|${timeframe}`, portfolio);
+      entries.push([`__portfolio__|${symbol}|${timeframe}`, portfolio]);
+      setLastResult(entries);
     } catch (e) {
       if (myReq !== inflightRef.current) return;
       setError(e?.response?.data?.error || e.message || "Backtest failed.");
@@ -266,7 +283,7 @@ export default function DashboardV2() {
   }, [loading]);
 
   // Clear results when the run inputs change so we never show stale numbers.
-  useEffect(() => { setResult(null); setError(null); }, [symbol, broker, timeframe, active.length]);
+  useEffect(() => { setResult(null); setChartData(null); setError(null); }, [symbol, broker, timeframe, active.length]);
 
   // ---- equity-curve variants (no-cost / look-ahead overlays) ----
   const COST_ZERO = { fee_pct: 0, fee_flat: 0, slippage_bps: 0, futures_commission: 0 };
@@ -314,6 +331,45 @@ export default function DashboardV2() {
   }, [result, showVariant, variantData, variantLoading]);
 
   const toggleVariant = (kind) => setShowVariant((s) => ({ ...s, [kind]: !s[kind] }));
+
+  // ---- lazy chart data ----------------------------------------------------
+  // Only the strategies the chart actually draws: one when a single strategy is
+  // selected, all of them for the Portfolio aggregate (which merges overlays).
+  const chartStrategies = useMemo(
+    () => (selectedId === PORTFOLIO_ID ? active : active.filter((s) => s.id === selectedId)),
+    [active, selectedId],
+  );
+  const chartKey = chartStrategies.map((s) => s.id).join(",");
+
+  // Fetched the first time the Chart tab is opened for a given run + selection,
+  // then cached. Uses the SAME window as the run so the bars line up with the
+  // equity curve exactly.
+  useEffect(() => {
+    if (tab !== "chart" || !result || !chartKey) return;
+    if (chartData?.key === chartKey || chartLoading) return;
+    let cancelled = false;
+    const { start_time, end_time } = rangeToWindow(rangeKey, bounds, customRange);
+    setChartLoading(true);
+    getPortfolioChartData({
+      strategies: chartStrategies.map((s, i) => ({
+        strategy_id: s.id, symbol, timeframe,
+        params: s.params, priority: i + 1, broker: broker || undefined,
+      })),
+      start_time, end_time,
+    })
+      .then((d) => { if (!cancelled) setChartData({ key: chartKey, data: d }); })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e?.response?.data?.error || e.message || "Could not load chart data.");
+        // Record the failure AGAINST THIS KEY so the effect's guard stops it
+        // from immediately refetching in a loop. Changing tab/selection or
+        // re-running clears it and allows a fresh attempt.
+        setChartData({ key: chartKey, data: null });
+      })
+      .finally(() => { if (!cancelled) setChartLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, result, chartKey, chartData, chartLoading]);
 
   // ---- selection slice resolution ----
   const sliceFor = (id) => {
@@ -672,6 +728,8 @@ export default function DashboardV2() {
                 <div className="rounded-xl border border-line bg-bg-panel/40 overflow-hidden" style={{ height: 560 }}>
                   <PriceChartV2
                     result={result}
+                    chartData={chartData?.key === chartKey ? chartData.data : null}
+                    loading={chartLoading}
                     selectedId={selectedId}
                     active={active}
                     symbol={symbol}

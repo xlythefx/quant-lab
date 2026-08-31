@@ -79,8 +79,11 @@ def run(method: str,
             )
             for i, s in enumerate(strategies)
         ]
+        # Monte Carlo resamples trades/equity only — never the per-bar chart
+        # series, so skip building them (they dominate both time and memory).
         base = portfolio_runner.run_portfolio(
             specs, start_time=start_time, end_time=end_time,
+            with_chart_data=False,
         )
     else:
         s0 = strategies[0]
@@ -391,7 +394,9 @@ def _run_on_df(strategies: list[dict], synth_df: pd.DataFrame,
         ]
         # Same synthetic OHLC feeds every strategy — they share the symbol/TF.
         df_by_spec = {i: synth_df for i in range(len(specs))}
-        return portfolio_runner.run_portfolio(specs, df_by_spec=df_by_spec)
+        # Runs once PER SIMULATION — never build chart series here.
+        return portfolio_runner.run_portfolio(specs, df_by_spec=df_by_spec,
+                                              with_chart_data=False)
     s0 = strategies[0]
     return backtest_engine.run(
         s0["strategy_id"], s0["symbol"], s0["timeframe"],

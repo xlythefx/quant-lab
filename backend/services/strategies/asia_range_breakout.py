@@ -7,23 +7,63 @@ The idea, in plain words:
   2. During the ENTRY session, watch for price to poke OUT of the box far enough
      to look like a real liquidity grab — the poke depth must exceed
      break_depth × (ATR or rolling σ). A tiny wick past the line is ignored.
+     The poke is measured on the WICK (bar high / low), so a touch counts; the
+     bar does not have to close beyond the line.
   3. We FADE that sweep (bet it reverses):
        - break BELOW the box first  → BUY,  target = TOP of the box.
        - break ABOVE the box first  → SELL, target = BOTTOM of the box.
-     Entry is the "reclaim": we wait for a bar to CLOSE back inside the box.
-  4. Take-profit = the opposite side of the box. Stop-loss = entry ∓ atr_mult×ATR.
-     One trade per day; whichever side is swept+reclaimed first wins; the trade is
-     held until TP or stop (not force-closed at session end).
+  4. Take-profit = the opposite side of the box. Stop-loss = entry ∓ atr_mult ×
+     the volatility unit. One trade per day; whichever side is swept first wins;
+     the trade is held until TP or stop (not force-closed at session end).
+
+WHEN DO WE ACTUALLY GET IN? (`entry_trigger`) — this is the real fork
+  - "reclaim" (default, the original behaviour): after the sweep we WAIT for a bar
+    to CLOSE back inside the box, then enter at the next bar's open. The close back
+    inside is the *evidence* the grab failed. Slower and you give up the best part
+    of the move, but you are not guessing.
+  - "touch": no waiting. A resting limit order sits AT the sweep level
+    (box edge ± break_depth × vol) and fills the moment price trades there —
+    entry_fill_long/short carry that exact level to the engine, gap-protected
+    against the fill bar's open. Best price, but you are now short every genuine
+    breakout too, with no confirmation that it is a grab rather than a real move.
+    Run both and let the numbers decide; that is why it is a switch.
+
+  Honest caveat on "touch": a backtest fill assumes your resting order actually
+  gets filled when price touches your price. In a fast sweep the book can run
+  straight through a resting order. break_depth > 0 mitigates this (price must
+  travel that far past the edge to reach you), but it is still the optimistic
+  assumption in this file.
+
+THE VOLATILITY UNIT (`depth_measure`) is now used for BOTH the sweep gate and the
+stop, so the strategy speaks one language:
+  - "atr"    → ATR(vol_length); break_depth and atr_mult are both in ATRs.
+  - "zscore" → rolling σ of close(vol_length); both are then in σ — the z-score
+     reading of "how abnormal is this poke". Note σ here is the std of PRICE
+     LEVELS (the same convention as vwma_reversion's bands), so in a strong trend
+     the drift inflates σ and the sweep gate tightens. That is arguably the right
+     behaviour for a fade — it stops you fading trends — but know that it is
+     happening.
+  Whichever is selected is emitted as the `atr` column, which is what drives the
+  engine's entry-relative stop. `atr_mult` is therefore a multiple of the SELECTED
+  unit, not necessarily of ATR (the param name is fixed — both engines gate their
+  native stop on a param literally called `atr_mult`).
 
 Direction is togglable (long-only / short-only / both). With long-only we only
 arm on below-sweeps, and vice-versa.
 
 Engine contract (matches vwma_reversion.py so BOTH sim loops behave the same):
-  - cond_long / cond_short   : per-bar entry conditions (fired on the reclaim bar).
+  - cond_long / cond_short   : per-bar entry conditions.
+  - entry_fill_long / _short : "touch" mode only — the exact limit level to fill at,
+                               gap-protected. Absent in "reclaim" mode, which keeps
+                               that mode byte-identical to before this option existed.
   - bar_exit_long / bar_exit_short : per-bar take-profit (close reached the box side).
-  - atr + atr_mult           : the engine's native fixed-ATR stop.
+  - atr + atr_mult           : the engine's native entry-relative stop.
 The engine owns position state; this file only emits stateless per-bar conditions
 (plus display-only entry/exit markers and the box/stop overlays).
+
+Note the TP stays deliberately conservative: it needs a bar to CLOSE at/through the
+opposite box edge, and fills at the next bar's open. A wick that tags the target
+does not book the win. That under-states results rather than over-stating them.
 
 Day boundary = UTC calendar day (time // 86400), consistent with the UTC session
 windows below. This assumes the Asia window sits earlier in the same UTC day than
@@ -92,11 +132,26 @@ class AsiaRangeBreakoutStrategy(Strategy):
                   description="Lookback for the ATR / rolling-σ used to size the sweep."),
         ParamSpec("break_depth", ParamType.FLOAT, 0.5, min=0.0, max=5.0, step=0.1, group="Sweep",
                   description="Price must poke at least this many ATR (or σ) BEYOND the "
-                              "box edge to count as a sweep. 0 = any poke past the line."),
-        # ---- Stop: fixed ATR distance (engine-native). TP is always the opposite box side.
+                              "box edge to count as a sweep. 0 = any poke past the line. "
+                              "In 'touch' mode this doubles as the limit-order level, so "
+                              "it is also how far price must travel to fill you."),
+        # ---- Entry trigger: wait for the reclaim, or take the sweep itself ----
+        ParamSpec("entry_trigger", ParamType.SELECT, "reclaim", group="Sweep",
+                  options=[
+                      {"value": "reclaim", "label": "Reclaim (close back inside box)"},
+                      {"value": "touch",   "label": "Touch (limit fill at sweep level)"},
+                  ],
+                  description="WHEN to enter after the sweep. 'reclaim' waits for a bar to "
+                              "close back inside the box — confirmation the grab failed. "
+                              "'touch' rests a limit order at the sweep level and fills the "
+                              "instant price trades there — best price, zero confirmation, "
+                              "and you also fade every genuine breakout. Test both."),
+        # ---- Stop: entry-relative, in whichever unit depth_measure selected. ----
         ParamSpec("atr_mult", ParamType.FLOAT, 5.0, min=0.5, max=10.0, step=0.5, group="Stop",
-                  description="Stop-loss distance = entry ∓ this × ATR at entry. "
-                              "Take-profit is the opposite side of the box."),
+                  description="Stop-loss distance = entry ∓ this × the VOLATILITY UNIT at "
+                              "entry — ATR or σ, whichever depth_measure selects (so on "
+                              "'zscore' this is a σ multiple, not an ATR multiple). "
+                              "Take-profit is always the opposite side of the box."),
         # ---- Direction toggle (defaults to long-only) ----
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": False},
@@ -115,7 +170,9 @@ class AsiaRangeBreakoutStrategy(Strategy):
         name="ICT Asia Range Breakout",
         description=("Fade a liquidity sweep of the Asia-session box: break below → buy, "
                      "break above → sell, target the opposite side. Sweep depth gated by "
-                     "ATR/σ; fixed-ATR stop; one trade/day; configurable sessions + sides."),
+                     "ATR/σ (z-score); enter on the reclaim OR on the touch via a limit "
+                     "fill at the sweep level; entry-relative stop in the same unit; one "
+                     "trade/day; configurable sessions + sides."),
         schema=PARAM_SCHEMA,
     )
 
@@ -151,6 +208,7 @@ class AsiaRangeBreakoutStrategy(Strategy):
         entry_mask = session_mask(ts, p["entry_session"]).to_numpy()
 
         time_a = out["time"].to_numpy(dtype=np.int64)
+        open_a = out["open"].astype(float).to_numpy()
         high_a = high.to_numpy()
         low_a = low.to_numpy()
         close_a = close.to_numpy()
@@ -161,10 +219,13 @@ class AsiaRangeBreakoutStrategy(Strategy):
         long_on = bool(sides.get("long"))
         short_on = bool(sides.get("short"))
         depth = float(p["break_depth"])
+        touch_mode = p.get("entry_trigger") == "touch"
 
         # Outputs.
         cond_long = np.zeros(n, dtype=bool)
         cond_short = np.zeros(n, dtype=bool)
+        entry_fill_long = np.full(n, np.nan)    # "touch" mode only (Option-B exact fills)
+        entry_fill_short = np.full(n, np.nan)
         box_top_disp = np.full(n, np.nan)   # per-day box for the chart overlay
         box_bot_disp = np.full(n, np.nan)
         box_top_exit = np.full(n, np.nan)   # carry-forward box that drives TP exits
@@ -193,6 +254,46 @@ class AsiaRangeBreakoutStrategy(Strategy):
 
             # Entry candidates: entry-session bars that come after the Asia box froze.
             entry_idx = post[entry_mask[post]]
+
+            if touch_mode:
+                # ---- "touch": a resting limit order sits AT the sweep level and fills
+                # the instant price trades there. `f` is the FILL bar; the order was
+                # placed on bar f-1, so every input (the box, the volatility unit) is
+                # read at f-1 — strictly causal, nothing from the fill bar leaks into
+                # the decision except whether it reached our price.
+                # f-1 >= asia_last always holds (entry_idx ⊂ bars after the box froze),
+                # so the box is guaranteed frozen at placement time.
+                for f in entry_idx:
+                    a = vol_a[f - 1]
+                    if not np.isfinite(a):
+                        continue
+                    thr = depth * a
+                    lvl_short = box_high + thr     # sell limit above the box
+                    lvl_long = box_low - thr       # buy  limit below the box
+                    o_f = open_a[f]
+                    # (side, fill, distance-from-open). Gap protection can only help a
+                    # limit: a sell limit gapped through fills HIGHER, a buy limit LOWER.
+                    cands: list[tuple[str, float, float]] = []
+                    if short_on and high_a[f] >= lvl_short:
+                        cands.append(("short", max(lvl_short, o_f), max(0.0, lvl_short - o_f)))
+                    if long_on and low_a[f] <= lvl_long:
+                        cands.append(("long", min(lvl_long, o_f), max(0.0, o_f - lvl_long)))
+                    if cands:
+                        # Both levels tagged in one bar → the one NEARER the open fills
+                        # first (price must travel there). Ties go short, mirroring
+                        # orb_crypto_5day_halfrange's tiebreak convention.
+                        cands.sort(key=lambda x: x[2])
+                        side, fill, _ = cands[0]
+                        if side == "short":
+                            cond_short[f - 1] = True
+                            entry_fill_short[f - 1] = fill
+                        else:
+                            cond_long[f - 1] = True
+                            entry_fill_long[f - 1] = fill
+                        break
+                continue
+
+            # ---- "reclaim" (default): sweep, then wait for a close back inside ----
             locked = None            # 'long' | 'short' — first enabled sweep locks the day
             swept_below = swept_above = False
             for i in entry_idx:
@@ -238,7 +339,8 @@ class AsiaRangeBreakoutStrategy(Strategy):
         exit_short = np.zeros(n, dtype=bool)
         stop_price = np.full(n, np.nan)
         atr_mult = float(p["atr_mult"])
-        atr_a = atr.to_numpy()
+        # The stop rides the SELECTED volatility unit, same as the sweep gate.
+        atr_a = vol_a
 
         pos = 0
         entry_p = np.nan
@@ -267,7 +369,10 @@ class AsiaRangeBreakoutStrategy(Strategy):
             if pos == 0:
                 if cond_long[t - 1]:
                     pos = 1
-                    entry_p = float(close_a[t])   # marker/stop reference ≈ fill
+                    # Touch mode knows its exact fill; reclaim mode approximates with
+                    # the close (the engine still fills at bar t's open either way).
+                    entry_p = (float(entry_fill_long[t - 1])
+                               if np.isfinite(entry_fill_long[t - 1]) else float(close_a[t]))
                     atr_at_entry = atr_a[t - 1] if np.isfinite(atr_a[t - 1]) else np.nan
                     entry_long[t] = True
                     if np.isfinite(atr_at_entry):
@@ -275,7 +380,8 @@ class AsiaRangeBreakoutStrategy(Strategy):
                         stop_price[t] = cur_stop
                 elif cond_short[t - 1]:
                     pos = -1
-                    entry_p = float(close_a[t])
+                    entry_p = (float(entry_fill_short[t - 1])
+                               if np.isfinite(entry_fill_short[t - 1]) else float(close_a[t]))
                     atr_at_entry = atr_a[t - 1] if np.isfinite(atr_a[t - 1]) else np.nan
                     entry_short[t] = True
                     if np.isfinite(atr_at_entry):
@@ -292,7 +398,15 @@ class AsiaRangeBreakoutStrategy(Strategy):
         out["cond_short"] = cond_short
         out["bar_exit_long"] = bar_exit_long
         out["bar_exit_short"] = bar_exit_short
-        out["atr"] = atr   # enables the engine's fixed-ATR stop (with atr_mult)
+        # Enables the engine's entry-relative stop (with atr_mult). We publish the
+        # SELECTED unit (ATR or σ) so the stop and the sweep gate share one ruler.
+        out["atr"] = vol_unit
+        # Option-B exact entry fills — "touch" mode ONLY. Emitting these columns also
+        # forces the engines onto the honest t-1 signal path, so we deliberately leave
+        # them off in "reclaim" mode to keep that mode identical to before.
+        if touch_mode:
+            out["entry_fill_long"] = entry_fill_long
+            out["entry_fill_short"] = entry_fill_short
         # Overlay columns.
         out["box_top_disp"] = box_top_disp
         out["box_bot_disp"] = box_bot_disp
@@ -306,6 +420,8 @@ class AsiaRangeBreakoutStrategy(Strategy):
           cur_day        UTC day the box belongs to
           box_high/low   frozen Asia box for cur_day (None until Asia bars seen)
           locked         'long'|'short'|None — first enabled sweep locks the day
+                         (reclaim mode only; touch mode needs no lock, the sweep IS
+                         the entry, so done_today alone caps it at one trade/day)
           swept_below/above, done_today
           pos, entry_p, atr_at_entry, box_high_at_entry, box_low_at_entry
 
@@ -423,6 +539,33 @@ class AsiaRangeBreakoutStrategy(Strategy):
             return None
 
         thr = float(p["break_depth"]) * a
+
+        # ---- "touch": fire on the first closed bar whose WICK reached the level ----
+        if p.get("entry_trigger") == "touch":
+            lvl_short = box_high + thr
+            lvl_long = box_low - thr
+            o = float(candle["open"])
+            # Live cannot rest a limit order and learn its fill mid-bar — we only see a
+            # bar once it has closed. So we signal here and report the price we can
+            # actually transact at NOW (this bar's close), not the level the backtest
+            # fills at. That is the known seam for this mode: the backtest fills at the
+            # sweep level, live fills late and worse. A real deployment should push an
+            # actual resting limit order to the broker instead of reacting to closes.
+            cands = []
+            if short_on and hi >= lvl_short:
+                cands.append(("short", max(0.0, lvl_short - o)))
+            if long_on and lo <= lvl_long:
+                cands.append(("long", max(0.0, o - lvl_long)))
+            if cands:
+                cands.sort(key=lambda x: x[1])   # nearest the open fills first; ties short
+                side = cands[0][0]
+                state.update({"pos": 1 if side == "long" else -1, "entry_p": c,
+                              "atr_at_entry": a, "box_high_at_entry": box_high,
+                              "box_low_at_entry": box_low, "done_today": True})
+                return Signal(side=side, kind="entry", price=c, time=ts, reason="sweep_touch")
+            return None
+
+        # ---- "reclaim" (default): sweep, then wait for a close back inside ----
         if lo < box_low and (box_low - lo) >= thr:
             state["swept_below"] = True
         if hi > box_high and (hi - box_high) >= thr:
