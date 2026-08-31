@@ -236,6 +236,48 @@ export default function Downloads() {
     return datasets.filter((d) => (d.asset_class || "crypto") === tab.id);
   }, [datasets, tab.id, tab.broker]);
 
+  // ---- search + pagination over the cached-datasets table -------------------
+  const PAGE_SIZE = 10;
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+
+  // Match on symbol, timeframe or broker so "check this asset exists" works
+  // whether you type OPUSDT, 15m, or binance.
+  const matchesQuery = (d, q) =>
+    `${d.symbol} ${d.timeframe} ${d.broker || "binance"}`.toLowerCase().includes(q);
+
+  const filteredDatasets = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q ? tabDatasets.filter((d) => matchesQuery(d, q)) : tabDatasets;
+  }, [tabDatasets, query]);
+
+  // Same search run against the OTHER tabs, using each tab's own membership
+  // rule — so a symbol cached under a different asset class still gets found
+  // instead of reading as "doesn't exist".
+  const otherTabHits = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return TABS
+      .filter((t) => t.id !== tab.id && t.enabled)
+      .map((t) => {
+        const inTab = (t.broker === "tradestation" || t.broker === "yahoo")
+          ? datasets.filter((d) => d.broker === t.broker)
+          : datasets.filter((d) => (d.asset_class || "crypto") === t.id);
+        return { id: t.id, label: t.label, n: inTab.filter((d) => matchesQuery(d, q)).length };
+      })
+      .filter((h) => h.n > 0);
+  }, [datasets, query, tab.id]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredDatasets.length / PAGE_SIZE));
+  // Clamp rather than store — after a delete or a new filter the stored page can
+  // point past the end, which would render an empty table.
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const pageRows = useMemo(
+    () => filteredDatasets.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [filteredDatasets, safePage],
+  );
+  useEffect(() => { setPage(1); }, [tab.id, query]);
+
   // Per-asset-class counts for the tab badges.
   const countsByClass = useMemo(() => {
     const c = {};
@@ -574,9 +616,73 @@ export default function Downloads() {
 
         {/* Filtered datasets table */}
         <section>
-          <h2 className="text-sm uppercase tracking-wider text-muted mb-3">
-            Cached {tab.label.toLowerCase()} datasets ({tabDatasets.length})
-          </h2>
+          <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
+            <h2 className="text-sm uppercase tracking-wider text-muted">
+              Cached {tab.label.toLowerCase()} datasets ({filteredDatasets.length}
+              {query.trim() && filteredDatasets.length !== tabDatasets.length && ` of ${tabDatasets.length}`})
+            </h2>
+            <div className="relative">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search asset — symbol, TF or broker"
+                aria-label="Search cached datasets"
+                className="w-72 max-w-full pl-3 pr-8 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-xs focus:outline-none focus:border-accent-blue"
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery("")}
+                  aria-label="Clear search"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded text-muted hover:text-text hover:bg-bg-panel transition leading-none"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </div>
+
+          {query.trim() && filteredDatasets.length === 0 && (
+            <div className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/5 px-4 py-2.5 text-xs">
+              <span className="font-mono text-amber-400">{query.trim().toUpperCase()}</span>
+              <span className="text-muted"> is not cached under {tab.label}.</span>
+              {otherTabHits.length > 0 && (
+                <span className="text-muted">
+                  {" "}Found in{" "}
+                  {otherTabHits.map((h, i) => (
+                    <span key={h.id}>
+                      {i > 0 && ", "}
+                      <button
+                        onClick={() => setActiveTabId(h.id)}
+                        className="text-accent-blue hover:underline"
+                      >
+                        {h.label} ({h.n})
+                      </button>
+                    </span>
+                  ))}
+                  .
+                </span>
+              )}
+              {otherTabHits.length === 0 && (
+                <span className="text-muted"> Not cached under any other asset class either — download it with the form above.</span>
+              )}
+            </div>
+          )}
+
+          {query.trim() && filteredDatasets.length > 0 && otherTabHits.length > 0 && (
+            <div className="mb-3 text-[11px] text-muted">
+              Also matches in{" "}
+              {otherTabHits.map((h, i) => (
+                <span key={h.id}>
+                  {i > 0 && ", "}
+                  <button onClick={() => setActiveTabId(h.id)} className="text-accent-blue hover:underline">
+                    {h.label} ({h.n})
+                  </button>
+                </span>
+              ))}
+              .
+            </div>
+          )}
+
           <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
             <table className="w-full text-sm">
               <thead className="text-xs uppercase tracking-wider text-muted bg-bg-elev/40">
@@ -592,14 +698,16 @@ export default function Downloads() {
                 </tr>
               </thead>
               <tbody>
-                {tabDatasets.length === 0 && (
+                {pageRows.length === 0 && (
                   <tr>
                     <td colSpan={8} className="px-4 py-6 text-center text-muted text-xs">
-                      no {tab.label.toLowerCase()} datasets yet — use the form above
+                      {query.trim()
+                        ? `no ${tab.label.toLowerCase()} datasets match "${query.trim()}"`
+                        : `no ${tab.label.toLowerCase()} datasets yet — use the form above`}
                     </td>
                   </tr>
                 )}
-                {tabDatasets.map((d) => (
+                {pageRows.map((d) => (
                   <tr key={`${d.broker}_${d.symbol}_${d.timeframe}`} className="border-t border-line/60 hover:bg-bg-elev/30">
                     <td className="px-4 py-2 font-mono">{d.symbol}</td>
                     <td className="px-4 py-2 font-mono">{d.timeframe}</td>
@@ -622,6 +730,44 @@ export default function Downloads() {
                 ))}
               </tbody>
             </table>
+
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-t border-line/60 bg-bg-elev/20">
+                <span className="text-[11px] font-mono text-muted">
+                  {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filteredDatasets.length)} of {filteredDatasets.length}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setPage(safePage - 1)}
+                    disabled={safePage <= 1}
+                    className="px-2.5 py-1 rounded-md border border-line text-xs font-mono text-muted hover:text-text hover:border-muted transition disabled:opacity-40 disabled:hover:text-muted disabled:hover:border-line"
+                  >
+                    ‹ Prev
+                  </button>
+                  {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPage(p)}
+                      aria-current={p === safePage ? "page" : undefined}
+                      className={`min-w-[1.9rem] px-2 py-1 rounded-md border text-xs font-mono transition ${
+                        p === safePage
+                          ? "border-accent-blue/60 bg-accent-blue/15 text-accent-blue"
+                          : "border-line text-muted hover:text-text hover:border-muted"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => setPage(safePage + 1)}
+                    disabled={safePage >= totalPages}
+                    className="px-2.5 py-1 rounded-md border border-line text-xs font-mono text-muted hover:text-text hover:border-muted transition disabled:opacity-40 disabled:hover:text-muted disabled:hover:border-line"
+                  >
+                    Next ›
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </section>
       </main>
