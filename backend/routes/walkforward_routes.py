@@ -36,7 +36,12 @@ def start_job():
             "metric":      body.get("metric"),
             "embargo_bars": body.get("embargo_bars"),
             "purge_radius": body.get("purge_radius"),
-            "sessions_cfg": body.get("sessions_cfg"),
+            # Minimum IS trades a trial needs before it may WIN a window. The
+            # spec normalizer defaults it to 1, which only blocks configs that
+            # never fire; raise it to make each window's pick rest on a real
+            # sample instead of a handful of lucky trades.
+            "min_trades": body.get("min_trades"),
+            "warmup_bars": body.get("warmup_bars"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")
@@ -98,7 +103,12 @@ def robustness_start():
             "metric":      body.get("metric"),
             "embargo_bars": body.get("embargo_bars"),
             "purge_radius": body.get("purge_radius"),
-            "sessions_cfg": body.get("sessions_cfg"),
+            # Minimum IS trades a trial needs before it may WIN a window. The
+            # spec normalizer defaults it to 1, which only blocks configs that
+            # never fire; raise it to make each window's pick rest on a real
+            # sample instead of a handful of lucky trades.
+            "min_trades": body.get("min_trades"),
+            "warmup_bars": body.get("warmup_bars"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")

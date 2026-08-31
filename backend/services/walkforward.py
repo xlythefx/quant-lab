@@ -220,8 +220,22 @@ def _normalize_spec(spec: dict) -> dict:
         # trade_start_time) so rolling indicators are valid from the window's
         # first bar instead of NaN. Without it, every window started cold and
         # strategies with lookback >= oos_bars produced no OOS signals at all.
-        "warmup_bars": max(0, int(spec.get("warmup_bars") or 200)),
-        "sessions_cfg": spec.get("sessions_cfg") or None,
+        "warmup_bars": max(0, int(spec["warmup_bars"]) if spec.get("warmup_bars") is not None else 200),
+        # Minimum IS trades for a trial to be eligible. Default 1 is a bug fix,
+        # not a policy: `_score_from_stats` maps a missing stat to 0.0, and a
+        # config that never trades has sharpe=None (flat equity → zero vol), so
+        # it scored 0.0 — beating every LOSING config. On a bad IS window the
+        # optimizer's argmax was therefore "params that don't fire", and that set
+        # is what got recommended. Trials below this are PRUNED (not scored), so
+        # they also stay out of the plateau / deflated-Sharpe statistics.
+        #
+        # 1 only stops the "never fires" pathology. It does NOT stop selection on
+        # a handful of lucky trades — measured on OPUSDT 15m / vwma_reversion,
+        # the median winning config was chosen on 9 IS trades and 82/100 windows
+        # picked on fewer than 20. Set this to ~30 if you want each window's pick
+        # to rest on a real sample; windows that then report no eligible config
+        # are telling you the truth rather than inventing a winner.
+        "min_trades": max(0, int(spec["min_trades"]) if spec.get("min_trades") is not None else 1),
     }
     if not out["strategy_id"]:
         raise ValueError("strategy_id is required")
@@ -255,7 +269,12 @@ def _optimize_window_pure(spec: dict, is_warm_start: int, is_start: int, is_end:
     run in a worker process. `on_trial(trial_idx, score, best_score)` reports
     progress; `cancel_check()->bool` stops the study early. Trials are sequential
     within a window (n_jobs=1) — window-level parallelism comes from running many
-    of these across processes, which keeps each window's result reproducible."""
+    of these across processes, which keeps each window's result reproducible.
+
+    Returns (best_params, best_score, trial_records, audit). `best_score` is None
+    when no trial cleared `min_trades` — an honest "this window had no eligible
+    config" rather than a manufactured winner.
+    """
     s = spec
     track = {"i": 0, "best": None}
 
@@ -279,12 +298,25 @@ def _optimize_window_pure(spec: dict, is_warm_start: int, is_start: int, is_end:
         result = backtest_engine.run(
             s["strategy_id"], s["symbol"], s["timeframe"],
             params, start_time=is_warm_start, end_time=is_end, trade_start_time=is_start)
-        score = _score_from_stats(_window_stats(result, is_start), s["metric"])
+        w_stats = _window_stats(result, is_start)
+        score = _score_from_stats(w_stats, s["metric"])
+        n_trades = int(w_stats.get("trades") or 0)
+        eligible = n_trades >= int(s.get("min_trades") or 0)
         track["i"] += 1
-        if track["best"] is None or score > track["best"]:
+        if eligible and (track["best"] is None or score > track["best"]):
             track["best"] = score
         if on_trial:
+            # Report the score either way so the progress bar reflects real work;
+            # eligibility decides whether the trial can WIN, not whether it ran.
             on_trial(track["i"], score, track["best"])
+        if not eligible:
+            # Pruned, not scored — keeps a do-nothing config out of both the
+            # argmax and the trial-value statistics downstream.
+            raise optuna.TrialPruned()
+        # How thin a sample this score rests on. Carried to the window summary so
+        # the UI can say "chosen on N trades" instead of letting an annualized
+        # Sharpe imply the number came from a real sample.
+        trial.set_user_attr("n_trades", n_trades)
         return score
 
     def stop_if_cancelled(study: optuna.Study, _trial) -> None:
@@ -298,15 +330,25 @@ def _optimize_window_pure(spec: dict, is_warm_start: int, is_start: int, is_end:
     except optuna.TrialPruned:
         pass
 
-    if not study.trials or study.best_trial is None:
-        return dict(s["base_params"]), None, []
+    # Read the winner off the COMPLETE trials rather than `study.best_trial`,
+    # which RAISES when every trial was pruned (all below min_trades, or a
+    # cancelled study) instead of returning None.
+    completed = [t for t in study.trials
+                 if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
+    n_pruned = sum(1 for t in study.trials if t.state == optuna.trial.TrialState.PRUNED)
+    if not completed:
+        return (dict(s["base_params"]), None, [],
+                {"n_eligible": 0, "n_pruned": n_pruned, "best_trades": None})
+    best_trial = max(completed, key=lambda t: float(t.value))
     best_params = dict(s["base_params"])
-    best_params.update(study.best_params)
-    trial_records = [
-        {"params": t.params, "value": (float(t.value) if t.value is not None else None)}
-        for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
-    ]
-    return best_params, study.best_value, trial_records
+    best_params.update(best_trial.params)
+    trial_records = [{"params": t.params, "value": float(t.value)} for t in completed]
+    audit = {
+        "n_eligible": len(completed),
+        "n_pruned": n_pruned,
+        "best_trades": best_trial.user_attrs.get("n_trades"),
+    }
+    return best_params, float(best_trial.value), trial_records, audit
 
 
 def _task_payload(spec: dict, w: dict) -> dict:
@@ -317,6 +359,15 @@ def _task_payload(spec: dict, w: dict) -> dict:
         "is_warm_start": w["is_warm_start"], "is_start": w["is_start"], "is_end": w["is_end"],
         "oos_warm_start": w["oos_warm_start"], "oos_start": w["oos_start"], "oos_end": w["oos_end"],
     }
+
+
+def _eval_oos(spec: dict, params: dict, payload: dict) -> dict:
+    """Run one window's OOS slice with a given param set (warm-started, entries
+    before oos_start masked)."""
+    return backtest_engine.run(
+        spec["strategy_id"], spec["symbol"], spec["timeframe"], params,
+        start_time=payload["oos_warm_start"], end_time=payload["oos_end"],
+        trade_start_time=payload["oos_start"])
 
 
 def _optimize_and_eval_task(payload: dict, progress_q, cancel_event) -> dict:
@@ -338,17 +389,19 @@ def _optimize_and_eval_task(payload: dict, progress_q, cancel_event) -> dict:
         except Exception:
             return False
 
-    best_params, is_score, optuna_trials = _optimize_window_pure(
+    best_params, is_score, optuna_trials, audit = _optimize_window_pure(
         spec, payload["is_warm_start"], payload["is_start"], payload["is_end"],
         on_trial=on_trial, cancel_check=cancel_check)
     if cancel_check():
         return {"w_idx": w_idx, "cancelled": True}
-    oos_result = backtest_engine.run(
-        spec["strategy_id"], spec["symbol"], spec["timeframe"], best_params,
-        start_time=payload["oos_warm_start"], end_time=payload["oos_end"],
-        trade_start_time=payload["oos_start"])
+    oos_result = _eval_oos(spec, best_params, payload)
+    # Control arm: the SAME window traded with the untuned base params. One extra
+    # backtest per window (against n_trials for the search) buys the only honest
+    # answer to "did tuning help?" — see WalkForwardJob._tuning_value.
+    control_result = _eval_oos(spec, dict(spec["base_params"]), payload)
     return {"w_idx": w_idx, "best_params": best_params, "is_score": is_score,
-            "optuna_trials": optuna_trials, "oos_result": oos_result}
+            "optuna_trials": optuna_trials, "oos_result": oos_result,
+            "control_result": control_result, "audit": audit}
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +467,7 @@ class WalkForwardJob:
             "job_id": self.job_id,
             "spec": {k: self.spec[k] for k in (
                 "strategy_id", "symbol", "timeframe", "is_bars", "oos_bars",
-                "n_trials", "metric",
+                "n_trials", "metric", "min_trades",
             )},
             "window_idx": self.window_idx,
             "total_windows": self.total_windows,
@@ -697,11 +750,19 @@ class WalkForwardJob:
         # quant_metrics module can compute parameter stability, deflated
         # Sharpe, and walk-forward efficiency.
         all_trials: list[dict] = []
+        per_window_trials: list[list] = []
+        window_picks: list[dict] = []
         window_pairs: list[dict] = []
         best_oos_sharpe: Optional[float] = None
         for w in self.window_summaries:
-            for tr in (w.get("optuna_trials") or []):
-                all_trials.append(tr)
+            w_trials = w.get("optuna_trials") or []
+            all_trials.extend(w_trials)
+            window_picks.append(dict(w.get("best_params") or {}))
+            # Grouped per window as well: the parameter-plateau score measures
+            # flatness AROUND EACH WINDOW'S OWN WINNER, which the pooled list
+            # can't express (trials from different windows aren't comparable —
+            # scores depend on that window's market regime, not just its params).
+            per_window_trials.append(w_trials)
             oos_stats = w.get("oos_stats") or {}
             # Preserve None (window Sharpe not computable) — coercing to 0.0
             # would count the window as "flat" in robustness denominators.
@@ -716,6 +777,9 @@ class WalkForwardJob:
                 best_oos_sharpe = oos_sharpe
         wf_trials = {
             "optuna_trials": all_trials,
+            "window_trials": per_window_trials,
+            "search_space": s["search_space"],
+            "window_picks": window_picks,
             "window_pairs": window_pairs,
             "best_sharpe_oos": best_oos_sharpe,
             # The IS optimization metric — deflated Sharpe / WFE are only
@@ -731,7 +795,11 @@ class WalkForwardJob:
             analytics = backtest_engine._compute_analytics(
                 stitched_trades, stitched_equity_pts, sig_df, strategy, starting_capital,
                 wf_trials=wf_trials,
-                sessions_cfg_override=s.get("sessions_cfg"),
+                # No sessions_cfg override: the WF page no longer carries a
+                # hand-maintained session config. _compute_analytics falls back
+                # to the strategy's own `sessions` param, so any session
+                # breakdown it produces describes what actually traded rather
+                # than a label set that could drift out of sync.
             )
         else:
             _empty = backtest_engine._empty_result(s["strategy_id"], s["symbol"], s["timeframe"], rc)
@@ -746,12 +814,17 @@ class WalkForwardJob:
             rc.get("slippage_bps", 0.0),
         )
 
+        deploy_candidate = self._build_deploy_candidate(windows)
+        tuning_value = self._tuning_value()
+
         result = {
             "strategy_id": s["strategy_id"],
             "symbol": s["symbol"],
             "timeframe": s["timeframe"],
             "risk_config": rc,
             "params": ref_params,
+            "deploy_candidate": deploy_candidate,
+            "tuning_value": tuning_value,
             "wf_spec": {
                 "is_bars": s["is_bars"],
                 "oos_bars": s["oos_bars"],
@@ -763,6 +836,8 @@ class WalkForwardJob:
                 "end_time": s["end_time"],
                 "embargo_bars": s["embargo_bars"],
                 "purge_radius": s["purge_radius"],
+                "min_trades": s["min_trades"],
+                "warmup_bars": s["warmup_bars"],
             },
             "windows": self.window_summaries,
             # Empty candles/overlays: WFA result reuses analytics UI, not the
@@ -782,6 +857,188 @@ class WalkForwardJob:
             _last_result = result
         self._emit("wf_complete", {"result": result})
 
+    # ---- did tuning beat NOT tuning? --------------------------------------
+
+    def _tuning_value(self) -> Optional[dict]:
+        """The control experiment, run inline: per window, the OOS result of the
+        TUNED pick against the SAME window traded with the untuned base_params.
+
+        This is the one number that says whether the optimization step earns its
+        keep. Everything else in the report — stitched curve, WFE, green rate,
+        deflated Sharpe — is measured only on the tuned arm, so all of it looks
+        identical whether the search found a real optimum or sampled noise.
+
+        Measured on OPUSDT 15m / vwma_reversion (100 windows, IS=2000, OOS=500,
+        50 trials): the tuned arm compounded to -2.84% while the untouched
+        defaults made +1.43%, the tuned arm produced zero trades in 26 windows
+        against 0 for the defaults, and corr(IS score, OOS Sharpe) was -0.058.
+        The search was actively harmful and nothing else in the report showed it.
+
+        Returns None when no window carried a control arm.
+        """
+        rows = [w for w in self.window_summaries if w.get("control_stats")]
+        if not rows:
+            return None
+
+        def _side(key: str) -> dict:
+            stats = [(w["oos_stats"] if key == "tuned" else w["control_stats"]) for w in rows]
+            compounded = 1.0
+            for st in stats:
+                compounded *= (1.0 + float(st.get("total_return_pct") or 0.0) / 100.0)
+            sharpes = [float(st["sharpe"]) for st in stats
+                       if st.get("sharpe") is not None and math.isfinite(float(st["sharpe"]))]
+            return {
+                "compounded_return_pct": (compounded - 1.0) * 100.0,
+                "windows_green": sum(1 for st in stats
+                                     if float(st.get("total_return_pct") or 0.0) > 0),
+                "windows_zero_trade": sum(1 for st in stats if int(st.get("trades") or 0) == 0),
+                # Averaged only over windows that actually traded — the two arms
+                # skip different windows, so this is NOT a like-for-like compare.
+                # `compounded_return_pct` and the zero-trade counts are.
+                "mean_sharpe": float(np.mean(sharpes)) if sharpes else None,
+                "n_sharpe": len(sharpes),
+            }
+
+        # Does a high in-sample score predict the next window at all? ~0 means the
+        # tuning carries no information about what happens next.
+        pairs = [(w.get("is_score"), (w.get("oos_stats") or {}).get("sharpe")) for w in rows]
+        pairs = [(float(a), float(b)) for a, b in pairs
+                 if a is not None and b is not None
+                 and math.isfinite(float(a)) and math.isfinite(float(b))]
+        corr = None
+        if len(pairs) >= 4:
+            a = np.asarray([p[0] for p in pairs]); b = np.asarray([p[1] for p in pairs])
+            if a.std() > 1e-12 and b.std() > 1e-12:
+                corr = float(np.corrcoef(a, b)[0, 1])
+
+        # How thin a sample each window's winner was chosen on.
+        picked_on = [int(w["best_trades"]) for w in rows
+                     if isinstance(w.get("best_trades"), (int, float))]
+
+        tuned = _side("tuned")
+        control = _side("control")
+        return {
+            "n_windows": len(rows),
+            "tuned": tuned,
+            "control": control,
+            "tuning_edge_pct": tuned["compounded_return_pct"] - control["compounded_return_pct"],
+            "is_oos_correlation": corr,
+            "median_is_trades_behind_pick": (float(np.median(picked_on)) if picked_on else None),
+            "windows_picked_on_thin_sample": sum(1 for n in picked_on if n < 20),
+            "n_picked_on_known": len(picked_on),
+        }
+
+    # ---- deploy candidate --------------------------------------------------
+
+    def _build_deploy_candidate(self, windows: list) -> Optional[dict]:
+        """One fixed parameter set you could actually deploy — with its real number.
+
+        Walk-forward validates a PROCEDURE ("re-optimize every N bars and trade
+        the result"). Its stitched OOS curve, WFE and per-window green rate are
+        evidence about that procedure, not about any single parameter set. So
+        naming one set "recommended" on the strength of those numbers is a
+        category error — and the set previously named that way was the worst
+        possible choice: the argmax of one in-sample window, never validated.
+
+        Instead: take the MEDIAN of each tuned param across every window (a value
+        the windows agree on, rather than one window's lucky pick), then BACKTEST
+        that set over the combined out-of-sample span and report what it actually
+        did. Two contrasts sit beside it on the same span — the last window's pick
+        (what this box used to recommend) and the untuned baseline (what you'd get
+        by not running any of this).
+
+        Caveat the box cannot fix: the median is taken per-parameter and
+        independently, so on a strategy whose params interact it can synthesize a
+        combination no window ever chose. `agreement[*].spread` is the tell — a
+        spread near 0.289 is what UNIFORM RANDOM draws over the range produce, so
+        at or above that the windows agreed on nothing and the median is an
+        average of noise.
+
+        Honesty note carried to the UI: this span is out-of-sample relative to
+        each window's tuning, but it is not virgin data — you have now looked at
+        it. The locked holdout is still the only untouched test.
+
+        Returns None when there is nothing to summarize; never raises.
+        """
+        s = self.spec
+        summaries = self.window_summaries
+        tuned = [e["name"] for e in (s["search_space"] or [])]
+        if not summaries or not tuned:
+            return None
+        try:
+            types = {e["name"]: e.get("type") for e in s["search_space"]}
+            # Search range per param — the denominator that makes a spread
+            # comparable across params measured in different units.
+            spans = {}
+            for e in s["search_space"]:
+                width = float(e["high"]) - float(e["low"])
+                spans[e["name"]] = width if width > 0 else None
+            warm_by_start = {w["oos_start"]: w["oos_warm_start"] for w in windows}
+
+            consensus = dict(s["base_params"])
+            agreement: dict[str, dict] = {}
+            for name in tuned:
+                vals = [w["best_params"][name] for w in summaries
+                        if isinstance(w.get("best_params", {}).get(name), (int, float))
+                        and not isinstance(w["best_params"][name], bool)]
+                if not vals:
+                    continue
+                med = float(np.median(vals))
+                consensus[name] = int(round(med)) if types.get(name) == "int" else med
+                span = spans.get(name)
+                agreement[name] = {
+                    "value": consensus[name],
+                    "picks": vals,
+                    "min": float(min(vals)),
+                    "max": float(max(vals)),
+                    # Spread of the windows' picks as a fraction of the search
+                    # range: 0 = every window landed on the same value, so the
+                    # median is a value the data agrees on. 0.289 is the value a
+                    # UNIFORM RANDOM draw produces — at or above it, the search
+                    # found nothing.
+                    "spread": (float(np.std(vals)) / span) if span else None,
+                }
+
+            oos_start = int(summaries[0]["oos_start"])
+            oos_end = int(summaries[-1]["oos_end"])
+            warm_start = int(warm_by_start.get(oos_start, oos_start))
+
+            def _evaluate(params: dict) -> Optional[dict]:
+                res = backtest_engine.run(
+                    s["strategy_id"], s["symbol"], s["timeframe"], params,
+                    start_time=warm_start, end_time=oos_end, trade_start_time=oos_start)
+                return _window_stats(res, oos_start)
+
+            last_params = dict(summaries[-1].get("best_params") or {})
+            return {
+                "params": consensus,
+                "tuned": {n: consensus[n] for n in tuned if n in consensus},
+                "stats": _evaluate(consensus),
+                "agreement": agreement,
+                "oos_start": oos_start,
+                "oos_end": oos_end,
+                "n_windows": len(summaries),
+                # The old "recommended" set, scored on the same span for contrast.
+                "last_window": {
+                    "window_idx": summaries[-1].get("window_idx"),
+                    "params": last_params,
+                    "tuned": {n: last_params[n] for n in tuned if n in last_params},
+                    "stats": _evaluate(last_params) if last_params else None,
+                },
+                # The untuned baseline on the same span. If this beats both of the
+                # sets above, the whole search cost you money.
+                "baseline": {
+                    "params": dict(s["base_params"]),
+                    "tuned": {n: s["base_params"][n] for n in tuned if n in s["base_params"]},
+                    "stats": _evaluate(dict(s["base_params"])),
+                },
+            }
+        except Exception:
+            # A deploy candidate is a nice-to-have summary — never let it take
+            # down a walk-forward run that otherwise completed.
+            log.exception("deploy candidate evaluation failed")
+            return None
+
     # ---- window execution -------------------------------------------------
 
     def _finalize_window(self, w: dict, r: dict, df, bars_per_year: float) -> None:
@@ -796,6 +1053,7 @@ class WalkForwardJob:
         extras = _fold_extras(df, w["oos_idx"], oos_result, rng_w, bars_per_year,
                               oos_start_ts=w["oos_start"])
         is_score = r["is_score"]
+        audit = r.get("audit") or {}
         summary = {
             "window_idx": w["w_idx"] + 1,
             "is_start": w["is_start"],
@@ -807,8 +1065,18 @@ class WalkForwardJob:
             # In-window stats only (warm-up bars excluded — see _window_stats).
             "oos_stats": _window_stats(oos_result, w["oos_start"]),
             "optuna_trials": r["optuna_trials"],
+            # How many IS trades the winning config was chosen on, plus how many
+            # trials never cleared min_trades. A pick resting on a handful of
+            # trades is noise no matter how good its annualized Sharpe looks.
+            "best_trades": audit.get("best_trades"),
+            "n_eligible_trials": audit.get("n_eligible"),
+            "n_pruned_trials": audit.get("n_pruned"),
             **extras,
         }
+        control = r.get("control_result")
+        if control is not None:
+            # Same window, untuned params — the control arm for _tuning_value.
+            summary["control_stats"] = _window_stats(control, w["oos_start"])
         self.window_summaries.append(summary)
         self._emit("wf_window_done", {"window": summary})
 
@@ -836,17 +1104,17 @@ class WalkForwardJob:
                     "current_score": score,
                 })
 
-            best_params, is_score, optuna_trials = _optimize_window_pure(
+            best_params, is_score, optuna_trials, audit = _optimize_window_pure(
                 s, w["is_warm_start"], w["is_start"], w["is_end"],
                 on_trial=on_trial, cancel_check=lambda: self.cancel_flag)
             if self.cancel_flag:
                 break
-            oos_result = backtest_engine.run(
-                s["strategy_id"], s["symbol"], s["timeframe"], best_params,
-                start_time=w["oos_warm_start"], end_time=w["oos_end"],
-                trade_start_time=w["oos_start"])
+            payload = _task_payload(s, w)
+            oos_result = _eval_oos(s, best_params, payload)
+            control_result = _eval_oos(s, dict(s["base_params"]), payload)
             r = {"w_idx": w["w_idx"], "best_params": best_params, "is_score": is_score,
-                 "optuna_trials": optuna_trials, "oos_result": oos_result}
+                 "optuna_trials": optuna_trials, "oos_result": oos_result,
+                 "control_result": control_result, "audit": audit}
             results[w["w_idx"]] = r
             self._finalize_window(w, r, df, bars_per_year)
         self.active_workers = 0

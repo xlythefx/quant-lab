@@ -253,21 +253,48 @@ function ParamRow({ spec, baseValue, searchEntry, onSetBase, onToggleSearch, onS
           </label>
         </div>
       ) : spec.type === "sessions" ? (
-        <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] font-mono">
+        // Start/end are EDITABLE here. They used to be read-only text, which
+        // meant the only place you could type a custom session window was the
+        // page-level "Sessions (UTC)" panel — and that one is report-labelling
+        // only, so it never reached the engine. This is the real entry filter:
+        // the strategy masks entries with session_mask(ts, p["sessions"]).
+        <div className="mt-2 space-y-1 text-[11px] font-mono">
           {Object.entries(baseValue || {}).map(([name, cfg]) => (
-            <label key={name} className="flex items-center gap-2 text-muted">
+            <div key={name} className="flex items-center gap-2 text-muted">
               <input
                 type="checkbox"
                 checked={!!cfg?.enabled}
                 onChange={(e) =>
                   onSetBase({ ...(baseValue || {}), [name]: { ...(cfg || {}), enabled: e.target.checked } })
                 }
-                className="accent-accent-blue"
+                className="accent-accent-blue shrink-0"
               />
-              <span className={cfg?.enabled ? "text-text" : ""}>{name}</span>
-              <span className="text-muted/60">{cfg?.start}–{cfg?.end}</span>
-            </label>
+              <span className={`w-16 shrink-0 truncate ${cfg?.enabled ? "text-text" : ""}`} title={name}>{name}</span>
+              <input
+                type="time"
+                value={cfg?.start ?? ""}
+                disabled={!cfg?.enabled}
+                onChange={(e) =>
+                  onSetBase({ ...(baseValue || {}), [name]: { ...(cfg || {}), start: e.target.value } })
+                }
+                className="px-1.5 py-0.5 rounded bg-bg border border-line font-mono text-[11px] focus:outline-none focus:border-accent-blue disabled:opacity-40"
+              />
+              <span className="text-muted/50">–</span>
+              <input
+                type="time"
+                value={cfg?.end ?? ""}
+                disabled={!cfg?.enabled}
+                onChange={(e) =>
+                  onSetBase({ ...(baseValue || {}), [name]: { ...(cfg || {}), end: e.target.value } })
+                }
+                className="px-1.5 py-0.5 rounded bg-bg border border-line font-mono text-[11px] focus:outline-none focus:border-accent-blue disabled:opacity-40"
+              />
+              <span className="text-muted/40 text-[10px]">UTC</span>
+            </div>
           ))}
+          <div className="text-[10px] text-muted/60 pt-0.5">
+            These windows gate entries — this is what the strategy actually trades.
+          </div>
         </div>
       ) : null}
     </div>

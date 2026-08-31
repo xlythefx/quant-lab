@@ -375,22 +375,69 @@ function fmtParamValue(v) {
   return String(v);
 }
 
+function ParamGrid({ params, tunedNames }) {
+  const names = Object.keys(params || {});
+  const ordered = [...names.filter((n) => tunedNames.has(n)), ...names.filter((n) => !tunedNames.has(n))];
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+      {ordered.map((n) => {
+        const isTuned = tunedNames.has(n);
+        return (
+          <div key={n} className={`rounded-md border px-2.5 py-1.5 ${isTuned ? "border-line bg-bg-elev/40" : "border-line/40"}`}>
+            <div className="text-[10px] text-muted font-mono truncate" title={n}>
+              {n}{isTuned ? "" : " · fixed"}
+            </div>
+            <div className={`text-sm font-mono ${isTuned ? "text-text" : "text-muted"}`}>
+              {fmtParamValue(params[n])}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// One line of "what this set actually did" over the combined out-of-sample span.
+function OosScoreLine({ stats, label, strong }) {
+  if (!stats) return <div className="text-[11px] text-muted">{label}: not evaluated</div>;
+  const ret = stats.total_return_pct ?? 0;
+  return (
+    <div className="text-[11px] font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
+      <span className={strong ? "text-text" : "text-muted"}>{label}</span>
+      <span className={ret > 0 ? "text-profit" : "text-loss"}>{fmtPct(ret)}</span>
+      <span className="text-muted">Sharpe <span className="text-text">{fmtNum(stats.sharpe ?? 0)}</span></span>
+      <span className="text-muted">DD <span className="text-loss">{fmtPct(Math.abs(stats.max_drawdown_pct ?? 0), false)}</span></span>
+      <span className="text-muted">{fmtInt(stats.trades ?? 0)} trades</span>
+    </div>
+  );
+}
+
 /**
- * "Recommended parameters to deploy" — the settings from the MOST RECENT
- * walk-forward window. WF re-optimizes every window, so there is no single
- * chosen set; the latest re-tune is what you'd actually deploy now. Trust note
- * mirrors the plateau/stability gate so a drifting set is flagged as shaky.
+ * "Deploy candidate" — the CONSENSUS parameter set (median of each tuned param
+ * across every walk-forward window), shown with the number it actually scored
+ * when backtested over the combined out-of-sample span (backend:
+ * WalkForwardJob._build_deploy_candidate).
+ *
+ * This box used to show the LAST window's `best_params` under the title
+ * "Recommended parameters to deploy". That was the single most overfit object
+ * in the run — the argmax of one in-sample window, never validated — wearing a
+ * trust note borrowed from a stability score that never looked at a parameter
+ * value. Both the old set and the untuned baseline are now scored on the same
+ * span beside it, so the gap is visible instead of implied.
+ *
+ * Falls back to the old display for results stored before deploy_candidate
+ * existed — labelled for what it is, with no trust note.
  */
 export function RecommendedParams({ result, stability }) {
   const [copied, setCopied] = useState(false);
   const windows = result.windows || [];
+  const dc = result.deploy_candidate || null;
   const last = windows.length ? windows[windows.length - 1] : null;
-  const params = last?.best_params || {};
-  const names = Object.keys(params);
-  if (!last || !names.length) return null;
+
+  const params = dc?.params || last?.best_params || {};
+  if (!Object.keys(params).length) return null;
 
   const tunedNames = new Set((result?.wf_spec?.search_space || []).map((s) => s.name));
-  const ordered = [...names.filter((n) => tunedNames.has(n)), ...names.filter((n) => !tunedNames.has(n))];
 
   const copy = () => {
     try {
@@ -400,41 +447,106 @@ export function RecommendedParams({ result, stability }) {
     } catch { /* clipboard blocked — no-op */ }
   };
 
+  const copyBtn = (
+    <button onClick={copy} className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-line text-muted hover:text-text hover:border-muted transition-colors">
+      {copied ? "Copied ✓" : "Copy JSON"}
+    </button>
+  );
+
+  // Legacy result: no consensus set was computed. Say so rather than dressing
+  // one window's in-sample pick up as a recommendation.
+  if (!dc) {
+    return (
+      <div className="rounded-xl border border-amber-400/40 bg-amber-400/5 p-4 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-amber-400">
+              Last window&apos;s in-sample pick · not validated
+            </div>
+            <div className="text-[11px] text-muted mt-0.5">
+              Window {last?.window_idx} ({fmtDateLong(last?.oos_start)} – {fmtDateLong(last?.oos_end)}).
+              This is the best-scoring config on that one tuning window — the verdict above judges the
+              walk-forward procedure, not this set. Re-run to get a consensus set with a real out-of-sample number.
+            </div>
+          </div>
+          {copyBtn}
+        </div>
+        <ParamGrid params={params} tunedNames={tunedNames} />
+      </div>
+    );
+  }
+
+  const st = dc.stats || null;
+  const ret = st?.total_return_pct ?? null;
+  const baseRet = dc.baseline?.stats?.total_return_pct ?? null;
+  const verdict = ret == null ? { cls: "border-line", txt: null }
+    : ret > 0
+      ? { cls: "border-profit/40 bg-profit/5", txt: null }
+      : { cls: "border-loss/40 bg-loss/5",
+          txt: "This set LOSES money over the combined out-of-sample span. Do not deploy it — the verdict above is about the re-optimize-every-window procedure, not about any single fixed set." };
+
+  // Widest per-param disagreement across windows, as a fraction of its range.
+  // 0.289 is what uniform-random draws produce.
+  const agree = dc.agreement || {};
+  const spreads = Object.values(agree).map((a) => a.spread).filter((v) => typeof v === "number");
+  const worstSpread = spreads.length ? Math.max(...spreads) : null;
+  const RANDOM_SPREAD = 1 / Math.sqrt(12);
+
   const trust = stability == null ? null
-    : stability >= 0.7 ? { cls: "text-profit", txt: "Parameter plateau is stable — these settings sit on solid ground." }
-    : stability >= 0.4 ? { cls: "text-amber-400", txt: "Parameters are somewhat sensitive across windows — deploy small and watch." }
-    : { cls: "text-loss", txt: "Parameters drift a lot window-to-window — treat these as a starting point, not gospel." };
+    : stability >= 0.7 ? { cls: "text-profit", txt: "Neighbouring params score about the same — the optimum is flat, not a spike." }
+    : stability >= 0.4 ? { cls: "text-amber-400", txt: "Nudging the params costs some performance — the edge partly depends on the exact numbers." }
+    : { cls: "text-loss", txt: "Nudging the params collapses the score — the winners are lone spikes. Treat any single set as a starting point, not gospel." };
 
   return (
-    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+    <div className={`rounded-xl border p-4 space-y-3 ${verdict.cls}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-[11px] uppercase tracking-wider text-muted">Recommended parameters to deploy</div>
+          <div className="text-[11px] uppercase tracking-wider text-muted">Deploy candidate · consensus of {fmtInt(dc.n_windows)} windows</div>
           <div className="text-[11px] text-muted mt-0.5">
-            From the most recent re-tune · window {last.window_idx} ({fmtDateLong(last.oos_start)} – {fmtDateLong(last.oos_end)})
+            The median value each tuned param landed on across every window — then actually backtested over
+            the combined out-of-sample span, {fmtDateLong(dc.oos_start)} – {fmtDateLong(dc.oos_end)}.
           </div>
         </div>
-        <button
-          onClick={copy}
-          className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-line text-muted hover:text-text hover:border-muted transition-colors"
-        >
-          {copied ? "Copied ✓" : "Copy JSON"}
-        </button>
+        {copyBtn}
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-        {ordered.map((n) => {
-          const isTuned = tunedNames.has(n);
-          return (
-            <div key={n} className={`rounded-md border px-2.5 py-1.5 ${isTuned ? "border-line bg-bg-elev/40" : "border-line/40"}`}>
-              <div className="text-[10px] text-muted font-mono truncate" title={n}>
-                {n}{isTuned ? "" : " · fixed"}
-              </div>
-              <div className={`text-sm font-mono ${isTuned ? "text-text" : "text-muted"}`}>{fmtParamValue(params[n])}</div>
-            </div>
-          );
-        })}
+
+      <ParamGrid params={params} tunedNames={tunedNames} />
+
+      <div className="rounded-lg border border-line bg-bg-elev/30 p-2.5 space-y-1">
+        <OosScoreLine stats={st} label="This set, held fixed across the OOS span" strong />
+        <OosScoreLine stats={dc.last_window?.stats} label={`Last window's in-sample pick (#${dc.last_window?.window_idx ?? "—"}), same span`} />
+        <OosScoreLine stats={dc.baseline?.stats} label="Untuned base params, same span" />
+        <div className="text-[10px] text-muted pt-1">
+          None of these is the stitched curve above — that one re-tunes every window. These are what you&apos;d
+          get holding one set fixed, which is what deploying actually means.
+        </div>
       </div>
+
+      {verdict.txt && <div className="text-[11px] text-loss">{verdict.txt}</div>}
+      {ret != null && baseRet != null && baseRet > ret && (
+        <div className="text-[11px] text-amber-400">
+          The untuned base params beat this consensus set on the same span ({fmtPct(baseRet)} vs {fmtPct(ret)}).
+          The search is not paying for itself here.
+        </div>
+      )}
       {trust && <div className={`text-[11px] ${trust.cls}`}>{trust.txt}</div>}
+      {worstSpread != null && worstSpread >= RANDOM_SPREAD * 0.9 && (
+        <div className="text-[11px] text-loss">
+          Windows disagreed on at least one param as widely as random guessing would
+          (spread {fmtNum(worstSpread * 100)}% of its search range; uniform-random is {fmtNum(RANDOM_SPREAD * 100)}%).
+          The median is then an average of noise, not a consensus.
+        </div>
+      )}
+      {worstSpread != null && worstSpread > 0.25 && worstSpread < RANDOM_SPREAD * 0.9 && (
+        <div className="text-[11px] text-amber-400">
+          Windows disagreed widely on at least one param (spread {fmtNum(worstSpread * 100)}% of its search range) —
+          check Best Parameter Combinations before trusting the median.
+        </div>
+      )}
+      <div className="text-[10px] text-muted">
+        Honest caveat: this span is out-of-sample relative to each window&apos;s tuning, but you have now looked at
+        it. The locked holdout is still the only untouched test.
+      </div>
     </div>
   );
 }
@@ -449,9 +561,12 @@ export function RecommendedParams({ result, stability }) {
 export function CurrentParams({ result, strategies }) {
   const windows = result.windows || [];
   const last = windows.length ? windows[windows.length - 1] : null;
-  const recommended = last?.best_params || {};
+  // Compare against the same set the box above proposes — the consensus, when
+  // the run produced one. Falling back to the last window would mean the two
+  // panels disagreed about what "recommended" means.
+  const recommended = result.deploy_candidate?.params || last?.best_params || {};
   const names = Object.keys(recommended);
-  if (!last || !names.length) return null;
+  if (!names.length) return null;
 
   const strat = (strategies || []).find((s) => s.id === result.strategy_id);
   // Exactly what Dashboard V2 runs this strategy with for its symbol/timeframe.
@@ -527,21 +642,96 @@ export function WFVerdictPanel({ result, strategies }) {
 
   const gates = [];
 
-  // 1 — Parameter plateau
+  // 1 — Parameter plateau. Measured in PARAMETER space: for each window, how
+  // well the configs within a small nudge of that window's winner hold up
+  // against it (median across windows). The old score was the stdev of the top
+  // decile of trial SCORES — it never looked at a parameter value, so it read
+  // "stable" whenever many unrelated configs scored alike, which actually means
+  // the metric can't tell them apart and the argmax is a coin flip.
   if (!hasSearchSpace) {
     gates.push({ light: "na", title: "Parameter plateau", value: "—",
       plain: "No parameters were optimized in this run, so there's nothing to be robust to. Add a search space to test plateau vs. spike." });
   } else if (stability == null) {
     gates.push({ light: "na", title: "Parameter plateau", value: "—",
-      plain: "Stability score unavailable (need ≥10 Optuna trials). Run more trials per window to judge this." });
+      plain: "Not enough trials clustered near each window's winner to judge flatness. Run more trials per window." });
   } else {
     const light = stability >= 0.7 ? "pass" : stability >= 0.4 ? "warn" : "fail";
-    gates.push({ light, title: "Parameter plateau", value: fmtNum(stability),
+    const nw = rob.parameter_stability_windows;
+    gates.push({ light, title: "Parameter plateau",
+      value: `${fmtNum(stability)}${nw ? ` · ${fmtInt(nw)}w` : ""}`,
       plain: light === "pass"
-        ? "The best params sit on a flat plateau — neighbors perform similarly. That's a structural edge, not a lucky single setting."
+        ? "Nudge the winning params and the score barely moves — neighbours perform similarly. That's a structural edge, not one lucky setting."
         : light === "warn"
-        ? "Params are somewhat sensitive. The edge partly depends on the exact numbers — treat with caution."
-        : "The winning params are a lone spike — nudge them and it collapses. Classic curve-fit warning." });
+        ? "Nudging the params costs real performance. The edge partly depends on the exact numbers — treat with caution."
+        : "The winning params are a lone spike — nudge them and the score collapses. Classic curve-fit warning." });
+  }
+
+  // 1b — Did the windows agree on anything? Uniform-random draws over a search
+  // range have std = 1/sqrt(12) = 0.289 of that range. At or above that, the
+  // per-window "best" values are indistinguishable from guessing.
+  {
+    const disp = rob.param_pick_dispersion;
+    const randomLevel = rob.param_pick_dispersion_random_level ?? 1 / Math.sqrt(12);
+    if (!hasSearchSpace || disp == null) {
+      gates.push({ light: "na", title: "Windows agree on the params", value: "—",
+        plain: "Needs at least two windows with numeric parameter picks to compare." });
+    } else {
+      const ratio = disp / randomLevel;
+      const light = ratio <= 0.5 ? "pass" : ratio < 0.9 ? "warn" : "fail";
+      gates.push({ light, title: "Windows agree on the params",
+        value: `${fmtNum(disp * 100)}% vs ${fmtNum(randomLevel * 100)}% random`,
+        plain: light === "pass"
+          ? "Independent windows keep landing on similar values. The search is finding something real and repeatable."
+          : light === "warn"
+          ? "Windows land on fairly different values from window to window — the optimum drifts, so any single set is shaky."
+          : "The windows' picks are spread as widely as random guessing over the search range. The optimizer is not finding an optimum, it's sampling noise — and the median of those picks is an average of noise." });
+    }
+  }
+
+  // 1c — Did tuning beat NOT tuning? The control arm: the same OOS windows
+  // traded with the untuned base params. Every other gate is measured only on
+  // the tuned arm, so all of them look identical whether the search found a real
+  // optimum or not. This is the only gate that can tell the difference.
+  {
+    const tv = result.tuning_value;
+    if (!tv || !tv.control) {
+      gates.push({ light: "na", title: "Tuning beat not-tuning", value: "—",
+        plain: "This run has no control arm. Re-run to compare the tuned picks against the untuned base params on the same windows." });
+    } else {
+      const edge = tv.tuning_edge_pct ?? 0;
+      const corr = tv.is_oos_correlation;
+      const light = edge > 0 && (corr == null || corr > 0.1) ? "pass"
+        : edge > 0 ? "warn" : "fail";
+      gates.push({ light, title: "Tuning beat not-tuning",
+        value: `${fmtPct(tv.tuned.compounded_return_pct)} vs ${fmtPct(tv.control.compounded_return_pct)}`,
+        plain: light === "pass"
+          ? `Re-optimizing each window beat leaving the base params alone by ${fmtPct(edge)} compounded, and a good in-sample score does predict the next window (correlation ${fmtNum(corr)}). The search is earning its keep.`
+          : light === "warn"
+          ? `Tuning came out ${fmtPct(edge)} ahead of doing nothing, but a good in-sample score barely predicts the next window (correlation ${fmtNum(corr)}). The gain may be luck rather than skill.`
+          : `Leaving the base params ALONE beat re-optimizing every window (${fmtPct(tv.control.compounded_return_pct)} vs ${fmtPct(tv.tuned.compounded_return_pct)}). The optimization step is costing you money — correlation between in-sample score and out-of-sample Sharpe is ${fmtNum(corr)}.` });
+    }
+  }
+
+  // 1d — How thin a sample each window's winner was chosen on. A great
+  // annualized Sharpe on 9 trades is noise wearing a good number.
+  {
+    const tv = result.tuning_value;
+    const med = tv?.median_is_trades_behind_pick;
+    if (med == null) {
+      gates.push({ light: "na", title: "Picks rest on a real sample", value: "—",
+        plain: "This run didn't record how many in-sample trades each winning config was chosen on. Re-run to capture it." });
+    } else {
+      const thin = tv.windows_picked_on_thin_sample ?? 0;
+      const known = tv.n_picked_on_known || 1;
+      const light = med >= 30 ? "pass" : med >= 15 ? "warn" : "fail";
+      gates.push({ light, title: "Picks rest on a real sample",
+        value: `median ${fmtInt(med)} trades`,
+        plain: light === "pass"
+          ? `Each window's winner was chosen on a median of ${fmtInt(med)} in-sample trades — enough for the score to mean something.`
+          : light === "warn"
+          ? `Each window's winner was chosen on a median of only ${fmtInt(med)} in-sample trades (${fmtInt(thin)} of ${fmtInt(known)} windows picked on under 20). Raise "Min IS trades" so picks rest on a real sample.`
+          : `Each window's winner was chosen on a median of just ${fmtInt(med)} in-sample trades, and ${fmtInt(thin)} of ${fmtInt(known)} windows picked on under 20. At that sample size the winning Sharpe is noise — raise "Min IS trades".` });
+    }
   }
 
   // 2 — Out-of-sample holds
@@ -695,6 +885,9 @@ export function WFVerdictPanel({ result, strategies }) {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {gates.map((g) => <GateCard key={g.title} {...g} />)}
       </div>
+
+      {/* When the edge lives — hour-of-day + calendar-month read */}
+      <WhereItWorks analytics={result.analytics} />
 
       {/* Sub-period strip */}
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-2">
@@ -1269,187 +1462,356 @@ export function WindowHeatmap({ windows, searchSpace, onCheckMonteCarlo }) {
   );
 }
 
-// -- PnlHeatmapGrid — Hour-of-day × Day-of-week PnL heatmap -----------------
+// -- Hour-of-day / monthly performance ---------------------------------------
 
-const _DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Cells backed by fewer trades than this are drawn muted and excluded from the
+// "where it works" summary: an hour with 2 trades and a great average is noise
+// wearing a good number, and it would otherwise top every ranking.
+const THIN_TRADES = 5;
 
-export function PnlHeatmapGrid({ pnlGrid, cntGrid }) {
-  if (!pnlGrid || pnlGrid.length === 0) return null;
-
-  let min = Infinity, max = -Infinity;
-  for (const row of pnlGrid) for (const v of row) { if (v < min) min = v; if (v > max) max = v; }
-  if (min === Infinity) { min = 0; max = 0; }
-
-  const colorOf = (v) => {
-    if (v === 0) return "rgba(255,255,255,0.03)";
-    if (v > 0) {
-      const a = Math.min(1, v / Math.max(1e-9, max));
-      return `rgba(34,197,94,${0.15 + 0.60 * a})`;
+/**
+ * Collapse the backend's 7×24 [dow][hour] grids into 24 hourly buckets.
+ * Returns [{hour, pnl, trades, avg}] where avg is $ per trade — the metric that
+ * shows the real edge, rather than which hour simply traded most.
+ */
+export function useHourBuckets(pnlGrid, cntGrid) {
+  return useMemo(() => {
+    const out = Array.from({ length: 24 }, (_, hour) => ({ hour, pnl: 0, trades: 0, avg: 0 }));
+    for (let d = 0; d < (pnlGrid?.length || 0); d++) {
+      for (let h = 0; h < 24; h++) {
+        out[h].pnl += Number(pnlGrid[d]?.[h] || 0);
+        out[h].trades += Number(cntGrid?.[d]?.[h] || 0);
+      }
     }
-    const a = Math.min(1, v / Math.min(-1e-9, min));
-    return `rgba(239,68,68,${0.15 + 0.60 * a})`;
-  };
+    for (const b of out) b.avg = b.trades > 0 ? b.pnl / b.trades : 0;
+    return out;
+  }, [pnlGrid, cntGrid]);
+}
+
+// Shared red↔green cell fill, scaled to the largest magnitude in the set.
+function heatFill(v, max, thin) {
+  if (!v) return "rgba(255,255,255,0.03)";
+  const a = Math.min(1, Math.abs(v) / Math.max(1e-9, max));
+  const alpha = (thin ? 0.06 : 0.15) + (thin ? 0.16 : 0.6) * a;
+  return v > 0 ? `rgba(34,197,94,${alpha})` : `rgba(239,68,68,${alpha})`;
+}
+
+/**
+ * Hour-of-day strip — 24 buckets, 00:00 → 23:59 UTC, coloured by AVERAGE P&L
+ * per trade. Replaces the old Session Breakdown table, which needed a
+ * hand-maintained session config to say anything and silently mislabelled
+ * itself whenever that config drifted from what the strategy actually traded.
+ * This needs no configuration and cannot disagree with the run.
+ */
+export function HourOfDayStrip({ pnlGrid, cntGrid }) {
+  const buckets = useHourBuckets(pnlGrid, cntGrid);
+  const maxAbs = Math.max(...buckets.filter((b) => b.trades >= THIN_TRADES).map((b) => Math.abs(b.avg)), 0);
+  const totalTrades = buckets.reduce((a, b) => a + b.trades, 0);
+  if (!totalTrades) return null;
 
   return (
     <div className="rounded-xl border border-line bg-bg-panel/60 p-4 overflow-x-auto">
-      <div className="text-[11px] uppercase tracking-wider text-muted mb-3">
-        PnL Heatmap — Hour (UTC) × Weekday
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+        <span className="text-[11px] uppercase tracking-wider text-muted">
+          Hour of day (UTC) — average P&amp;L per trade
+        </span>
+        <span className="text-[10px] text-muted/70">
+          00:00 → 23:59 · colour = $ per trade · hours under {fmtInt(THIN_TRADES)} trades are muted (too thin to read)
+        </span>
       </div>
-      <table className="text-[10px] font-mono border-separate border-spacing-0.5">
+      <table className="text-[10px] font-mono border-separate border-spacing-0.5 min-w-full">
         <thead>
           <tr>
-            <th className="px-2 text-muted text-right w-10" />
-            {Array.from({ length: 24 }, (_, h) => (
-              <th key={h} className="text-center text-muted w-7">{h}</th>
+            <th className="px-1 text-muted text-right w-14 font-normal">UTC</th>
+            {buckets.map((b) => (
+              <th key={b.hour} className="text-center text-muted w-9 font-normal">
+                {String(b.hour).padStart(2, "0")}
+              </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {_DOW.map((dow, di) => (
-            <tr key={dow}>
-              <td className="pr-2 text-muted text-right">{dow}</td>
-              {Array.from({ length: 24 }, (_, h) => {
-                const v = pnlGrid[di]?.[h] ?? 0;
-                const c = cntGrid?.[di]?.[h] ?? 0;
-                return (
-                  <td
-                    key={h}
-                    className="w-7 h-7 text-center rounded-sm"
-                    style={{ background: colorOf(v) }}
-                    title={`${dow} ${h}:00 UTC\n${v >= 0 ? "+" : ""}${fmtUsd(v)} · ${c} trade${c !== 1 ? "s" : ""}`}
-                  >
-                    {c > 0 && (
-                      <span className="text-[8px] text-text/70 leading-none">
-                        {Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : Math.round(v)}
-                      </span>
-                    )}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
+          <tr>
+            <td className="px-1 text-muted text-right">avg $</td>
+            {buckets.map((b) => {
+              const thin = b.trades < THIN_TRADES;
+              return (
+                <td
+                  key={b.hour}
+                  className={`text-center rounded h-9 align-middle ${thin ? "text-muted/40" : "text-text"}`}
+                  style={{ backgroundColor: heatFill(b.avg, maxAbs, thin) }}
+                  title={`${String(b.hour).padStart(2, "0")}:00–${String(b.hour).padStart(2, "0")}:59 UTC\n${fmtInt(b.trades)} trades\ntotal ${fmtUsd(b.pnl)}\navg ${fmtUsd(b.avg)}/trade${thin ? "\n(too few trades to trust)" : ""}`}
+                >
+                  {b.trades ? fmtNum(b.avg) : "·"}
+                </td>
+              );
+            })}
+          </tr>
+          <tr>
+            <td className="px-1 text-muted/60 text-right">trades</td>
+            {buckets.map((b) => (
+              <td key={b.hour} className="text-center text-muted/50">{b.trades || "·"}</td>
+            ))}
+          </tr>
         </tbody>
       </table>
-      <div className="flex items-center gap-4 mt-2 text-[10px] text-muted/70">
-        <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: "rgba(34,197,94,0.7)" }} />
-          Profit
-        </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-sm" style={{ background: "rgba(239,68,68,0.7)" }} />
-          Loss
-        </span>
-        <span className="ml-auto">Hover a cell for exact value</span>
+    </div>
+  );
+}
+
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * "Where this actually works" — a plain-English read of WHEN the edge lives,
+ * from the same hour and month data the heatmaps draw.
+ *
+ * Deliberately conservative. Hours under THIN_TRADES trades are excluded
+ * entirely, and the summary refuses to name a "best window" when the profitable
+ * hours are scattered rather than adjacent — a strategy that makes money at
+ * 03:00, 11:00 and 19:00 has no time-of-day edge, it has noise, and saying
+ * otherwise would invite exactly the kind of curve-fit this page exists to catch.
+ */
+export function WhereItWorks({ analytics }) {
+  const pnlGrid = analytics?.heatmap?.pnl || [];
+  const cntGrid = analytics?.heatmap?.count || [];
+  const buckets = useHourBuckets(pnlGrid, cntGrid);
+  const m = useMonthlyMatrix(analytics?.monthly_returns);
+
+  const usable = buckets.filter((b) => b.trades >= THIN_TRADES);
+  const totalTrades = buckets.reduce((a, b) => a + b.trades, 0);
+  if (!totalTrades) return null;
+
+  const winners = usable.filter((b) => b.avg > 0).sort((a, b) => b.avg - a.avg);
+  const losers = usable.filter((b) => b.avg < 0).sort((a, b) => a.avg - b.avg);
+  const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+
+  // Are the profitable hours clustered into one block, or scattered? Contiguous
+  // (with wrap-around at midnight) is the only version worth calling a "window".
+  const winSet = new Set(winners.map((b) => b.hour));
+  let bestRun = { len: 0, start: null };
+  if (winSet.size === 24) {
+    // Every hour positive: there is no "start" to find (the ring has no gap),
+    // so detect it directly rather than falling through to "scattered".
+    bestRun = { len: 24, start: 0 };
+  } else if (winSet.size) {
+    for (let s = 0; s < 24; s++) {
+      if (!winSet.has(s) || winSet.has((s + 23) % 24)) continue;   // only run starts
+      let len = 0;
+      while (len < 24 && winSet.has((s + len) % 24)) len++;
+      if (len > bestRun.len) bestRun = { len, start: s };
+    }
+  }
+  const allDay = bestRun.len === 24;
+  const clustered = bestRun.len >= 3 && bestRun.len >= winSet.size * 0.6;
+
+  // Share of gross profit earned inside that block — a run of hours that is
+  // "positive" but contributes little is not where the strategy works.
+  let blockShare = null;
+  if (clustered) {
+    const inBlock = (h) => {
+      const d = (h - bestRun.start + 24) % 24;
+      return d < bestRun.len;
+    };
+    const gross = buckets.reduce((a, b) => a + Math.max(0, b.pnl), 0);
+    const got = buckets.filter((b) => inBlock(b.hour)).reduce((a, b) => a + b.pnl, 0);
+    blockShare = gross > 0 ? got / gross : null;
+  }
+
+  const bestMonths = m
+    ? m.seasonalAvg.map((v, i) => ({ i, v, n: m.seasonalN[i] })).filter((x) => x.v != null && x.n >= 2)
+    : [];
+  const goodMonths = bestMonths.filter((x) => x.v > 0).sort((a, b) => b.v - a.v);
+  const badMonths = bestMonths.filter((x) => x.v < 0).sort((a, b) => a.v - b.v);
+
+  const posYears = m ? m.yearTotals.filter((v) => v != null && v > 0).length : 0;
+  const totYears = m ? m.yearTotals.filter((v) => v != null).length : 0;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-2">
+      <div className="text-[11px] uppercase tracking-wider text-muted">Where this actually works</div>
+
+      {usable.length === 0 ? (
+        <div className="text-[11px] text-amber-400">
+          No hour of the day has at least {fmtInt(THIN_TRADES)} trades. The book is spread too thin to say
+          when this works — that itself is a warning about sample size.
+        </div>
+      ) : allDay ? (
+        <div className="text-[11px] text-text">
+          Profitable in <span className="text-profit">every hour</span> of the day that has a usable
+          sample. No time-of-day concentration — the edge, if real, is not a session effect.
+        </div>
+      ) : clustered ? (
+        <div className="text-[11px] text-text">
+          Concentrated in <span className="font-mono text-profit">
+            {hh(bestRun.start)} – {hh((bestRun.start + bestRun.len) % 24)} UTC
+          </span>{" "}
+          — {fmtInt(bestRun.len)} consecutive hours, all profitable
+          {blockShare != null && <> , carrying {fmtNum(blockShare * 100)}% of gross profit</>}.
+          {" "}That is a real time-of-day pattern worth checking against a session you can actually trade.
+        </div>
+      ) : winners.length ? (
+        <div className="text-[11px] text-amber-400">
+          The profitable hours are <span className="text-text">scattered</span>, not clustered
+          ({winners.slice(0, 5).map((b) => hh(b.hour)).join(", ")}
+          {winners.length > 5 ? ", …" : ""}). With no contiguous block, there is no time-of-day edge here —
+          just noise that happens to land on some hours. Don&apos;t build a session filter from this.
+        </div>
+      ) : (
+        <div className="text-[11px] text-loss">
+          No hour with a usable sample is profitable on average. There is no time of day where this works.
+        </div>
+      )}
+
+      {losers.length > 0 && usable.length > 0 && (
+        <div className="text-[11px] text-muted">
+          Worst hours: {losers.slice(0, 3).map((b) => (
+            <span key={b.hour} className="font-mono">
+              {hh(b.hour)} ({fmtUsd(b.avg)}/trade, {fmtInt(b.trades)} trades){" "}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {totYears > 0 && (
+        <div className="text-[11px] text-muted">
+          Across calendar years: <span className="text-text">{fmtInt(posYears)} of {fmtInt(totYears)}</span> were
+          profitable.
+          {goodMonths.length > 0 && (
+            <> Strongest months on average: <span className="text-profit font-mono">
+              {goodMonths.slice(0, 3).map((x) => MONTH_ABBR[x.i]).join(", ")}</span>.</>
+          )}
+          {badMonths.length > 0 && (
+            <> Weakest: <span className="text-loss font-mono">
+              {badMonths.slice(0, 3).map((x) => MONTH_ABBR[x.i]).join(", ")}</span>.</>
+          )}
+          {bestMonths.length === 0 && <> Not enough years yet to say anything about seasonality.</>}
+        </div>
+      )}
+
+      <div className="text-[10px] text-muted/60">
+        Read this as a description of the past, not a filter to apply. Slicing a strategy down to its best
+        hours after seeing which they were is curve-fitting — if you act on it, it needs its own walk-forward.
       </div>
     </div>
   );
 }
 
-// -- SessionsEditor — configurable session time windows ----------------------
+/**
+ * Build the year × month matrix from analytics.monthly_returns.
+ *
+ * Each month's % return is measured against the equity it OPENED with
+ * (`equity_start`), not against starting capital — dividing by starting capital
+ * inflates every month once the curve compounds. The backend already tracks
+ * that per month; we only divide here.
+ */
+export function useMonthlyMatrix(monthlyReturns) {
+  return useMemo(() => {
+    const rows = (monthlyReturns || []).filter((m) => typeof m?.month === "string");
+    if (!rows.length) return null;
+    const byYear = new Map();
+    const seasonal = Array.from({ length: 12 }, () => []);
+    for (const r of rows) {
+      const [ys, ms] = r.month.split("-");
+      const y = parseInt(ys, 10);
+      const mi = parseInt(ms, 10) - 1;
+      if (!Number.isFinite(y) || mi < 0 || mi > 11) continue;
+      const base = Number(r.equity_start) || 0;
+      const pct = base > 0 ? (Number(r.pnl_dollars) || 0) / base * 100 : null;
+      if (!byYear.has(y)) byYear.set(y, Array.from({ length: 12 }, () => null));
+      byYear.get(y)[mi] = { pct, pnl: Number(r.pnl_dollars) || 0, trades: Number(r.trades) || 0 };
+      if (pct != null) seasonal[mi].push(pct);
+    }
+    const years = [...byYear.keys()].sort((a, b) => a - b);
+    // A year's total compounds its months — summing percentages would drift.
+    const yearTotals = years.map((y) => {
+      const cells = byYear.get(y);
+      let v = 1, any = false;
+      for (const c of cells) if (c && c.pct != null) { v *= 1 + c.pct / 100; any = true; }
+      return any ? (v - 1) * 100 : null;
+    });
+    const seasonalAvg = seasonal.map((xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null));
+    const seasonalN = seasonal.map((xs) => xs.length);
+    return { years, byYear, yearTotals, seasonalAvg, seasonalN };
+  }, [monthlyReturns]);
+}
 
-// Matched to the VWMA reversion strategy's own trading sessions (UTC) so the
-// Overview -> Session Breakdown buckets line up with the windows the strategy
-// actually trades. (Reporting only -- these don't change which trades happen.)
-const DEFAULT_SESSIONS = [
-  { name: "Tokyo",        start: "00:00", end: "04:00", enabled: true },
-  { name: "London",       start: "05:00", end: "12:30", enabled: true },
-  { name: "NY morning",   start: "12:30", end: "16:00", enabled: true },
-  { name: "NY afternoon", start: "17:00", end: "20:00", enabled: true },
-];
+/** Year × month % returns, plus a seasonality row averaging each calendar month. */
+export function MonthlyReturnsHeatmap({ monthlyReturns }) {
+  const m = useMonthlyMatrix(monthlyReturns);
+  if (!m || !m.years.length) return null;
 
-export function SessionsEditor({ value, onChange }) {
-  // value: array of {name, start, end, enabled}
-  const rows = value && value.length > 0 ? value : DEFAULT_SESSIONS;
+  const all = [];
+  for (const y of m.years) for (const c of m.byYear.get(y)) if (c && c.pct != null) all.push(Math.abs(c.pct));
+  const maxAbs = Math.max(...all, 0);
 
-  const update = (idx, field, val) => {
-    const next = rows.map((r, i) => i === idx ? { ...r, [field]: val } : r);
-    onChange(next);
-  };
-
-  const addRow = () => {
-    onChange([...rows, { name: "", start: "00:00", end: "00:00", enabled: true }]);
-  };
-
-  const removeRow = (idx) => {
-    onChange(rows.filter((_, i) => i !== idx));
-  };
+  const cellCls = "text-center rounded h-8 align-middle w-14";
 
   return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="text-[11px] uppercase tracking-wider text-muted">Sessions (UTC)</span>
-        <button
-          type="button"
-          onClick={addRow}
-          className="text-xs px-2 py-1 rounded border border-line text-muted hover:text-text hover:border-accent-blue transition"
-        >
-          + Add
-        </button>
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 overflow-x-auto">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-3">
+        <span className="text-[11px] uppercase tracking-wider text-muted">Monthly performance</span>
+        <span className="text-[10px] text-muted/70">
+          each month vs. the equity it opened with · year totals compound their months
+        </span>
       </div>
-      <div className="rounded-lg border border-line overflow-hidden">
-        <table className="w-full text-xs">
-          <thead className="bg-bg-elev/40">
-            <tr>
-              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider w-8">On</th>
-              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider">Name</th>
-              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider w-24">Start UTC</th>
-              <th className="text-left px-3 py-1.5 text-muted font-normal uppercase tracking-wider w-24">End UTC</th>
-              <th className="w-8" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i} className="border-t border-line/40">
-                <td className="px-3 py-1.5 text-center">
-                  <input
-                    type="checkbox"
-                    checked={r.enabled}
-                    onChange={(e) => update(i, "enabled", e.target.checked)}
-                    className="accent-accent-blue"
-                  />
-                </td>
-                <td className="px-3 py-1.5">
-                  <input
-                    value={r.name}
-                    onChange={(e) => update(i, "name", e.target.value)}
-                    placeholder="Session name"
-                    className="w-full bg-transparent focus:outline-none text-text font-mono placeholder:text-muted/40"
-                  />
-                </td>
-                <td className="px-3 py-1.5">
-                  <input
-                    type="time"
-                    value={r.start}
-                    onChange={(e) => update(i, "start", e.target.value)}
-                    className="w-full bg-bg-elev border border-line rounded px-2 py-0.5 font-mono focus:outline-none focus:border-accent-blue"
-                  />
-                </td>
-                <td className="px-3 py-1.5">
-                  <input
-                    type="time"
-                    value={r.end}
-                    onChange={(e) => update(i, "end", e.target.value)}
-                    className="w-full bg-bg-elev border border-line rounded px-2 py-0.5 font-mono focus:outline-none focus:border-accent-blue"
-                  />
-                </td>
-                <td className="px-2 py-1.5 text-center">
-                  <button
-                    type="button"
-                    onClick={() => removeRow(i)}
-                    className="text-muted/40 hover:text-loss transition text-base leading-none"
-                    title="Remove"
-                  >
-                    ×
-                  </button>
-                </td>
-              </tr>
+      <table className="text-[10px] font-mono border-separate border-spacing-0.5">
+        <thead>
+          <tr>
+            <th className="px-1 text-muted text-right w-12 font-normal" />
+            {MONTH_ABBR.map((mo) => (
+              <th key={mo} className="text-center text-muted w-14 font-normal">{mo}</th>
             ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="text-[10px] text-muted/60">
-        Times in UTC. Sessions that cross midnight (e.g. 23:00 → 08:00) are handled correctly.
-        Used to group trades in the Overview → Session Breakdown table.
+            <th className="text-center text-muted w-16 font-normal border-l border-line/40 pl-1">Year</th>
+          </tr>
+        </thead>
+        <tbody>
+          {m.years.map((y, yi) => (
+            <tr key={y}>
+              <td className="px-1 text-muted text-right">{y}</td>
+              {m.byYear.get(y).map((c, mi) => (
+                <td
+                  key={mi}
+                  className={`${cellCls} ${c && c.pct != null ? "text-text" : "text-muted/30"}`}
+                  style={{ backgroundColor: c && c.pct != null ? heatFill(c.pct, maxAbs, false) : "transparent" }}
+                  title={c && c.pct != null
+                    ? `${MONTH_ABBR[mi]} ${y}\n${fmtPct(c.pct)}\n${fmtUsd(c.pnl)} over ${fmtInt(c.trades)} trades`
+                    : `${MONTH_ABBR[mi]} ${y} — no trades`}
+                >
+                  {c && c.pct != null ? fmtNum(c.pct) : "·"}
+                </td>
+              ))}
+              <td className={`${cellCls} border-l border-line/40 ${
+                m.yearTotals[yi] == null ? "text-muted/30" : m.yearTotals[yi] >= 0 ? "text-profit" : "text-loss"}`}>
+                {m.yearTotals[yi] == null ? "·" : fmtNum(m.yearTotals[yi])}
+              </td>
+            </tr>
+          ))}
+          <tr>
+            <td colSpan={14} className="pt-1">
+              <div className="border-t border-line/40" />
+            </td>
+          </tr>
+          <tr>
+            <td className="px-1 text-muted text-right" title="Average of that calendar month across every year">avg</td>
+            {m.seasonalAvg.map((v, mi) => (
+              <td
+                key={mi}
+                className={`${cellCls} ${v == null ? "text-muted/30" : v >= 0 ? "text-profit" : "text-loss"}`}
+                style={{ backgroundColor: v == null ? "transparent" : heatFill(v, maxAbs, m.seasonalN[mi] < 2) }}
+                title={v == null
+                  ? `${MONTH_ABBR[mi]} — no data`
+                  : `${MONTH_ABBR[mi]} averaged over ${fmtInt(m.seasonalN[mi])} year(s)\n${fmtPct(v)}${m.seasonalN[mi] < 2 ? "\n(only one year — not seasonality yet)" : ""}`}
+              >
+                {v == null ? "·" : fmtNum(v)}
+              </td>
+            ))}
+            <td className="border-l border-line/40" />
+          </tr>
+        </tbody>
+      </table>
+      <div className="text-[10px] text-muted/60 mt-2">
+        The <span className="text-text">avg</span> row pools each calendar month across years. With only one or two
+        years of data it is a coincidence, not a season — it needs several years before it means anything.
       </div>
     </div>
   );

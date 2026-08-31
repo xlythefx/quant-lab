@@ -450,12 +450,137 @@ def _edge(trades: list[dict]) -> Optional[dict]:
 # Robustness: parameter stability + deflated Sharpe + WFE
 # ---------------------------------------------------------------------------
 
+# "A nudge": how far a param may move, as a fraction of its own search range,
+# and still count as a neighbour of the winner. Chebyshev (max-per-param), so
+# the radius means the same thing whether you tuned 1 param or 6.
+_PLATEAU_RADIUS = 0.15
+_PLATEAU_MIN_NEIGHBORS = 3
+
+
+def _plateau_stability(window_trials: list, search_space: list) -> tuple:
+    """How flat is the optimum in PARAMETER space? (0..1, or None)
+
+    For each window: normalize every tuned param to [0,1] by its own search
+    bounds, find the trial that won that window, then look at the trials sitting
+    within `_PLATEAU_RADIUS` of it — i.e. the configs you'd get by nudging the
+    winner. The window's score is how well those neighbours hold up:
+
+        median(neighbour scores) / winner score,  clipped to [0, 1]
+
+    1.0 = nudging the params changes nothing — a real plateau, a structural edge.
+    0.0 = the winner is a lone spike its own neighbours don't support — curve-fit.
+
+    Reported as the median across windows, so one lucky window can't carry it.
+
+    Deliberately NOT the old score (stdev of the top decile of *scores*): that
+    never looked at a parameter value, so it read "stable" whenever many
+    unrelated configs happened to score alike — which is the opposite of
+    reassuring, since it means the metric cannot tell them apart and the argmax
+    is a coin flip. On OPUSDT 15m that old number lit green while the windows'
+    picks were spread across the entire search box at the uniform-random level.
+
+    Caveat worth knowing: TPE concentrates its sampling near the optimum, so
+    neighbours are over-represented and tend to be good ones. This measures the
+    plateau as seen through the sampler's lens, not a clean grid. Treat a high
+    score as "no evidence of a spike" rather than proof of a plateau.
+    """
+    bounds = {}
+    for entry in (search_space or []):
+        name = entry.get("name")
+        try:
+            lo = float(entry["low"]); hi = float(entry["high"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if name and hi > lo:
+            bounds[name] = (lo, hi - lo)
+    if not bounds:
+        return None, 0
+
+    def _point(params: dict):
+        """Winner-relative coordinates, or None if the trial misses a param."""
+        out = []
+        for name, (lo, span) in bounds.items():
+            v = (params or {}).get(name)
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return None
+            out.append((float(v) - lo) / span)
+        return out
+
+    per_window = []
+    for trials in (window_trials or []):
+        usable = [
+            t for t in (trials or [])
+            if t.get("value") is not None and math.isfinite(float(t["value"]))
+            and _point(t.get("params")) is not None
+        ]
+        if len(usable) < _PLATEAU_MIN_NEIGHBORS + 1:
+            continue
+        best = max(usable, key=lambda t: float(t["value"]))
+        best_val = float(best["value"])
+        # A ratio against a non-positive winner is meaningless (and sign-flips),
+        # so a losing window simply doesn't vote.
+        if best_val <= 1e-9:
+            continue
+        bp = _point(best["params"])
+        neighbours = []
+        for t in usable:
+            if t is best:
+                continue
+            p = _point(t["params"])
+            if max(abs(a - b) for a, b in zip(p, bp)) <= _PLATEAU_RADIUS:
+                neighbours.append(float(t["value"]))
+        if len(neighbours) < _PLATEAU_MIN_NEIGHBORS:
+            continue
+        per_window.append(min(1.0, max(0.0, float(np.median(neighbours)) / best_val)))
+
+    if not per_window:
+        return None, 0
+    return float(np.median(per_window)), len(per_window)
+
+
+def _param_pick_dispersion(window_trials: list, search_space: list, window_picks: list) -> Optional[float]:
+    """Widest disagreement between windows about a tuned param, as a fraction of
+    that param's search range.
+
+    The reference number that makes it readable: UNIFORM RANDOM draws over a
+    range have std = 1/sqrt(12) = 0.289 of that range. So a dispersion at or
+    above ~0.289 means the windows' "best" values are indistinguishable from
+    random picks — the search found nothing, and any consensus built from those
+    picks is an average of noise.
+
+    Returns None when there are no numeric picks to compare.
+    """
+    if not window_picks:
+        return None
+    spans = {}
+    for entry in (search_space or []):
+        try:
+            lo = float(entry["low"]); hi = float(entry["high"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if entry.get("name") and hi > lo:
+            spans[entry["name"]] = hi - lo
+    worst = None
+    for name, span in spans.items():
+        vals = [p[name] for p in window_picks
+                if isinstance(p.get(name), (int, float)) and not isinstance(p.get(name), bool)]
+        if len(vals) < 2:
+            continue
+        d = float(np.std(vals)) / span
+        if worst is None or d > worst:
+            worst = d
+    return worst
+
+
 def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
     """
     wf_trials is a dict-bundle from walkforward.py:
       {
         "optuna_trials": list[{params, value}],   # all trials across all windows
+        "window_trials": list[list[{params, value}]],  # same, grouped per window
+        "search_space":  list[{name, type, low, high}],
         "window_pairs":  list[{is_score, oos_sharpe, oos_return_pct}],
+        "window_picks":  list[dict]               # each window's winning params
         "best_sharpe_oos": float | None,
         "metric": str | None,                     # the IS optimization metric
       }
@@ -466,14 +591,25 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
     mixing units. Older bundles without a "metric" key are treated as sharpe.
     """
     optuna_trials = wf_trials.get("optuna_trials") or []
+    window_trials = wf_trials.get("window_trials") or []
+    search_space = wf_trials.get("search_space") or []
+    window_picks = wf_trials.get("window_picks") or []
     window_pairs = wf_trials.get("window_pairs") or []
     best_oos_sharpe = wf_trials.get("best_sharpe_oos")
     metric = wf_trials.get("metric") or "sharpe"
     metric_is_sharpe = metric == "sharpe"
 
-    # ---- Parameter stability: stdev of scores in the top decile of trials.
-    # Higher score (lower variance) = flatter optimum = more robust.
-    stability = None
+    # ---- Parameter plateau, measured in parameter space (see _plateau_stability).
+    stability, n_plateau_windows = _plateau_stability(window_trials, search_space)
+
+    # ---- How far apart the windows' winning values were. >= 0.289 == random.
+    pick_dispersion = _param_pick_dispersion(window_trials, search_space, window_picks)
+
+    # ---- Top-score dispersion: the OLD "stability" number, kept under a name
+    # that says what it actually is — how tightly the best 10% of trial SCORES
+    # cluster. It says nothing about the params, so it is no longer the plateau
+    # gate; it is still a useful read on how flat the metric itself is.
+    top_score_dispersion = None
     if len(optuna_trials) >= 10:
         values = np.array(
             [t["value"] for t in optuna_trials if t.get("value") is not None and math.isfinite(t["value"])],
@@ -486,9 +622,9 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
             top_std = float(top.std(ddof=1)) if top.size > 1 else 0.0
             # Normalize by |mean| so the score is scale-free; clip to [0, 1].
             if abs(top_mean) > 1e-9:
-                stability = max(0.0, 1.0 - top_std / abs(top_mean))
+                top_score_dispersion = max(0.0, 1.0 - top_std / abs(top_mean))
             else:
-                stability = 0.0
+                top_score_dispersion = 0.0
 
     # ---- Deflated Sharpe (Bailey & López de Prado).
     # Adjusts the best observed Sharpe for the fact that many trials were tested.
@@ -542,6 +678,12 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
 
     return {
         "parameter_stability_score": _safe(stability),
+        "parameter_stability_windows": int(n_plateau_windows),
+        # >= ~0.289 means the windows' picks are indistinguishable from uniform
+        # random draws over the search range.
+        "param_pick_dispersion": _safe(pick_dispersion),
+        "param_pick_dispersion_random_level": 1.0 / math.sqrt(12.0),
+        "top_score_dispersion": _safe(top_score_dispersion),
         "deflated_sharpe_probability": _safe(deflated_sharpe),
         "walk_forward_efficiency": _safe(wfe_median),
         "pct_windows_positive_oos": _safe(pct_positive),

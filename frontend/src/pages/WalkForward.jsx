@@ -5,6 +5,7 @@ import TimeframeSelector from "../components/TimeframeSelector.jsx";
 import DateRangePicker from "../components/DateRangePicker.jsx";
 import CustomEquityChart from "../components/CustomEquityChart.jsx";
 import WalkForwardParamEditor from "../components/WalkForwardParamEditor.jsx";
+import BaseParamsSource from "../components/BaseParamsSource.jsx";
 import WalkForwardPresetPicker from "../components/WalkForwardPresetPicker.jsx";
 import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
 import CostAssumptions from "../components/CostAssumptions.jsx";
@@ -25,7 +26,7 @@ import {
   ProgressPanel, RobustnessProgress, RobustnessResults,
   WFVerdict, WFVerdictPanel, Kpi,
   BestParamRankings, TopCombinations, WindowRankings, WindowHeatmap,
-  PnlHeatmapGrid, SessionsEditor,
+  HourOfDayStrip, MonthlyReturnsHeatmap, WhereItWorks,
   useParamStats,
 } from "../components/walkforward/widgets.jsx";
 
@@ -167,6 +168,11 @@ export default function WalkForward() {
   const [nWorkers, setNWorkers] = usePersistentState("ql.wf.n_workers", 1);
   const [embargoBars, setEmbargoBars] = usePersistentState("ql.wf.embargo_bars", 0);
   const [purgeRadius, setPurgeRadius] = usePersistentState("ql.wf.purge_radius", 0);
+  // Minimum in-sample trades a config must make before it may win a window.
+  // Defaults to 30: at 1 (the backend's own default) the optimizer will happily
+  // crown a set picked on a handful of lucky trades — measured on OPUSDT 15m the
+  // median winner rested on 9 IS trades and 82/100 windows picked on under 20.
+  const [minTrades, setMinTrades] = usePersistentState("ql.wf.min_trades", 30);
   const [showGuide, setShowGuide] = useState(false);
   const maxWorkers = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 8;
 
@@ -184,7 +190,6 @@ export default function WalkForward() {
 
   const [baseParams, setBaseParams]   = usePersistentState("ql.wf.base", {});
   const [searchSpace, setSearchSpace] = usePersistentState("ql.wf.search", []);
-  const [sessions, setSessions]       = usePersistentState("ql.wf.sessions", []);
   const lastStrategyId = useRef(strategyId);
   useEffect(() => {
     if (lastStrategyId.current && lastStrategyId.current !== strategyId) {
@@ -404,12 +409,6 @@ export default function WalkForward() {
     setJobState({ state: "starting" });
     mainRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     try {
-      // Convert sessions array → dict keyed by name for the backend.
-      const sessions_cfg = Object.fromEntries(
-        (sessions || [])
-          .filter((s) => s.name && s.enabled)
-          .map((s) => [s.name, { enabled: true, start: s.start, end: s.end }])
-      );
       await startWalkForward({
         strategy_id: strategyId,
         symbol,
@@ -425,7 +424,7 @@ export default function WalkForward() {
         metric,
         embargo_bars: embargoBars,
         purge_radius: purgeRadius,
-        sessions_cfg: Object.keys(sessions_cfg).length > 0 ? sessions_cfg : null,
+        min_trades: minTrades,
       });
     } catch (e) {
       setError(e?.response?.data?.error || e.message);
@@ -445,11 +444,6 @@ export default function WalkForward() {
     setRbResult(null);
     setRbState({ state: "starting" });
     try {
-      const sessions_cfg = Object.fromEntries(
-        (sessions || [])
-          .filter((s) => s.name && s.enabled)
-          .map((s) => [s.name, { enabled: true, start: s.start, end: s.end }])
-      );
       await startWalkForwardRobustness({
         strategy_id: strategyId,
         symbol,
@@ -465,7 +459,7 @@ export default function WalkForward() {
         metric,
         embargo_bars: embargoBars,
         purge_radius: purgeRadius,
-        sessions_cfg: Object.keys(sessions_cfg).length > 0 ? sessions_cfg : null,
+        min_trades: minTrades,
         n_seeds: nSeeds,
       });
     } catch (e) {
@@ -546,9 +540,8 @@ export default function WalkForward() {
     isBars, setIsBars, oosBars, setOosBars,
     nTrials, setNTrials, metric, setMetric,
     nWorkers, setNWorkers, maxWorkers,
-    embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius,
+    embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius, minTrades, setMinTrades,
     searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
-    sessions, setSessions,
     onStart, onCancel,
   };
 
@@ -686,9 +679,8 @@ function SetupTab({
   isBars, setIsBars, oosBars, setOosBars,
   nTrials, setNTrials, metric, setMetric,
   nWorkers, setNWorkers, maxWorkers,
-  embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius,
+  embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius, minTrades, setMinTrades,
   searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
-  sessions, setSessions,
   onStart, onCancel,
 }) {
   return (
@@ -833,6 +825,15 @@ function SetupTab({
           <div className="text-[11px] text-muted/70">
             Embargo = bars skipped between IS and OOS. Purge = bars trimmed off IS right edge.
           </div>
+          <Field label="Min IS trades">
+            <NumInput value={minTrades} onChange={setMinTrades} min={0} />
+          </Field>
+          <div className="text-[11px] text-muted/70">
+            A config must make this many in-sample trades before it may win a window.
+            At 1 the optimizer only skips configs that never fire — it will still crown a
+            winner picked on a handful of lucky trades. 30 makes each pick rest on a real
+            sample; windows that then report no eligible config are telling you the truth.
+          </div>
         </div>
       </div>
 
@@ -851,12 +852,15 @@ function SetupTab({
 
       <BudgetHint searchSpaceLen={searchSpace.length} nTrials={nTrials} isBars={isBars} oosBars={oosBars} />
 
-      <div className="pt-2 border-t border-line/40">
-        <SessionsEditor value={sessions} onChange={setSessions} />
-      </div>
-
       {activeStrategy && (
-        <div className="pt-2 border-t border-line/40">
+        <div className="pt-2 border-t border-line/40 space-y-3">
+          <BaseParamsSource
+            meta={activeStrategy}
+            symbol={symbol}
+            timeframe={timeframe}
+            disabled={running}
+            onLoad={(p) => setBaseParams(p)}
+          />
           <WalkForwardParamEditor
             schema={activeStrategy.schema}
             baseParams={baseParams}
@@ -947,7 +951,6 @@ function OverviewTab({ result }) {
   const sht = s.short || {};
   const windows = result.windows || [];
   const equityPts = (result.equity || []).map((p) => ({ time: p.time, value: p.value }));
-  const sessions = (result.analytics?.by_session || []).sort((a, b) => b.pnl_dollars - a.pnl_dollars);
   const pnlGrid  = result.analytics?.heatmap?.pnl   || [];
   const cntGrid  = result.analytics?.heatmap?.count || [];
 
@@ -1053,49 +1056,17 @@ function OverviewTab({ result }) {
         </div>
       )}
 
-      {/* ── Session Breakdown ─────────────────────────────────────────── */}
-      {sessions.length > 0 && (
-        <div className="rounded-xl border border-line bg-bg-panel/60 overflow-hidden">
-          <div className="px-4 py-2 border-b border-line/40">
-            <span className="text-[11px] uppercase tracking-wider text-muted">Session Breakdown</span>
-          </div>
-          <table className="w-full text-sm">
-            <thead className="text-[10px] uppercase tracking-wider text-muted bg-bg-elev/40">
-              <tr>
-                <th className="text-left px-4 py-2">Session</th>
-                <th className="text-right px-4 py-2">Trades</th>
-                <th className="text-right px-4 py-2">Win%</th>
-                <th className="text-right px-4 py-2">PnL</th>
-                <th className="text-right px-4 py-2 border-l border-line/40">Long PnL</th>
-                <th className="text-right px-4 py-2">Short PnL</th>
-              </tr>
-            </thead>
-            <tbody className="font-mono text-sm">
-              {sessions.map((r) => (
-                <tr key={r.session} className="border-t border-line/40 hover:bg-bg-elev/30">
-                  <td className="px-4 py-2 text-text">{r.session}</td>
-                  <td className="px-4 py-2 text-right">{fmtInt(r.trades)}</td>
-                  <td className="px-4 py-2 text-right">{fmtNum(r.win_rate * 100)}%</td>
-                  <td className={`px-4 py-2 text-right ${r.pnl_dollars >= 0 ? "text-profit" : "text-loss"}`}>
-                    {fmtUsd(r.pnl_dollars)}
-                  </td>
-                  <td className={`px-4 py-2 text-right border-l border-line/40 ${r.long_pnl_dollars >= 0 ? "text-profit" : "text-loss"}`}>
-                    {fmtUsd(r.long_pnl_dollars)}
-                  </td>
-                  <td className={`px-4 py-2 text-right ${r.short_pnl_dollars >= 0 ? "text-profit" : "text-loss"}`}>
-                    {fmtUsd(r.short_pnl_dollars)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {/* ── When it works: hour-of-day + month ────────────────────────────
+          Replaces the old Session Breakdown, which needed a hand-maintained
+          session config and silently mislabelled itself when that drifted from
+          what the strategy actually traded. These need no configuration. */}
+      <WhereItWorks analytics={result.analytics} />
+
+      {pnlGrid.length > 0 && (
+        <HourOfDayStrip pnlGrid={pnlGrid} cntGrid={cntGrid} />
       )}
 
-      {/* ── PnL Heatmap ───────────────────────────────────────────────── */}
-      {pnlGrid.length > 0 && (
-        <PnlHeatmapGrid pnlGrid={pnlGrid} cntGrid={cntGrid} />
-      )}
+      <MonthlyReturnsHeatmap monthlyReturns={result.analytics?.monthly_returns} />
 
       {/* ── Equity Chart ──────────────────────────────────────────────── */}
       <div className="rounded-xl border border-line bg-bg-panel/60 p-4">
