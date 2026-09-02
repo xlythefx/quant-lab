@@ -270,6 +270,7 @@ const PRESETS = [
         end:   epochToDateStr(ds.last_time),
         isBars, oosBars,
         nTrials: 50,
+        minTrades: 30,
         metric: "sharpe",
         expectedWindows: windows,
         rangeDays: totalDays,
@@ -279,9 +280,9 @@ const PRESETS = [
   {
     id: "holdout",
     name: "Live-Test Holdout",
-    tagline: "Reserve the last 90 days as a final unseen check. Most honest pre-deploy test.",
+    tagline: "Reserve the last 12 months as a final unseen check. Most honest pre-deploy test.",
     description:
-      "Uses all data except the most recent 90 days, which you reserve as a hold-out. Run WF normally, then run a one-shot backtest on the held-out tail (do this manually after) to see how the strategy would have behaved on data the optimizer *never saw*. This is the closest thing a backtest gets to a live-deploy estimate.",
+      "Uses all data except the most recent 365 days, which you reserve as a hold-out. Run WF normally, then run a one-shot backtest on the held-out tail (do this manually after) to see how the strategy would have behaved on data the optimizer *never saw*. This is the closest thing a backtest gets to a live-deploy estimate.",
     whenToUse: [
       "You're close to deploying live and want one final honest gut-check.",
       "You suspect you may be implicitly tuning to recent market conditions.",
@@ -293,7 +294,10 @@ const PRESETS = [
     compute: (ds, tf) => {
       const isBars = barsForDays(180, tf);
       const oosBars = barsForDays(30, tf);
-      const holdoutDays = 90;
+      // 365, not 90. docs/plans/validation-checklist.md asks for the most
+      // recent 6-12 months; 90 days is half that floor, and on a multi-year
+      // dataset it holds back ~4% while leaving dozens of windows unused.
+      const holdoutDays = 365;
       const adjustedEnd = ds.last_time - holdoutDays * 86400;
       if (adjustedEnd <= ds.first_time) return null;  // dataset too small
       const totalDays = daysBetween(ds.first_time, adjustedEnd);
@@ -304,6 +308,7 @@ const PRESETS = [
         end:   epochToDateStr(adjustedEnd),
         isBars, oosBars,
         nTrials: 50,
+        minTrades: 30,
         metric: "sharpe",
         expectedWindows: windows,
         rangeDays: totalDays,
@@ -338,6 +343,7 @@ const PRESETS = [
         end:   epochToDateStr(ds.last_time),
         isBars, oosBars,
         nTrials: 50,
+        minTrades: 30,
         metric: "sharpe",
         expectedWindows: windows,
         rangeDays: totalDays,
@@ -347,7 +353,7 @@ const PRESETS = [
   {
     id: "quick",
     name: "Quick Iteration",
-    tagline: "Last 12 months, fewer trials. Fast feedback while you tune the search space.",
+    tagline: "Smoke test only. Last 12 months, ~21 windows — too few to read a verdict from.",
     description:
       "Last 12 months only. 60-day IS / 14-day OOS, 20 trials per window — designed for tight iteration loops. Useful when you're actively experimenting with the search space or fixed parameters and need answers in 1-2 minutes. Don't trust the result as final — the sample is small.",
     whenToUse: [
@@ -357,6 +363,7 @@ const PRESETS = [
     whenNotToUse: [
       "Final pre-deploy validation — too little data, too few windows.",
       "Claiming the strategy is 'profitable' — 12 months can be one favorable regime.",
+      "Reading the Verdict gates — at ~21 windows the % windows positive carries a ±11pp standard error, so 60% and 71% are the same number.",
     ],
     compute: (ds, tf) => {
       const adjustedStart = Math.max(ds.first_time, ds.last_time - 365 * 86400);
@@ -370,6 +377,7 @@ const PRESETS = [
         end:   epochToDateStr(ds.last_time),
         isBars, oosBars,
         nTrials: 20,
+        minTrades: 30,
         metric: "sharpe",
         expectedWindows: windows,
         rangeDays: totalDays,

@@ -1,4 +1,6 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { convertUtcHHmm, getTz, tzShort } from "../services/timezone.js";
+import TimePickerModal from "./TimePickerModal.jsx";
 
 /**
  * Walk-forward search-space editor.
@@ -167,6 +169,7 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
                 onSetBase={(v) => setBase(spec.name, v)}
                 onToggleSearch={(on) => toggleSearch(spec, on)}
                 onSearchField={(field, v) => setSearchField(spec.name, field, v)}
+                tradeAllDay={!!baseParams?.trade_24_7}
               />
             ))}
           </div>
@@ -176,7 +179,7 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
   );
 }
 
-function ParamRow({ spec, baseValue, searchEntry, onSetBase, onToggleSearch, onSearchField }) {
+function ParamRow({ spec, baseValue, searchEntry, onSetBase, onToggleSearch, onSearchField, tradeAllDay }) {
   const numeric = spec.type === "int" || spec.type === "float";
   const searching = !!searchEntry;
 
@@ -252,52 +255,107 @@ function ParamRow({ spec, baseValue, searchEntry, onSetBase, onToggleSearch, onS
             short
           </label>
         </div>
-      ) : spec.type === "sessions" ? (
-        // Start/end are EDITABLE here. They used to be read-only text, which
-        // meant the only place you could type a custom session window was the
-        // page-level "Sessions (UTC)" panel — and that one is report-labelling
-        // only, so it never reached the engine. This is the real entry filter:
-        // the strategy masks entries with session_mask(ts, p["sessions"]).
-        <div className="mt-2 space-y-1 text-[11px] font-mono">
-          {Object.entries(baseValue || {}).map(([name, cfg]) => (
-            <div key={name} className="flex items-center gap-2 text-muted">
-              <input
-                type="checkbox"
-                checked={!!cfg?.enabled}
-                onChange={(e) =>
-                  onSetBase({ ...(baseValue || {}), [name]: { ...(cfg || {}), enabled: e.target.checked } })
-                }
-                className="accent-accent-blue shrink-0"
-              />
-              <span className={`w-16 shrink-0 truncate ${cfg?.enabled ? "text-text" : ""}`} title={name}>{name}</span>
-              <input
-                type="time"
-                value={cfg?.start ?? ""}
-                disabled={!cfg?.enabled}
-                onChange={(e) =>
-                  onSetBase({ ...(baseValue || {}), [name]: { ...(cfg || {}), start: e.target.value } })
-                }
-                className="px-1.5 py-0.5 rounded bg-bg border border-line font-mono text-[11px] focus:outline-none focus:border-accent-blue disabled:opacity-40"
-              />
-              <span className="text-muted/50">–</span>
-              <input
-                type="time"
-                value={cfg?.end ?? ""}
-                disabled={!cfg?.enabled}
-                onChange={(e) =>
-                  onSetBase({ ...(baseValue || {}), [name]: { ...(cfg || {}), end: e.target.value } })
-                }
-                className="px-1.5 py-0.5 rounded bg-bg border border-line font-mono text-[11px] focus:outline-none focus:border-accent-blue disabled:opacity-40"
-              />
-              <span className="text-muted/40 text-[10px]">UTC</span>
-            </div>
-          ))}
-          <div className="text-[10px] text-muted/60 pt-0.5">
-            These windows gate entries — this is what the strategy actually trades.
+      ) : spec.type === "sessions" && tradeAllDay ? (
+        // trade_24_7 short-circuits the mask entirely (`in_session = True` for
+        // every bar), so the windows below are dead. Say so instead of
+        // rendering editable inputs that silently do nothing.
+        <div className="mt-2 rounded-md border border-amber-400/40 bg-amber-400/5 px-2.5 py-2 text-[11px]">
+          <span className="text-amber-400">Ignored — <span className="font-mono">trade_24_7</span> is on.</span>
+          <span className="text-muted"> The strategy trades every hour and these windows do nothing.
+            Turn <span className="font-mono">trade_24_7</span> off to make them apply.</span>
+          <div className="mt-1.5 grid grid-cols-2 gap-1 font-mono text-[10px] text-muted/50">
+            {Object.entries(baseValue || {}).map(([name, cfg]) => (
+              <span key={name}>{cfg?.enabled ? "☑" : "☐"} {name} {cfg?.start}–{cfg?.end}</span>
+            ))}
           </div>
         </div>
+      ) : spec.type === "sessions" ? (
+        <SessionsField value={baseValue} onSetBase={onSetBase} />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Session windows — the REAL entry filter (the strategy masks entries with
+ * session_mask(ts, p["sessions"])), not the page-level "Sessions (UTC)" panel,
+ * which is report-labelling only.
+ *
+ * Same UX as the Dashboard's Settings panel: click a HH:MM chip to open the
+ * 24-hour scroll-wheel picker. A native <input type="time"> was wrong here —
+ * it renders 12-hour AM/PM in an en-US browser, which disagrees with the
+ * 24-hour UTC value we actually store and send to the engine.
+ */
+function SessionsField({ value, onSetBase }) {
+  const v = value || {};
+  const [picker, setPicker] = useState(null);  // { key, field, label } | null
+  const [tz, setTz] = useState(getTz());
+
+  useEffect(() => {
+    const onTz = () => setTz(getTz());
+    window.addEventListener("quantlab:tz-change", onTz);
+    window.addEventListener("storage", onTz);
+    return () => {
+      window.removeEventListener("quantlab:tz-change", onTz);
+      window.removeEventListener("storage", onTz);
+    };
+  }, []);
+
+  const userIsSpecial = tz === "Etc/UTC" || tz === "America/New_York" || tz === "Asia/Manila";
+  const setSub = (key, patch) => onSetBase({ ...v, [key]: { ...(v[key] || {}), ...patch } });
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      {Object.entries(v).map(([key, cfg]) => (
+        <div key={key} className="px-2 py-1.5 rounded-md border border-line/60 bg-bg-elev/40">
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={!!cfg?.enabled}
+              onChange={(e) => setSub(key, { enabled: e.target.checked })}
+              className="accent-accent-blue shrink-0"
+            />
+            <span className={`text-xs font-mono w-20 shrink-0 truncate ${cfg?.enabled ? "text-text" : "text-muted"}`}
+                  title={key}>{key}</span>
+            <TimeChip value={cfg?.start} onClick={() => setPicker({ key, field: "start", label: `${key} · Start` })} />
+            <span className="text-[10px] text-muted">→</span>
+            <TimeChip value={cfg?.end}   onClick={() => setPicker({ key, field: "end",   label: `${key} · End`   })} />
+            <span className="text-[9px] uppercase tracking-wider text-muted ml-auto">UTC</span>
+          </div>
+          <div className="mt-1 pl-6 font-mono text-[10px] text-muted flex flex-wrap gap-x-3">
+            {!userIsSpecial && (
+              <span>{tzShort(tz)}: {convertUtcHHmm(cfg?.start, tz)}–{convertUtcHHmm(cfg?.end, tz)}</span>
+            )}
+            <span>NY: {convertUtcHHmm(cfg?.start, "America/New_York")}–{convertUtcHHmm(cfg?.end, "America/New_York")}</span>
+            <span>PH: {convertUtcHHmm(cfg?.start, "Asia/Manila")}–{convertUtcHHmm(cfg?.end, "Asia/Manila")}</span>
+          </div>
+        </div>
+      ))}
+      <div className="text-[10px] text-muted/70 pt-0.5">
+        These windows gate entries — this is what the strategy actually trades. Times are 24-hour UTC
+        (17:00 = 5 PM); NY / PH shown for reference.
+      </div>
+
+      <TimePickerModal
+        open={!!picker}
+        value={picker ? (v[picker.key]?.[picker.field] || "00:00") : "00:00"}
+        label={picker?.label}
+        onClose={() => setPicker(null)}
+        onChange={(hhmm) => { if (picker) setSub(picker.key, { [picker.field]: hhmm }); }}
+      />
+    </div>
+  );
+}
+
+function TimeChip({ value, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="px-2 py-0.5 text-xs font-mono rounded bg-bg border border-line text-text hover:border-accent-blue focus:outline-none focus:border-accent-blue w-16 text-center"
+    >
+      {value || "00:00"}
+    </button>
   );
 }
 

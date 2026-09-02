@@ -6,6 +6,8 @@ import { useMemo, useRef, useState } from "react";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../../services/format.js";
 import { aiAnalyzeWalkForward } from "../../services/api.js";
 import { resolveDefaultParams } from "../dashboardv2/metrics.js";
+import { convertUtcHHmm, tzShort } from "../../services/timezone.js";
+import { useDisplayTz } from "../../services/useDisplayTz.js";
 import { getUserDefaults } from "../../services/strategiesStore.js";
 
 export function fmtDate(epoch) {
@@ -843,6 +845,30 @@ export function WFVerdictPanel({ result, strategies }) {
   }
 
   // --- Overall verdict from the data-backed gates ---
+  // Reading order matters. "Tuning beat not-tuning" and "Windows agree on the
+  // params" can invalidate everything below them: if the search found nothing,
+  // a green plateau or a green OOS rate is describing noise. So they lead, and
+  // the two that qualify the sample come next. Sorting here rather than moving
+  // the blocks keeps each gate's logic where it was written.
+  const GATE_ORDER = [
+    "Tuning beat not-tuning",
+    "Windows agree on the params",
+    "Picks rest on a real sample",
+    "Parameter plateau",
+    "Holds out-of-sample",
+    "Enough trades",
+    "Distinguishable from zero",
+    "Beats buy-and-hold",
+    "Survives trial-count penalty",
+    "Not carried by a few trades",
+    "No recent decay",
+  ];
+  gates.sort((a, b) => {
+    const ia = GATE_ORDER.indexOf(a.title), ib = GATE_ORDER.indexOf(b.title);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  const DECISIVE = new Set(GATE_ORDER.slice(0, 2));
+
   const scored = gates.filter((g) => g.light !== "na");
   const val = { pass: 1, warn: 0.5, fail: 0 };
   const ratio = scored.length ? scored.reduce((a, g) => a + val[g.light], 0) / scored.length : 0;
@@ -862,6 +888,24 @@ export function WFVerdictPanel({ result, strategies }) {
 
   return (
     <section className="space-y-4">
+      {/* Too few windows to read a rate off. The green-rate gate is a binomial
+          proportion: its standard error is sqrt(0.25/n), so 21 windows carries
+          ~±11pp and 60% vs 71% is the same number. Say so before the verdict,
+          not after — the Quick Iteration preset lands right in this range. */}
+      {windows.length > 0 && windows.length < 30 && (
+        <div className="rounded-xl border border-amber-400/40 bg-amber-400/5 p-3 text-[11px]">
+          <span className="text-amber-400">
+            Only {fmtInt(windows.length)} out-of-sample windows — too few to read a verdict from.
+          </span>
+          <span className="text-muted">
+            {" "}The per-window green rate carries a standard error of about
+            ±{fmtNum(Math.sqrt(0.25 / windows.length) * 100)} percentage points at this sample size, so most of
+            the gates below cannot distinguish a real edge from noise. Fine as a smoke test; re-run on
+            Full History before believing any of it.
+          </span>
+        </div>
+      )}
+
       {/* Headline */}
       <div className={`rounded-xl border p-4 ${toneClasses[tone]}`}>
         <div className="text-[10px] uppercase tracking-wider opacity-70">Overall verdict</div>
@@ -881,9 +925,17 @@ export function WFVerdictPanel({ result, strategies }) {
       <RecommendedParams result={result} stability={stability} />
       <CurrentParams result={result} strategies={strategies} />
 
-      {/* The eight data-backed gates */}
+      {/* The data-backed gates, most-decisive first */}
+      <div className="space-y-2">
+        <div className="text-[10px] uppercase tracking-wider text-muted">
+          Read these first — they can invalidate everything below
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {gates.filter((g) => DECISIVE.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
+        </div>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {gates.map((g) => <GateCard key={g.title} {...g} />)}
+        {gates.filter((g) => !DECISIVE.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
       </div>
 
       {/* When the edge lives — hour-of-day + calendar-month read */}
@@ -1505,6 +1557,11 @@ function heatFill(v, max, thin) {
  */
 export function HourOfDayStrip({ pnlGrid, cntGrid }) {
   const buckets = useHourBuckets(pnlGrid, cntGrid);
+  // Second header row in the reader's own timezone. Buckets stay UTC — this
+  // only relabels them, so a PH reader can see that "14:00 UTC" is their 22:00.
+  const tz = useDisplayTz();
+  const localTz = tz && tz !== "Etc/UTC" ? tz : "Asia/Manila";
+  const localLabel = tzShort(localTz);
   const maxAbs = Math.max(...buckets.filter((b) => b.trades >= THIN_TRADES).map((b) => Math.abs(b.avg)), 0);
   const totalTrades = buckets.reduce((a, b) => a + b.trades, 0);
   if (!totalTrades) return null;
@@ -1516,7 +1573,7 @@ export function HourOfDayStrip({ pnlGrid, cntGrid }) {
           Hour of day (UTC) — average P&amp;L per trade
         </span>
         <span className="text-[10px] text-muted/70">
-          00:00 → 23:59 · colour = $ per trade · hours under {fmtInt(THIN_TRADES)} trades are muted (too thin to read)
+          00:00 → 23:59 UTC · second row = {localLabel} · colour = $ per trade · hours under {fmtInt(THIN_TRADES)} trades are muted
         </span>
       </div>
       <table className="text-[10px] font-mono border-separate border-spacing-0.5 min-w-full">
@@ -1526,6 +1583,14 @@ export function HourOfDayStrip({ pnlGrid, cntGrid }) {
             {buckets.map((b) => (
               <th key={b.hour} className="text-center text-muted w-9 font-normal">
                 {String(b.hour).padStart(2, "0")}
+              </th>
+            ))}
+          </tr>
+          <tr>
+            <th className="px-1 text-muted/50 text-right font-normal">{localLabel}</th>
+            {buckets.map((b) => (
+              <th key={b.hour} className="text-center text-muted/40 font-normal">
+                {convertUtcHHmm(`${String(b.hour).padStart(2, "0")}:00`, localTz).slice(0, 2)}
               </th>
             ))}
           </tr>

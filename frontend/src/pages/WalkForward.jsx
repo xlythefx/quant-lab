@@ -6,6 +6,8 @@ import DateRangePicker from "../components/DateRangePicker.jsx";
 import CustomEquityChart from "../components/CustomEquityChart.jsx";
 import WalkForwardParamEditor from "../components/WalkForwardParamEditor.jsx";
 import BaseParamsSource from "../components/BaseParamsSource.jsx";
+import ScheduleDiagram from "../components/walkforward/ScheduleDiagram.jsx";
+import Preflight, { RunCost } from "../components/walkforward/Preflight.jsx";
 import WalkForwardPresetPicker from "../components/WalkForwardPresetPicker.jsx";
 import WalkForwardGuide from "../components/WalkForwardGuide.jsx";
 import CostAssumptions from "../components/CostAssumptions.jsx";
@@ -259,6 +261,10 @@ export default function WalkForward() {
     setIsBars(values.isBars);
     setOosBars(values.oosBars);
     setNTrials(values.nTrials);
+    // Presets carry a trade-count floor so it stops being something you have to
+    // remember. A bigger IS window does not fix thin picks on its own — the
+    // optimizer can always favour params that fire rarely.
+    if (values.minTrades != null) setMinTrades(values.minTrades);
     setMetric(values.metric);
     setAiSuggestResult(null);
     setAiSuggestError(null);
@@ -683,6 +689,15 @@ function SetupTab({
   searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
   onStart, onCancel,
 }) {
+  // Bar counts only mean something once you convert them. Uses the dataset's
+  // average bar spacing, so it stays right across timeframes and for futures
+  // where sessions leave gaps.
+  const barsAsTime = (bars) => {
+    const { first_time: f, last_time: l, rows } = currentDataset || {};
+    if (!f || !l || !rows || rows < 2 || !bars) return "—";
+    return humanizeSpan(bars * ((l - f) / (rows - 1)));
+  };
+
   return (
     <section className="rounded-xl border border-line bg-bg-panel/60 p-5 space-y-5">
 
@@ -756,11 +771,15 @@ function SetupTab({
               ))}
             </select>
           </Field>
+          {/* Bar counts are meaningless until converted — show the calendar
+              equivalent inline so "17280" reads as "~6 months" at a glance. */}
           <Field label="IS bars">
             <NumInput value={isBars} onChange={setIsBars} min={10} disabled={running} />
+            <div className="text-[10px] text-muted/70 mt-0.5 font-mono">{barsAsTime(isBars)}</div>
           </Field>
           <Field label="OOS bars">
             <NumInput value={oosBars} onChange={setOosBars} min={1} disabled={running} />
+            <div className="text-[10px] text-muted/70 mt-0.5 font-mono">{barsAsTime(oosBars)}</div>
           </Field>
           <Field label="Trials / window">
             <NumInput value={nTrials} onChange={setNTrials} min={1} disabled={running} />
@@ -779,6 +798,14 @@ function SetupTab({
           </Field>
         </div>
       </div>
+
+      <ScheduleDiagram
+        dataset={currentDataset}
+        isBars={isBars}
+        oosBars={oosBars}
+        embargoBars={embargoBars}
+        purgeRadius={purgeRadius}
+      />
 
       <WindowScheduleHint
         dataset={currentDataset}
@@ -823,7 +850,10 @@ function SetupTab({
             </Field>
           </div>
           <div className="text-[11px] text-muted/70">
-            Embargo = bars skipped between IS and OOS. Purge = bars trimmed off IS right edge.
+            Embargo = bars skipped between IS and OOS. Purge = bars trimmed off the IS right edge.
+            Both guard against a trade straddling the boundary — see
+            <span className="text-text"> &ldquo;What do embargo &amp; purge mean?&rdquo;</span> on the diagram above
+            for a picture of exactly which bars each one drops.
           </div>
           <Field label="Min IS trades">
             <NumInput value={minTrades} onChange={setMinTrades} min={0} />
@@ -851,6 +881,24 @@ function SetupTab({
       <CostAssumptions />
 
       <BudgetHint searchSpaceLen={searchSpace.length} nTrials={nTrials} isBars={isBars} oosBars={oosBars} />
+
+      <RunCost
+        dataset={currentDataset}
+        isBars={isBars}
+        oosBars={oosBars}
+        embargoBars={embargoBars}
+        nTrials={nTrials}
+        nWorkers={nWorkers}
+        searchSpaceLen={searchSpace.length}
+      />
+
+      <Preflight
+        baseParams={baseParams}
+        searchSpace={searchSpace}
+        minTrades={minTrades}
+        embargoBars={embargoBars}
+        purgeRadius={purgeRadius}
+      />
 
       {activeStrategy && (
         <div className="pt-2 border-t border-line/40 space-y-3">
@@ -1020,7 +1068,15 @@ function OverviewTab({ result }) {
         <Kpi title="OOS Profit Factor"  value={s.profit_factor == null ? "∞" : fmtNum(s.profit_factor)} />
         <Kpi title="OOS Win Rate"       value={`${fmtNum((s.win_rate ?? 0) * 100)}%`} sub={`${fmtInt(s.wins)} W / ${fmtInt(s.losses)} L`} />
         <Kpi title="OOS Trades"         value={fmtInt(s.trades)} />
-        <Kpi title="OOS Max Drawdown"   value={fmtPct(s.max_drawdown_pct, false)} positive={false} sub={fmtUsd(s.max_drawdown_dollars)} />
+        {/* Peak-relative (industry standard), matching Dashboard V2. The
+            start-relative `max_drawdown_pct` divides the dollar drawdown by
+            STARTING capital, so once the curve compounds above par it happily
+            prints "-102.94%" for an account that never went to zero. Shown
+            underneath for continuity. */}
+        <Kpi title="OOS Max Drawdown"
+             value={fmtPct(s.max_drawdown_pct_peak ?? s.max_drawdown_pct, false)}
+             positive={false}
+             sub={`${fmtUsd(s.max_drawdown_dollars)} · ${fmtPct(s.max_drawdown_pct, false)} of start`} />
         <Kpi title="OOS Avg Trade"      value={fmtUsd(s.avg_pnl_dollars)} />
       </div>
 

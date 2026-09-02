@@ -564,47 +564,6 @@ function TimeChip({ value, onClick }) {
   );
 }
 
-/**
- * 24-hour HH:MM input. <input type="time"> respects the browser's locale
- * (en-US shows 12-hour with AM/PM), which we don't want for UTC sessions.
- * This is a plain text input that:
- *   - shows whatever the user typed while focused
- *   - normalizes to "HH:MM" 0-padded on blur / Enter
- *   - clamps to 0–23 hours, 0–59 minutes
- */
-function TimeInput({ value, onChange }) {
-  const [draft, setDraft] = useState(value || "00:00");
-  useEffect(() => { setDraft(value || "00:00"); }, [value]);
-
-  const normalize = (s) => {
-    const m = /^\s*(\d{1,2})(?::?(\d{0,2}))?\s*$/.exec(s || "");
-    if (!m) return value || "00:00";
-    const hh = String(Math.min(23, Math.max(0, parseInt(m[1] || "0", 10)))).padStart(2, "0");
-    const mm = String(Math.min(59, Math.max(0, parseInt(m[2] || "0", 10)))).padStart(2, "0");
-    return `${hh}:${mm}`;
-  };
-
-  const commit = (raw) => {
-    const next = normalize(raw);
-    setDraft(next);
-    if (next !== value) onChange(next);
-  };
-
-  return (
-    <input
-      type="text"
-      inputMode="numeric"
-      value={draft}
-      placeholder="HH:MM"
-      maxLength={5}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={(e) => commit(e.target.value)}
-      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      className="px-1.5 py-0.5 text-xs font-mono text-center rounded bg-bg border border-line focus:outline-none focus:border-accent-blue w-16"
-    />
-  );
-}
-
 function Toggle({ checked, onChange }) {
   return (
     <button
