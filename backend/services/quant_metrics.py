@@ -538,7 +538,7 @@ def _plateau_stability(window_trials: list, search_space: list) -> tuple:
     return float(np.median(per_window)), len(per_window)
 
 
-def _param_pick_dispersion(window_trials: list, search_space: list, window_picks: list) -> Optional[float]:
+def _param_pick_dispersion(window_trials: list, search_space: list, window_picks: list) -> tuple:
     """Widest disagreement between windows about a tuned param, as a fraction of
     that param's search range.
 
@@ -548,10 +548,17 @@ def _param_pick_dispersion(window_trials: list, search_space: list, window_picks
     random picks — the search found nothing, and any consensus built from those
     picks is an average of noise.
 
-    Returns None when there are no numeric picks to compare.
+    Returns (worst, worst_name, per_param) — the NAME matters as much as the
+    number. This is a worst-case across params, so a single parameter the
+    strategy is insensitive to (its winning value is then arbitrary, and its
+    spread sits at the random level by construction) drags the whole gate red
+    while every other param agreed tightly. Without the name you cannot tell
+    "the optimizer found nothing" from "one knob does nothing".
+
+    (None, None, {}) when there are no numeric picks to compare.
     """
     if not window_picks:
-        return None
+        return None, None, {}
     spans = {}
     for entry in (search_space or []):
         try:
@@ -560,16 +567,19 @@ def _param_pick_dispersion(window_trials: list, search_space: list, window_picks
             continue
         if entry.get("name") and hi > lo:
             spans[entry["name"]] = hi - lo
+    per_param: dict[str, float] = {}
     worst = None
+    worst_name = None
     for name, span in spans.items():
         vals = [p[name] for p in window_picks
                 if isinstance(p.get(name), (int, float)) and not isinstance(p.get(name), bool)]
         if len(vals) < 2:
             continue
         d = float(np.std(vals)) / span
+        per_param[name] = d
         if worst is None or d > worst:
-            worst = d
-    return worst
+            worst, worst_name = d, name
+    return worst, worst_name, per_param
 
 
 def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
@@ -603,7 +613,8 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
     stability, n_plateau_windows = _plateau_stability(window_trials, search_space)
 
     # ---- How far apart the windows' winning values were. >= 0.289 == random.
-    pick_dispersion = _param_pick_dispersion(window_trials, search_space, window_picks)
+    pick_dispersion, pick_dispersion_param, pick_dispersion_by_param = _param_pick_dispersion(
+        window_trials, search_space, window_picks)
 
     # ---- Top-score dispersion: the OLD "stability" number, kept under a name
     # that says what it actually is — how tightly the best 10% of trial SCORES
@@ -682,6 +693,11 @@ def _robustness(wf_trials: list[dict], bars_per_year: float) -> dict:
         # >= ~0.289 means the windows' picks are indistinguishable from uniform
         # random draws over the search range.
         "param_pick_dispersion": _safe(pick_dispersion),
+        # WHICH param produced that worst-case spread, and the spread of every
+        # tuned param — so the UI can say "only `contracts` disagreed" instead of
+        # condemning a run on an anonymous number.
+        "param_pick_dispersion_worst_param": pick_dispersion_param,
+        "param_pick_dispersion_by_param": {k: _safe(v) for k, v in (pick_dispersion_by_param or {}).items()},
         "param_pick_dispersion_random_level": 1.0 / math.sqrt(12.0),
         "top_score_dispersion": _safe(top_score_dispersion),
         "deflated_sharpe_probability": _safe(deflated_sharpe),

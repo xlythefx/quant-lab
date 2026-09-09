@@ -772,6 +772,8 @@ export default function DashboardV2() {
           params={editingStrategy.params}
           strategyId={editingStrategy.id}
           builtinPresets={editingMeta.presets || {}}
+          symbol={symbol}
+          timeframe={timeframe}
           hiddenParams={hiddenSizingParams}
           onChange={() => {}}
           onClose={() => setEditingId(null)}

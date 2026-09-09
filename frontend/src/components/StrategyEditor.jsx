@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import TimePickerModal from "./TimePickerModal.jsx";
 import { getTz, convertUtcHHmm, tzShort } from "../services/timezone.js";
-import { getPresets, savePresets as apiSavePresets } from "../services/api.js";
+import { getPresetsFull, savePresets as apiSavePresets } from "../services/api.js";
+import PresetDiffModal from "./PresetDiffModal.jsx";
 
 // Friendly labels for the canonical trading sessions. Strategies may declare
 // their own session keys (e.g. a single "asia" / "entry" window) — those render
@@ -21,29 +22,44 @@ const sessionLabel = (key) =>
 export default function StrategyEditor({
   open, schema, params, onChange, onClose, onApply, onResetDefaults, onSaveAsDefault, color,
   strategyId, builtinPresets = {}, hiddenParams = [], onCompareLookAhead,
+  symbol, timeframe,
 }) {
   const [draft, setDraft] = useState(params || {});
   const [saved, setSaved] = useState(false);
-  // Server-side user presets, kept as [{name, params}] for the UI.
+  // Server-side user presets, kept as [{name, params, meta}] for the UI.
+  // `meta` is provenance (which symbol/timeframe the set was tuned on) — see
+  // backend/services/presets_config.py.
   const [presets, setPresets] = useState([]);
   const [savingName, setSavingName] = useState("");
   const [showSaveModal, setShowSaveModal] = useState(false);
+  // A preset chosen but not yet applied — the diff modal shows what it changes
+  // before it overwrites the draft. {name, params, meta}
+  const [pending, setPending] = useState(null);
+  // The preset being renamed / re-pointed at the current params. {orig, name}
+  const [editing, setEditing] = useState(null);
 
   useEffect(() => { setDraft(params || {}); }, [params, open]);
   useEffect(() => {
     if (!open || !strategyId) { setPresets([]); return; }
     let alive = true;
-    getPresets(strategyId)
-      .then((obj) => { if (alive) setPresets(Object.entries(obj || {}).map(([name, p]) => ({ name, params: p }))); })
+    getPresetsFull(strategyId)
+      .then(({ presets: obj, meta }) => {
+        if (!alive) return;
+        setPresets(Object.entries(obj || {}).map(([name, p]) => ({
+          name, params: p, meta: (meta || {})[name] || {},
+        })));
+      })
       .catch(() => { if (alive) setPresets([]); });
     return () => { alive = false; };
   }, [open, strategyId]);
 
-  // Persist the current preset list to the server ([{name,params}] → {name: params}).
+  // Persist the current preset list to the server. Provenance is sent alongside
+  // the params so a rename or a delete carries (or drops) it with the preset.
   const persist = (list) => {
     const obj = {};
-    for (const p of list) obj[p.name] = p.params;
-    apiSavePresets(strategyId, obj).catch(() => {});
+    const meta = {};
+    for (const p of list) { obj[p.name] = p.params; meta[p.name] = p.meta || {}; }
+    apiSavePresets(strategyId, obj, meta).catch(() => {});
   };
 
   // Hide sizing params that don't apply to the selected instrument: futures
@@ -89,35 +105,60 @@ export default function StrategyEditor({
     (name === "allowed_regimes" && regimeMethod !== "five") ||
     (name === "allowed_hmm_moods" && regimeMethod !== "hmm");
 
-  const applyPreset = (name) => {
-    // Check user presets first, then built-ins
-    const userPreset = presets.find((x) => x.name === name);
-    if (userPreset) {
-      setDraft(userPreset.params);
-      onChange?.(userPreset.params);
-      return;
-    }
-    const sparse = builtinPresets[name];
-    if (!sparse) return;
-    // Merge sparse built-in over schema defaults (same logic as Reset Defaults)
+  // Resolve a preset name to the COMPLETE param set it would install, without
+  // applying it. Both kinds start from schema defaults so a preset saved before
+  // a param existed can't leave that param undefined.
+  const resolvePreset = (name) => {
     const merged = {};
     for (const spec of schema || []) merged[spec.name] = spec.default;
+
+    const userPreset = presets.find((x) => x.name === name);
+    const sparse = userPreset ? userPreset.params : builtinPresets[name];
+    if (!sparse) return null;
+
     for (const [k, v] of Object.entries(sparse)) {
       const base = merged[k];
+      // One-level deep merge for dict params (e.g. sessions), so a preset that
+      // overrides only `ny_am` keeps the other windows instead of wiping them.
       if (v && typeof v === "object" && !Array.isArray(v) && base && typeof base === "object" && !Array.isArray(base)) {
         merged[k] = { ...base, ...v };
       } else {
         merged[k] = v;
       }
     }
-    setDraft(merged);
-    onChange?.(merged);
+    return { params: merged, meta: userPreset?.meta || {} };
+  };
+
+  // Selecting a preset no longer overwrites the draft on the spot — it stages
+  // the change so the diff modal can show what moves (and warn if the preset was
+  // tuned on a different instrument) before you commit.
+  const requestPreset = (name) => {
+    const resolved = resolvePreset(name);
+    if (!resolved) return;
+    setPending({ name, ...resolved });
+  };
+
+  const confirmPending = () => {
+    if (!pending) return;
+    setDraft(pending.params);
+    onChange?.(pending.params);
+    setPending(null);
   };
 
   const savePreset = () => {
     const name = savingName.trim();
     if (!name) return;
-    const next = [...presets.filter((x) => x.name !== name), { name, params: { ...draft } }];
+    const prev = presets.find((x) => x.name === name);
+    const meta = {
+      // Keep the original provenance when overwriting a walk-forward preset in
+      // place; otherwise record where this set is being saved from.
+      ...(prev?.meta || {}),
+      ...(symbol ? { symbol } : {}),
+      ...(timeframe ? { timeframe } : {}),
+      source: prev?.meta?.source || "manual",
+      created: Math.floor(Date.now() / 1000),
+    };
+    const next = [...presets.filter((x) => x.name !== name), { name, params: { ...draft }, meta }];
     setPresets(next);
     persist(next);
     setSavingName("");
@@ -128,6 +169,28 @@ export default function StrategyEditor({
     const next = presets.filter((x) => x.name !== name);
     setPresets(next);
     persist(next);
+  };
+
+  // Rename, and optionally re-point the preset at whatever is in the panel now.
+  const commitEdit = ({ takeCurrentParams }) => {
+    if (!editing) return;
+    const newName = editing.name.trim();
+    const orig = presets.find((x) => x.name === editing.orig);
+    if (!newName || !orig) { setEditing(null); return; }
+    const updated = {
+      name: newName,
+      params: takeCurrentParams ? { ...draft } : orig.params,
+      meta: takeCurrentParams
+        // Re-pointing at the current params invalidates the old provenance —
+        // these numbers were not the ones the walk-forward validated.
+        ? { ...(symbol ? { symbol } : {}), ...(timeframe ? { timeframe } : {}),
+            source: "manual", created: Math.floor(Date.now() / 1000) }
+        : orig.meta,
+    };
+    const next = [...presets.filter((x) => x.name !== editing.orig && x.name !== newName), updated];
+    setPresets(next);
+    persist(next);
+    setEditing(null);
   };
 
   return (
@@ -147,7 +210,7 @@ export default function StrategyEditor({
           <select
             className="flex-1 px-2 py-1 rounded-md bg-bg-elev border border-line font-mono text-xs focus:outline-none focus:border-accent-blue text-text min-w-0"
             defaultValue=""
-            onChange={(e) => { if (e.target.value) applyPreset(e.target.value); e.target.value = ""; }}
+            onChange={(e) => { if (e.target.value) requestPreset(e.target.value); e.target.value = ""; }}
           >
             <option value="">— load preset —</option>
             {Object.keys(builtinPresets).length > 0 && (
@@ -160,7 +223,10 @@ export default function StrategyEditor({
             {presets.length > 0 && (
               <optgroup label="Saved">
                 {presets.map((p) => (
-                  <option key={p.name} value={p.name}>{p.name}</option>
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                    {p.meta?.symbol ? ` · ${p.meta.symbol}${p.meta.timeframe ? " " + p.meta.timeframe : ""}` : ""}
+                  </option>
                 ))}
               </optgroup>
             )}
@@ -175,21 +241,41 @@ export default function StrategyEditor({
           </button>
         </div>
 
-        {/* Chips row: built-ins (★, no delete) + user presets (deletable) */}
+        {/* Chips row: built-ins (★, no delete) + user presets (edit / delete).
+            A saved preset tuned on a DIFFERENT instrument than the one open here
+            gets an amber ring — the numbers are evidence about where they were
+            fitted, not about this symbol. */}
         {(Object.keys(builtinPresets).length > 0 || presets.length > 0) && (
           <div className="flex flex-wrap gap-1.5">
             {Object.keys(builtinPresets).map((name) => (
               <div key={name} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-accent-blue/10 border border-accent-blue/30 text-[10px]">
                 <span className="text-accent-blue/60">★</span>
-                <button onClick={() => applyPreset(name)} className="text-accent-blue hover:text-accent-blue/80 font-mono">{name}</button>
+                <button onClick={() => requestPreset(name)} className="text-accent-blue hover:text-accent-blue/80 font-mono">{name}</button>
               </div>
             ))}
-            {presets.map((p) => (
-              <div key={p.name} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-elev border border-line text-[10px]">
-                <button onClick={() => applyPreset(p.name)} className="text-text hover:text-accent-blue font-mono">{p.name}</button>
-                <button onClick={() => deletePreset(p.name)} className="text-muted/60 hover:text-loss leading-none ml-0.5">×</button>
-              </div>
-            ))}
+            {presets.map((p) => {
+              const origin = [p.meta?.symbol, p.meta?.timeframe].filter(Boolean).join(" ");
+              const mismatch = (p.meta?.symbol && symbol && p.meta.symbol !== symbol)
+                || (p.meta?.timeframe && timeframe && p.meta.timeframe !== timeframe);
+              return (
+                <div
+                  key={p.name}
+                  title={origin ? `Tuned on ${origin}${p.meta?.source === "walkforward" ? " · walk-forward" : ""}` : "No recorded origin"}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full bg-bg-elev border text-[10px] ${mismatch ? "border-amber-400/50" : "border-line"}`}
+                >
+                  <button onClick={() => requestPreset(p.name)} className="text-text hover:text-accent-blue font-mono">{p.name}</button>
+                  {origin && <span className={`font-mono ${mismatch ? "text-amber-400/80" : "text-muted/60"}`}>{origin}</span>}
+                  <button
+                    onClick={() => setEditing({ orig: p.name, name: p.name })}
+                    title="Rename or update this preset"
+                    className="text-muted/60 hover:text-accent-blue leading-none ml-0.5"
+                  >
+                    ✎
+                  </button>
+                  <button onClick={() => deletePreset(p.name)} title="Delete this preset" className="text-muted/60 hover:text-loss leading-none">×</button>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -307,6 +393,74 @@ export default function StrategyEditor({
           </div>
         </div>
       )}
+
+      {/* Edit-preset modal: rename, and optionally re-point at the live params */}
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setEditing(null)}>
+          <div className="bg-bg-panel border border-line rounded-2xl shadow-2xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-line">
+              <h3 className="text-base font-semibold">Edit preset</h3>
+              <p className="text-xs text-muted mt-0.5">
+                Rename it, or overwrite its params with whatever is in the panel right now.
+              </p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <input
+                autoFocus
+                type="text"
+                value={editing.name}
+                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitEdit({ takeCurrentParams: false });
+                  if (e.key === "Escape") setEditing(null);
+                }}
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+              />
+              {editing.name.trim() !== editing.orig && presets.some((p) => p.name === editing.name.trim()) && (
+                <div className="text-[11px] text-accent-yellow">A preset named "{editing.name.trim()}" exists — it will be overwritten.</div>
+              )}
+              <div className="text-[11px] text-muted">
+                Overwriting the params clears the recorded origin
+                {presets.find((p) => p.name === editing.orig)?.meta?.source === "walkforward"
+                  ? " — this one came from a walk-forward, and the current panel values are not the set that was validated."
+                  : "."}
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-line flex items-center justify-between gap-2">
+              <button
+                onClick={() => commitEdit({ takeCurrentParams: true })}
+                disabled={!editing.name.trim()}
+                className="px-3 py-1.5 rounded-md border border-amber-400/40 text-amber-400 text-xs hover:bg-amber-400/10 disabled:opacity-50"
+              >
+                Update to current params
+              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setEditing(null)} className="px-3 py-1.5 rounded-md border border-line text-muted text-sm hover:text-text">Cancel</button>
+                <button
+                  onClick={() => commitEdit({ takeCurrentParams: false })}
+                  disabled={!editing.name.trim()}
+                  className="px-4 py-1.5 rounded-md bg-accent-grad text-white text-sm font-semibold disabled:opacity-50"
+                >
+                  Rename
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* "vwma_length 30 → 45" — what loading this preset actually changes */}
+      <PresetDiffModal
+        open={!!pending}
+        name={pending?.name}
+        before={draft}
+        after={pending?.params}
+        meta={pending?.meta}
+        symbol={symbol}
+        timeframe={timeframe}
+        onConfirm={confirmPending}
+        onCancel={() => setPending(null)}
+      />
     </div>
   );
 }

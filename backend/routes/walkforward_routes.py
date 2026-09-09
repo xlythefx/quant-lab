@@ -81,6 +81,45 @@ def last_result():
 
 
 # ---------------------------------------------------------------------------
+# Equity curves for FIXED parameter sets — powers "See Equity Curve" on the
+# deploy-candidate card. Deliberately on demand rather than baked into the
+# walk-forward result: the result payload already carries a stitched curve per
+# run, and four more full-length series would multiply it for a chart most runs
+# never open.
+# ---------------------------------------------------------------------------
+
+@walkforward_bp.post("/curves")
+def fixed_param_curves():
+    body = request.get_json(silent=True) or {}
+    try:
+        spec = {
+            "strategy_id":  (body.get("strategy_id") or "").strip(),
+            "symbol":       validate_symbol(body.get("symbol")),
+            "timeframe":    validate_timeframe(body.get("timeframe")),
+            "oos_start":    body.get("oos_start"),
+            "oos_end":      body.get("oos_end"),
+            "warmup_bars":  body.get("warmup_bars"),
+            "sets":         body.get("sets") or {},
+            # Name of the set to ALSO run over every cached bar, or falsy to skip.
+            "full_history": body.get("full_history"),
+        }
+        if spec["oos_start"] is None or spec["oos_end"] is None:
+            raise ValidationError("oos_start and oos_end are required")
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        return jsonify(walkforward.fixed_param_curves(spec))
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except (ValueError, KeyError, TypeError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.exception("fixed-param curve run failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Multi-seed robustness — run the same config across N optimizer seeds.
 # ---------------------------------------------------------------------------
 

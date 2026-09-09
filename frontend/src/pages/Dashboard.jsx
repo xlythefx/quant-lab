@@ -980,6 +980,8 @@ export default function Dashboard() {
             params={s.params}
             strategyId={s.id}
             builtinPresets={meta.presets || {}}
+            symbol={symbol}
+            timeframe={timeframe}
             hiddenParams={_hiddenSizingParams}
             onCompareLookAhead={(p) => setLaCompare({ strategyId: s.id, params: p })}
             onClose={() => setEditingId(null)}

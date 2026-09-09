@@ -71,6 +71,39 @@ export default function Preflight({ baseParams, searchSpace, minTrades, embargoB
     });
   }
 
+  // The editor no longer auto-adds sizing params, but a search space persisted
+  // from an earlier session can still carry them. On crypto `contracts` is inert
+  // and on futures `risk_pct` is inert, so either way the optimizer burns trials
+  // on a dimension with no effect — and because the agreement gate reports the
+  // WORST param's spread, one dead dimension can turn that gate red on its own.
+  const sizingSearched = (searchSpace || [])
+    .map((e) => e.name)
+    .filter((n) => n === "risk_pct" || n === "contracts");
+  if (sizingSearched.length) {
+    items.push({
+      key: "sizing",
+      text: <>The search space includes <span className="font-mono">{sizingSearched.join(", ")}</span> —
+        position sizing, which is leverage rather than edge. One of the two is always inert
+        (crypto sizes by <span className="font-mono">risk_pct</span>, futures by{" "}
+        <span className="font-mono">contracts</span>), so its winning value is arbitrary and can drag the
+        &ldquo;Windows agree on the params&rdquo; gate to red by itself.</>,
+      fix: "Parameter editor → untick Search on the sizing param",
+    });
+  }
+
+  // pyramiding is min=1,max=1 in most strategies (never auto-added), but a few
+  // allow up to 20. Live runs single-position, so anything above 1 cannot be
+  // traded faithfully — the recommended params would diverge from the backtest.
+  if ((searchSpace || []).some((e) => e.name === "pyramiding")) {
+    items.push({
+      key: "pyramiding",
+      text: <><span className="font-mono">pyramiding</span> is being searched. Live alerts run
+        single-position, so any winner above 1 cannot be traded the way it was backtested —
+        the two will diverge as soon as the strategy stacks an entry.</>,
+      fix: "Untick Search on pyramiding and fix it at 1",
+    });
+  }
+
   if (!(searchSpace || []).length) {
     items.push({
       key: "nosearch",

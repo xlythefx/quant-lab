@@ -217,6 +217,19 @@ export async function getWalkForwardLastResult() {
   return data.result;
 }
 
+/**
+ * Equity curves for parameter sets held FIXED — the "See Equity Curve" button
+ * on the deploy-candidate card. `sets` is {name: params}; `full_history` names
+ * one of them to ALSO run over every cached bar (that span includes the tuning
+ * windows, so it is illustrative, not evidence). Returns thinned {time, value}
+ * points only — a full-history 1m run is ~1M bars, so the backend never ships
+ * candles or trades here.
+ */
+export async function getWalkForwardCurves(body) {
+  const { data } = await api.post("/api/walkforward/curves", body, { timeout: 900_000 });
+  return data;
+}
+
 // Multi-seed robustness — run the same WFA config across N optimizer seeds.
 export async function startWalkForwardRobustness(spec) {
   const { data } = await api.post("/api/walkforward/robustness/start", spec);
@@ -591,8 +604,19 @@ export async function getPresets(strategyId) {
   return data.presets; // {name: params}
 }
 
-export async function savePresets(strategyId, presets) {
-  const { data } = await api.put("/api/presets", { strategy_id: strategyId, presets });
+// Same call, but keeps the provenance map ({name: {symbol, timeframe, source,
+// created, oos_return_pct}}) that says where each preset came from.
+export async function getPresetsFull(strategyId) {
+  const { data } = await api.get("/api/presets", { params: { strategy_id: strategyId } });
+  return { presets: data.presets || {}, meta: data.meta || {} };
+}
+
+// `meta` is optional: omit it and the server PRESERVES the stored provenance for
+// every preset name that survives the replace (so a params-only save can't wipe it).
+export async function savePresets(strategyId, presets, meta) {
+  const body = { strategy_id: strategyId, presets };
+  if (meta) body.meta = meta;
+  const { data } = await api.put("/api/presets", body);
   return data.presets; // {name: params}
 }
 

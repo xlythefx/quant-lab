@@ -27,6 +27,14 @@ BACKEND_PORT  = 6173
 FRONTEND_PORT = 5173
 PROJECT_PORTS = [BACKEND_PORT, FRONTEND_PORT]
 
+# ── Prerequisites ──────────────────────────────────────────────────────────
+# Minimum runtimes the project needs. Node is required for the frontend only —
+# the backend, backtests and the seed script run without it.
+PYTHON_MIN = (3, 10)
+NODE_MIN   = 18
+PYTHON_URL = "https://www.python.org/downloads/"
+NODE_URL   = "https://nodejs.org/en/download"
+
 # ── Palette ────────────────────────────────────────────────────────────────
 C = {
     "bg":     "#0a0a0a",
@@ -102,6 +110,33 @@ def show_in_taskbar(win: tk.Tk):
         win.after(10, win.deiconify)
     except Exception:
         pass
+
+
+def probe_version(exe: str) -> str | None:
+    """Return `exe --version` output, or None if the tool isn't installed.
+
+    node/npm are .cmd shims on Windows, so they must go through cmd /c —
+    a bare ["npm", "-v"] raises FileNotFoundError there."""
+    cmd = ["cmd", "/c", exe, "--version"] if sys.platform == "win32" else [exe, "--version"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=15, creationflags=_cflags())
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or r.stderr).strip() or None
+
+
+def parse_major(ver: str) -> int | None:
+    """'v20.11.0' / '10.2.4' -> 20 / 10."""
+    digits = ""
+    for ch in ver.lstrip("v"):
+        if ch.isdigit():
+            digits += ch
+        else:
+            break
+    return int(digits) if digits else None
 
 
 def process_name(pid: int) -> str:
@@ -296,12 +331,34 @@ class DepsTab(tk.Frame):
         _flat_btn(bar, "↓  Install All", C["green"], self.install_all).pack(side="right", padx=4, pady=6)
         _flat_btn(bar, "⟳  Check All",  C["blue"],  self.check_all).pack(side="right", padx=4, pady=6)
 
+        # ── Prerequisites ─────────────────────────────────────────────
+        tk.Label(self, text="  prerequisites — install these first",
+                 font=("Consolas", 8), bg=C["bg"], fg=C["muted"]).pack(
+                     anchor="w", padx=8, pady=(8, 2))
+
+        self._py = self._make_prereq_row(
+            "Python", f"required {PYTHON_MIN[0]}.{PYTHON_MIN[1]}+  ·  runs the backend, "
+                      "backtests and the data seeder", PYTHON_URL,
+        )
+        self._py.pack(fill="x", padx=8, pady=2)
+
+        self._node = self._make_prereq_row(
+            "Node.js", f"required {NODE_MIN}+  ·  frontend only — the backend runs without it",
+            NODE_URL,
+        )
+        self._node.pack(fill="x", padx=8, pady=2)
+
+        tk.Frame(self, bg=C["border"], height=1).pack(fill="x", padx=8, pady=(8, 2))
+        tk.Label(self, text="  project packages",
+                 font=("Consolas", 8), bg=C["bg"], fg=C["muted"]).pack(
+                     anchor="w", padx=8, pady=(2, 2))
+
         # ── Backend row ───────────────────────────────────────────────
         self._be = self._make_row(
             "Backend — Python packages",
             f"pip install -r requirements.txt  ({BACKEND_DIR / 'requirements.txt'})",
         )
-        self._be.pack(fill="x", padx=8, pady=(10, 4))
+        self._be.pack(fill="x", padx=8, pady=(2, 4))
 
         # ── Frontend row ──────────────────────────────────────────────
         self._fe = self._make_row(
@@ -348,6 +405,47 @@ class DepsTab(tk.Frame):
         row._install_btn = install_btn
         return row
 
+    def _make_prereq_row(self, title: str, hint: str, url: str) -> tk.Frame:
+        """A runtime (Python / Node) we can detect but not install for the
+        user — so the action is a link to the official download page."""
+        row = tk.Frame(self, bg=C["bg3"])
+        inner = tk.Frame(row, bg=C["bg4"])
+        inner.pack(fill="x")
+
+        dot = tk.Label(inner, text="●", font=("Consolas", 10),
+                       bg=C["bg4"], fg=C["muted"], padx=12, pady=10)
+        dot.pack(side="left")
+
+        info = tk.Frame(inner, bg=C["bg4"])
+        info.pack(side="left", fill="both", expand=True, pady=4)
+        head = tk.Frame(info, bg=C["bg4"])
+        head.pack(anchor="w")
+        tk.Label(head, text=title, font=("Consolas", 10, "bold"),
+                 bg=C["bg4"], fg=C["text"]).pack(side="left")
+        ver_lbl = tk.Label(head, text="  checking…", font=("Consolas", 9),
+                           bg=C["bg4"], fg=C["muted"])
+        ver_lbl.pack(side="left")
+        tk.Label(info, text=hint, font=("Consolas", 7),
+                 bg=C["bg4"], fg=C["dim"], anchor="w").pack(anchor="w")
+
+        btn_frame = tk.Frame(inner, bg=C["bg4"])
+        btn_frame.pack(side="right", padx=10)
+        dl_btn = _flat_btn(btn_frame, "Download  ↗", C["blue"],
+                           lambda u=url: webbrowser.open(u))
+        dl_btn.pack()
+
+        row._dot     = dot
+        row._ver_lbl = ver_lbl
+        row._dl_btn  = dl_btn
+        row._url     = url
+        return row
+
+    def _set_prereq(self, row: tk.Frame, color: str, text: str, urgent: bool):
+        row._dot.config(fg=color)
+        row._ver_lbl.config(text=f"  {text}", fg=color)
+        # A satisfied runtime keeps its link (for upgrades) but stops shouting.
+        row._dl_btn.config(fg=C["yellow"] if urgent else C["muted"])
+
     # ── status helper ─────────────────────────────────────────────────
 
     _STATUS_MAP = {
@@ -367,8 +465,48 @@ class DepsTab(tk.Frame):
     # ── check ─────────────────────────────────────────────────────────
 
     def check_all(self):
+        threading.Thread(target=self._check_python,   daemon=True).start()
+        threading.Thread(target=self._check_node,     daemon=True).start()
         threading.Thread(target=self._check_backend,  daemon=True).start()
         threading.Thread(target=self._check_frontend, daemon=True).start()
+
+    def _check_python(self):
+        """The interpreter running this launcher is the one that will run the
+        backend (ServiceCard shells `python app.py`), so report on it."""
+        v = sys.version_info
+        cur = f"{v.major}.{v.minor}.{v.micro}"
+        if (v.major, v.minor) >= PYTHON_MIN:
+            self.after(0, self._set_prereq, self._py, C["green"],
+                       f"{cur}  ✓", False)
+            self.log.write(f"Python {cur} ✓", "info")
+        else:
+            need = f"{PYTHON_MIN[0]}.{PYTHON_MIN[1]}+"
+            self.after(0, self._set_prereq, self._py, C["red"],
+                       f"{cur} — too old, need {need}", True)
+            self.log.write(f"Python {cur} is below {need} — click Download", "err")
+
+    def _check_node(self):
+        self.after(0, self._set_prereq, self._node, C["yellow"], "checking…", False)
+        node = probe_version("node")
+        if node is None:
+            self.after(0, self._set_prereq, self._node, C["red"],
+                       "not installed", True)
+            self.log.write("Node.js not found — click Download "
+                           "(backend still works without it)", "warn")
+            return
+
+        major = parse_major(node)
+        npm = probe_version("npm")
+        suffix = f"  ·  npm {npm}" if npm else "  ·  npm missing"
+
+        if major is not None and major < NODE_MIN:
+            self.after(0, self._set_prereq, self._node, C["red"],
+                       f"{node} — too old, need {NODE_MIN}+", True)
+            self.log.write(f"Node {node} is below {NODE_MIN} — click Download", "err")
+        else:
+            self.after(0, self._set_prereq, self._node, C["green"],
+                       f"{node}  ✓{suffix}", False)
+            self.log.write(f"Node {node} ✓{suffix}", "info")
 
     def _check_backend(self):
         self.after(0, self._set_status, self._be, "checking")
@@ -417,6 +555,21 @@ class DepsTab(tk.Frame):
         ).start()
 
     def _install_frontend(self):
+        # Without Node, `npm install` fails with a bare FileNotFoundError that
+        # tells the user nothing — catch it here and point at the download.
+        if probe_version("npm") is None:
+            self.after(0, self._set_status, self._fe, "error")
+            self.log.write("npm not found — install Node.js first "
+                           "(Download button above), then retry.", "err")
+            if messagebox.askyesno(
+                "Node.js required",
+                "npm was not found, so frontend packages can't be installed.\n\n"
+                f"Node.js {NODE_MIN}+ is required for the frontend. The backend, "
+                "backtests and the data seeder work without it.\n\n"
+                "Open the Node.js download page?",
+            ):
+                webbrowser.open(NODE_URL)
+            return
         # npm is a .cmd shim on Windows, so it must run through cmd /c —
         # a bare ["npm", "install"] raises FileNotFoundError there.
         cmd = ["cmd", "/c", "npm", "install"] if sys.platform == "win32" else ["npm", "install"]
@@ -638,6 +791,9 @@ class BuildTab(tk.Frame):
                  bg=C["bg"], fg=C["dim"]).pack(anchor="w", pady=(4, 0))
 
         g4 = group(" Data ")
+        _flat_btn(g4, "Seed Crypto Data", C["green"], self._seed_crypto).pack(fill="x", pady=3)
+        tk.Label(g4, text="26 symbols · 15m · free, no API key — 30-60 min",
+                 font=("Consolas", 7), bg=C["bg"], fg=C["dim"]).pack(anchor="w", pady=(0, 6))
         _flat_btn(g4, "Pull Futures (Databento)", C["blue"],
                   lambda: self._run("pull databento",
                                     f'"{sys.executable}" "{ROOT_DIR / "scripts" / "pull_databento.py"}"',
@@ -671,6 +827,23 @@ class BuildTab(tk.Frame):
                 self.log.write(f"{label} error: {exc}", "err")
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _seed_crypto(self):
+        """Download the crypto parquet cache. Long-running, so confirm first —
+        already-cached symbols are skipped, which makes re-runs cheap."""
+        script = ROOT_DIR / "scripts" / "seed_data.py"
+        if not script.exists():
+            self.log.write(f"seed_data.py not found at {script}", "err")
+            return
+        if not messagebox.askyesno(
+            "Seed Crypto Data",
+            "Download the full history for 26 crypto symbols at 15m from "
+            "Binance.\n\nNo API key needed. This takes roughly 30-60 minutes "
+            "and about 140 MB. Symbols already cached are skipped, so it is "
+            "safe to stop and re-run.\n\nStart the download?",
+        ):
+            return
+        self._run("seed crypto", f'"{sys.executable}" "{script}"', ROOT_DIR)
 
     def _deploy(self):
         script = VPS_DIR / "deploy.py"

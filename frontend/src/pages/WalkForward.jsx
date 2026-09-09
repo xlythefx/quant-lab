@@ -31,6 +31,7 @@ import {
   HourOfDayStrip, MonthlyReturnsHeatmap, WhereItWorks,
   useParamStats,
 } from "../components/walkforward/widgets.jsx";
+import { stitchBuyHold } from "../services/wfVerdict.js";
 
 const METRICS = [
   { id: "sharpe",        label: "Sharpe" },
@@ -613,7 +614,7 @@ export default function WalkForward() {
           <TabBar tabs={tabs} active={tab} onSelect={onTab} />
 
           {tab === "setup"      && <SetupTab {...setupProps} />}
-          {tab === "overview"   && result && <OverviewTab   result={result} />}
+          {tab === "overview"   && result && <OverviewTab   result={result} onOpenVerdict={() => onTab("verdict")} />}
           {tab === "verdict"    && result && <WFVerdictPanel result={result} strategies={strategies} />}
           {tab === "folds"      && result && <FoldsTab      result={result} onCheckMonteCarlo={onCheckMonteCarlo} />}
           {tab === "parameters" && result && <ParametersTab result={result} />}
@@ -993,7 +994,7 @@ function TradingCostsCard({ costs }) {
   );
 }
 
-function OverviewTab({ result }) {
+function OverviewTab({ result, onOpenVerdict }) {
   const s = result.stats || {};
   const lng = s.long || {};
   const sht = s.short || {};
@@ -1002,19 +1003,15 @@ function OverviewTab({ result }) {
   const pnlGrid  = result.analytics?.heatmap?.pnl   || [];
   const cntGrid  = result.analytics?.heatmap?.count || [];
 
-  // Stitched buy-and-hold series.
-  const bhPts = useMemo(() => {
-    let value = 100;
-    const pts = [];
-    for (const w of windows) {
-      if (w.bh_return_pct == null || w.oos_start == null || w.oos_end == null) continue;
-      if (pts.length === 0) pts.push({ time: w.oos_start, value });
-      else pts.push({ time: w.oos_start, value });
-      value = value * (1 + w.bh_return_pct / 100);
-      pts.push({ time: w.oos_end, value });
-    }
-    return pts;
-  }, [windows]);
+  // Stitched buy-and-hold series. Shares one implementation with the
+  // "Beats buy-and-hold" gate so the chart and the gate can't use different
+  // conventions — and it follows the STRATEGY's convention: fixed-contract
+  // futures stitch additively, so the benchmark must not compound either.
+  const bh = useMemo(
+    () => stitchBuyHold(windows, result?.wf_spec?.contract_sized),
+    [windows, result],
+  );
+  const bhPts = bh.pts;
 
   const hasBh = bhPts.length >= 2;
   const strategyMeta = hasBh
@@ -1057,7 +1054,7 @@ function OverviewTab({ result }) {
         </button>
       </div>
 
-      <WFVerdict result={result} />
+      <WFVerdict result={result} onOpenVerdict={onOpenVerdict} />
 
       {/* ── Headline KPIs ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1134,7 +1131,8 @@ function OverviewTab({ result }) {
                 <span className="inline-block w-3 h-0.5 bg-[#3b82f6]" /> strategy
               </span>
               <span className="flex items-center gap-1">
-                <span className="inline-block w-3 h-0.5 bg-[#94a3b8]" /> buy-and-hold
+                <span className="inline-block w-3 h-0.5 bg-[#94a3b8]" />
+                buy-and-hold{bh.additive ? " (summed — fixed contracts don't compound)" : ""}
               </span>
             </div>
           )}
@@ -1159,7 +1157,7 @@ function FoldsTab({ result, onCheckMonteCarlo }) {
   const windows = result.windows || [];
   return (
     <section className="space-y-4">
-      <FoldsISvsOOSChart windows={windows} />
+      <FoldsISvsOOSChart windows={windows} metric={result?.wf_spec?.metric} />
       <FoldsStratVsBHChart windows={windows} />
       <FoldsSharpeCIChart windows={windows} />
       <WindowRankings windows={windows} />
@@ -1172,9 +1170,15 @@ function FoldsTab({ result, onCheckMonteCarlo }) {
   );
 }
 
-// Paired bars: IS metric (training score) vs OOS Sharpe. Gap = overfit signal.
-function FoldsISvsOOSChart({ windows }) {
+// Paired bars: IS metric (training score) vs OOS Sharpe. Gap = overfit signal —
+// but ONLY when the IS metric is itself a Sharpe. `is_score` is whatever the run
+// optimized, so on profit_factor (capped at 10) or total_return the two bars are
+// in different units and the gap is meaningless. The backend guards the same
+// hazard by returning WFE / deflated Sharpe as null unless metric == "sharpe";
+// this chart says so instead of silently inviting the comparison.
+function FoldsISvsOOSChart({ windows, metric }) {
   if (!windows.length) return null;
+  const comparable = (metric || "sharpe") === "sharpe";
   const rows = windows.map((w) => ({
     idx: w.window_idx,
     is: typeof w.is_score === "number" ? w.is_score : null,
@@ -1198,13 +1202,21 @@ function FoldsISvsOOSChart({ windows }) {
       <div className="flex items-center justify-between mb-2">
         <div>
           <div className="text-sm font-semibold text-text">IS score vs OOS Sharpe per window</div>
-          <div className="text-[11px] text-muted">
-            Big gap = overfit (training score didn't generalize). Aligned bars = honest edge.
-          </div>
+          {comparable ? (
+            <div className="text-[11px] text-muted">
+              Big gap = overfit (training score didn&apos;t generalize). Aligned bars = honest edge.
+            </div>
+          ) : (
+            <div className="text-[11px] text-amber-400">
+              This run optimized on <span className="font-mono">{metric}</span>, so the grey bars are
+              {" "}{metric} and the blue bars are Sharpe — different units on one axis. Read the
+              <span className="text-text"> shape across windows</span>, not the gap between the pair.
+            </div>
+          )}
         </div>
         <div className="text-[10px] font-mono text-muted flex items-center gap-3">
-          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#94a3b8] rounded-sm" /> IS</span>
-          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#3b82f6] rounded-sm" /> OOS</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#94a3b8] rounded-sm" /> IS ({metric || "sharpe"})</span>
+          <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 bg-[#3b82f6] rounded-sm" /> OOS (sharpe)</span>
         </div>
       </div>
       <div className="w-full overflow-x-auto">
@@ -1896,11 +1908,14 @@ function RobustnessTab({ result }) {
           sub="higher = flatter optimum"
           positive={rob.parameter_stability_score != null ? rob.parameter_stability_score >= 0.5 : null}
         />
+        {/* pct_windows_positive_oos arrives already as a 0–100 percentage
+            (quant_metrics: positives/len(valid)*100.0) — do NOT scale it again.
+            Same fix as Analytics.jsx; this copy was missed the first time. */}
         <Kpi
           title="% windows positive"
-          value={rob.pct_windows_positive_oos == null ? "—" : `${fmtNum(rob.pct_windows_positive_oos * 100)}%`}
+          value={rob.pct_windows_positive_oos == null ? "—" : `${fmtNum(rob.pct_windows_positive_oos)}%`}
           sub="OOS Sharpe > 0"
-          positive={rob.pct_windows_positive_oos != null ? rob.pct_windows_positive_oos >= 0.6 : null}
+          positive={rob.pct_windows_positive_oos != null ? rob.pct_windows_positive_oos >= 50 : null}
         />
       </div>
       <WFEquityFanChart result={result} />
@@ -2102,7 +2117,10 @@ function RegimeTab({ result }) {
     const rets    = ws.map((w) => w.oos_stats?.total_return_pct ?? 0);
     const dds     = ws.map((w) => Math.abs(w.oos_stats?.max_drawdown_pct ?? 0));
     const wins    = ws.map((w) => w.oos_stats?.win_rate ?? 0);
-    const vols    = ws.map((w) => w.oos_realized_vol);
+    // oos_realized_vol is a FRACTION (std × √bars_per_year), so 0.65 means 65%
+    // annualized. Scale to percent here — once, at ingestion — so every label
+    // below reads in the unit it claims.
+    const vols    = ws.map((w) => w.oos_realized_vol * 100);
     const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
     return {
       sharpe: mean(sharpes),
@@ -2184,7 +2202,10 @@ function RegimeScatter({ windows }) {
 
   const pts = windows
     .filter((w) => w.oos_realized_vol != null && w.oos_stats?.sharpe != null)
-    .map((w) => ({ x: w.oos_realized_vol, y: w.oos_stats.sharpe, idx: w.window_idx }));
+    // ×100: oos_realized_vol is a fraction. Scaling x here also makes the
+    // regression slope genuinely "Sharpe per +1 percentage point of vol",
+    // which is what the caption below already claims.
+    .map((w) => ({ x: w.oos_realized_vol * 100, y: w.oos_stats.sharpe, idx: w.window_idx }));
 
   if (pts.length < 3) {
     return (

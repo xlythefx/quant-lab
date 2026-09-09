@@ -4,11 +4,14 @@
 
 import { useMemo, useRef, useState } from "react";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../../services/format.js";
-import { aiAnalyzeWalkForward } from "../../services/api.js";
+import { aiAnalyzeWalkForward, getPresetsFull, savePresets } from "../../services/api.js";
+import { fmtParamValue } from "../../services/paramFormat.js";
+import { computeWFGates, windowOutcome, DECISIVE } from "../../services/wfVerdict.js";
 import { resolveDefaultParams } from "../dashboardv2/metrics.js";
 import { convertUtcHHmm, tzShort } from "../../services/timezone.js";
 import { useDisplayTz } from "../../services/useDisplayTz.js";
 import { getUserDefaults } from "../../services/strategiesStore.js";
+import FixedParamEquityModal from "./FixedParamEquityModal.jsx";
 
 export function fmtDate(epoch) {
   if (!epoch) return "—";
@@ -265,35 +268,26 @@ export function RobustnessResults({ rbResult }) {
 
 // -- Verdict banner -----------------------------------------------------------
 
-export function WFVerdict({ result }) {
+/**
+ * Compact banner on the Overview tab. Renders the SAME verdict the Verdict tab
+ * renders in full — see services/wfVerdict.js for why there is only one
+ * computation now. It never calls the stitched curve a "deploy candidate": that
+ * phrase belongs to `RecommendedParams`, which describes an actual fixed
+ * parameter set rather than a re-optimize-every-window procedure.
+ */
+export function WFVerdict({ result, onOpenVerdict }) {
   const s = result.stats || {};
-  const windows = result.windows || [];
-  const sharpe = s.sharpe ?? 0;
-  const pf = s.profit_factor;
-  const ret = s.total_return_pct ?? 0;
-  const dd = Math.abs(s.max_drawdown_pct ?? 0);
-  const positiveWins = windows.filter((w) => (w.oos_stats?.sharpe ?? 0) > 0).length;
-  const pctPositive = windows.length ? positiveWins / windows.length : 0;
-
-  const calmar = dd > 0 ? ret / dd : 0;
-  let score = 0;
-  if (sharpe >= 1.5) score += 3; else if (sharpe >= 1.0) score += 2; else if (sharpe >= 0.5) score += 1;
-  if (pctPositive >= 0.7) score += 2; else if (pctPositive >= 0.5) score += 1;
-  if (calmar >= 2) score += 2; else if (calmar >= 1) score += 1;
-  if (pf != null && pf >= 1.5) score += 1;
-
-  let tier, tone, label;
-  if (score >= 6)        { tier = "Strong";   tone = "profit";  label = "🟢 Deploy candidate"; }
-  else if (score >= 4)   { tier = "Decent";   tone = "profit";  label = "🟡 Promising — refine further"; }
-  else if (score >= 2)   { tier = "Marginal"; tone = "amber";   label = "🟠 Marginal — likely overfit or thin edge"; }
-  else                   { tier = "Weak";     tone = "loss";    label = "🔴 Does not generalize — kill or rework"; }
+  const { tone, headline, fails, warns, greens, flats, traded, pctPositive } =
+    computeWFGates(result);
 
   const summary = [
-    `${fmtPct(ret)} OOS return`,
-    `Sharpe ${fmtNum(sharpe)}`,
-    `${fmtInt(positiveWins)}/${fmtInt(windows.length)} windows positive (${fmtNum(pctPositive * 100)}%)`,
-    `max DD ${fmtPct(dd, false)}`,
-  ].join(" · ");
+    `${fmtPct(s.total_return_pct ?? 0)} OOS return`,
+    `Sharpe ${fmtNum(s.sharpe)}`,
+    traded > 0
+      ? `${fmtInt(greens)}/${fmtInt(traded)} windows positive (${fmtNum(pctPositive * 100)}%)`
+      : "no windows traded",
+    flats > 0 ? `${fmtInt(flats)} never traded` : null,
+  ].filter(Boolean).join(" · ");
 
   const toneClasses = {
     profit: "border-profit/40 bg-profit/5 text-profit",
@@ -303,13 +297,25 @@ export function WFVerdict({ result }) {
 
   return (
     <div className={`rounded-xl border p-4 ${toneClasses[tone]}`}>
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-[10px] uppercase tracking-wider opacity-70">Verdict · {tier}</div>
-          <div className="text-base font-semibold mt-0.5">{label}</div>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wider opacity-70">Overall verdict</div>
+          <div className="text-base font-semibold mt-0.5">{headline}</div>
+          {(fails.length > 0 || warns.length > 0) && (
+            <div className="text-xs font-mono opacity-90 mt-1.5">
+              {fails.length > 0 && <>Failing: {fails.join(", ")}. </>}
+              {warns.length > 0 && <>Watch: {warns.join(", ")}.</>}
+            </div>
+          )}
         </div>
-        <div className="text-xs font-mono opacity-90">{summary}</div>
+        <div className="text-xs font-mono opacity-90 text-right shrink-0">{summary}</div>
       </div>
+      <button
+        onClick={onOpenVerdict}
+        className="text-[11px] text-muted hover:text-text mt-2 underline underline-offset-2"
+      >
+        Full gate-by-gate read → Verdict tab
+      </button>
     </div>
   );
 }
@@ -342,39 +348,34 @@ function GateCard({ light, title, value, plain }) {
   );
 }
 
-// Per-window green/red strip — see sub-period consistency at a glance.
+// Per-window strip — sub-period consistency at a glance. Three states, not two:
+// a window where the strategy never fired is grey, not red. Painting it red said
+// "this window lost money", which is a different claim from "nothing happened".
+const OUTCOME_SWATCH = {
+  green: "bg-emerald-500/70",
+  red:   "bg-loss/70",
+  flat:  "bg-muted/25 border border-line",
+};
+
 function WindowConsistencyStrip({ windows }) {
   if (!windows.length) return null;
   return (
     <div className="flex flex-wrap gap-1">
       {windows.map((w) => {
-        const sh = w.oos_stats?.sharpe ?? 0;
-        const good = sh > 0;
+        const outcome = windowOutcome(w);
+        const title = outcome === "flat"
+          ? `Window ${w.window_idx}: no trades`
+          : `Window ${w.window_idx}: OOS Sharpe ${fmtNum(w.oos_stats?.sharpe)} · ${fmtPct(w.oos_stats?.total_return_pct ?? 0)}`;
         return (
           <div
             key={w.window_idx}
-            title={`Window ${w.window_idx}: OOS Sharpe ${fmtNum(sh)} · ${fmtPct(w.oos_stats?.total_return_pct ?? 0)}`}
-            className={`w-4 h-4 rounded-sm ${good ? "bg-emerald-500/70" : "bg-loss/70"}`}
+            title={title}
+            className={`w-4 h-4 rounded-sm ${OUTCOME_SWATCH[outcome]}`}
           />
         );
       })}
     </div>
   );
-}
-
-// Render one param value the way a human reads it (on/off, "long + short", etc.).
-function fmtParamValue(v) {
-  if (typeof v === "boolean") return v ? "on" : "off";
-  if (typeof v === "number") return fmtNum(v);
-  if (v && typeof v === "object") {
-    const allBool = Object.values(v).every((x) => typeof x === "boolean");
-    if (allBool) {
-      const on = Object.entries(v).filter(([, x]) => x).map(([k]) => k);
-      return on.length ? on.join(" + ") : "none";
-    }
-    return "custom";   // nested config (e.g. sessions) — too much to inline
-  }
-  return String(v);
 }
 
 function ParamGrid({ params, tunedNames }) {
@@ -415,6 +416,152 @@ function OosScoreLine({ stats, label, strong }) {
 }
 
 /**
+ * "Create Preset" — send this walk-forward's parameter set to the strategy's
+ * saved presets, where Dashboard V2's Settings panel can load it.
+ *
+ * Two things it deliberately does NOT do quietly:
+ *   1. It records PROVENANCE (symbol, timeframe, source, the set's out-of-sample
+ *      return). A param set is evidence about the instrument it was fitted on;
+ *      without that tag the dashboard has no way to tell you a preset came from
+ *      a different market.
+ *   2. It carries the panel's warnings into the confirm step. The card can be
+ *      saying "this set LOSES money out-of-sample" right above a one-click save;
+ *      the save has to restate that, or the warning gets left behind on this page.
+ */
+function CreatePresetButton({ result, params, warnings = [], severe = false, oosReturn }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [existing, setExisting] = useState(null);   // {presets, meta} | null
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const sid = result?.strategy_id;
+
+  const start = async () => {
+    setMsg(null);
+    setName(`${result.symbol} ${result.timeframe} · WF ${fmtDateLong(Math.floor(Date.now() / 1000))}`);
+    setOpen(true);
+    try {
+      setExisting(await getPresetsFull(sid));
+    } catch {
+      setExisting({ presets: {}, meta: {} });   // save will surface any real failure
+    }
+  };
+
+  const save = async () => {
+    const n = name.trim();
+    if (!n || !sid) return;
+    setBusy(true); setMsg(null);
+    try {
+      const cur = existing || (await getPresetsFull(sid));
+      await savePresets(
+        sid,
+        { ...(cur.presets || {}), [n]: params },
+        {
+          ...(cur.meta || {}),
+          [n]: {
+            symbol: result.symbol,
+            timeframe: result.timeframe,
+            source: "walkforward",
+            created: Math.floor(Date.now() / 1000),
+            ...(typeof oosReturn === "number" ? { oos_return_pct: oosReturn } : {}),
+          },
+        },
+      );
+      setMsg({ tone: "ok", text: `Saved "${n}" — load it from ${sid}'s Settings panel on Dashboard V2.` });
+    } catch (e) {
+      setMsg({ tone: "err", text: e?.response?.data?.error || e.message });
+    } finally { setBusy(false); }
+  };
+
+  if (!sid) return null;
+
+  const dupe = !!(existing?.presets && name.trim() && existing.presets[name.trim()]);
+
+  return (
+    <>
+      <button
+        onClick={start}
+        className={`shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border transition-colors ${
+          severe
+            ? "border-loss/50 text-loss hover:bg-loss/10"
+            : "border-accent-blue/50 text-accent-blue hover:bg-accent-blue/10"
+        }`}
+      >
+        + Create Preset
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setOpen(false)} />
+          <div className="relative w-[520px] max-w-[94vw] rounded-xl border border-line bg-bg-panel shadow-2xl">
+            <div className="px-5 py-4 border-b border-line">
+              <h3 className="text-base font-semibold">Create preset</h3>
+              <p className="text-[11px] text-muted mt-0.5">
+                Saves this parameter set for <span className="font-mono text-text">{sid}</span>, tagged{" "}
+                <span className="font-mono text-text">{result.symbol} · {result.timeframe}</span>. It appears in the
+                Settings panel&apos;s preset list on Dashboard V2.
+              </p>
+            </div>
+
+            {warnings.length > 0 && (
+              <div className={`px-5 py-3 border-b border-line/60 space-y-1.5 ${severe ? "bg-loss/5" : "bg-amber-400/5"}`}>
+                <div className={`text-[10px] uppercase tracking-wider ${severe ? "text-loss" : "text-amber-400"}`}>
+                  {severe ? "This set failed a gate" : "Read before saving"}
+                </div>
+                {warnings.map((w, i) => (
+                  <div key={i} className={`text-[11px] ${severe ? "text-loss" : "text-amber-400"}`}>• {w}</div>
+                ))}
+                <div className="text-[10px] text-muted pt-0.5">
+                  You can still save it — as a control arm or a starting point — but the preset carries this
+                  number with it, so the dashboard shows what it actually did.
+                </div>
+              </div>
+            )}
+
+            <div className="px-5 py-4 space-y-3">
+              <input
+                autoFocus
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setOpen(false); }}
+                className="w-full px-3 py-2 rounded-md bg-bg-elev border border-line font-mono text-sm focus:outline-none focus:border-accent-blue"
+                placeholder="Preset name…"
+              />
+              {dupe && (
+                <div className="text-[11px] text-amber-400">A preset named &quot;{name.trim()}&quot; exists — it will be overwritten.</div>
+              )}
+              {typeof oosReturn === "number" && (
+                <div className={`text-[11px] ${oosReturn > 0 ? "text-profit" : "text-loss"}`}>
+                  Stored with the preset: {fmtPct(oosReturn)} out-of-sample return for this fixed set.
+                </div>
+              )}
+              {msg && (
+                <div className={`text-[11px] ${msg.tone === "ok" ? "text-profit" : "text-loss"}`}>{msg.text}</div>
+              )}
+            </div>
+
+            <div className="px-5 py-3 border-t border-line flex justify-end gap-2">
+              <button onClick={() => setOpen(false)} className="px-3 py-1.5 rounded-md border border-line text-muted text-sm hover:text-text">
+                {msg?.tone === "ok" ? "Close" : "Cancel"}
+              </button>
+              <button
+                onClick={save}
+                disabled={busy || !name.trim()}
+                className={`px-4 py-1.5 rounded-md text-white text-sm font-semibold disabled:opacity-50 ${severe ? "bg-loss" : "bg-accent-grad"}`}
+              >
+                {busy ? "Saving…" : severe ? "Save anyway" : "Save preset"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
  * "Deploy candidate" — the CONSENSUS parameter set (median of each tuned param
  * across every walk-forward window), shown with the number it actually scored
  * when backtested over the combined out-of-sample span (backend:
@@ -432,6 +579,7 @@ function OosScoreLine({ stats, label, strong }) {
  */
 export function RecommendedParams({ result, stability }) {
   const [copied, setCopied] = useState(false);
+  const [curvesOpen, setCurvesOpen] = useState(false);
   const windows = result.windows || [];
   const dc = result.deploy_candidate || null;
   const last = windows.length ? windows[windows.length - 1] : null;
@@ -455,6 +603,29 @@ export function RecommendedParams({ result, stability }) {
     </button>
   );
 
+  // The card scores three fixed sets in text; this turns the same three runs
+  // into curves, plus the same set over all cached data. Needs a consensus set
+  // to have been computed — legacy results have no span to run over.
+  const curvesBtn = dc ? (
+    <button
+      onClick={() => setCurvesOpen(true)}
+      title="Backtest these params held fixed, and plot them against the walk-forward curve"
+      className="shrink-0 text-[11px] font-mono px-2.5 py-1 rounded border border-accent-blue/50 text-accent-blue hover:bg-accent-blue/10 transition-colors"
+    >
+      See Equity Curve
+    </button>
+  ) : null;
+
+  const actions = (warnings, severe, oosReturn) => (
+    <div className="flex items-center gap-2 shrink-0">
+      {curvesBtn}
+      {copyBtn}
+      <CreatePresetButton
+        result={result} params={params} warnings={warnings} severe={severe} oosReturn={oosReturn}
+      />
+    </div>
+  );
+
   // Legacy result: no consensus set was computed. Say so rather than dressing
   // one window's in-sample pick up as a recommendation.
   if (!dc) {
@@ -471,7 +642,11 @@ export function RecommendedParams({ result, stability }) {
               walk-forward procedure, not this set. Re-run to get a consensus set with a real out-of-sample number.
             </div>
           </div>
-          {copyBtn}
+          {actions(
+            ["This is one window's in-sample pick. It was never tested out-of-sample — nothing here says it works."],
+            true,
+            null,
+          )}
         </div>
         <ParamGrid params={params} tunedNames={tunedNames} />
       </div>
@@ -499,6 +674,28 @@ export function RecommendedParams({ result, stability }) {
     : stability >= 0.4 ? { cls: "text-amber-400", txt: "Nudging the params costs some performance — the edge partly depends on the exact numbers." }
     : { cls: "text-loss", txt: "Nudging the params collapses the score — the winners are lone spikes. Treat any single set as a starting point, not gospel." };
 
+  // The same evidence the panel already prints, gathered up so the Create Preset
+  // confirm has to restate it. Saving a set is one click; the warnings that came
+  // with it live on the walk-forward page and would otherwise be left behind.
+  const presetWarnings = [];
+  let presetSevere = false;
+  if (ret != null && ret <= 0) {
+    presetWarnings.push(`Held fixed over the out-of-sample span this set returned ${fmtPct(ret)} — it lost money. Do not deploy it.`);
+    presetSevere = true;
+  }
+  if (worstSpread != null && worstSpread >= RANDOM_SPREAD * 0.9) {
+    presetWarnings.push(`Windows disagreed on at least one param as widely as random guessing would (${fmtNum(worstSpread * 100)}% of its search range vs ${fmtNum(RANDOM_SPREAD * 100)}% for uniform-random). The median is an average of noise.`);
+    presetSevere = true;
+  } else if (worstSpread != null && worstSpread > 0.25) {
+    presetWarnings.push(`Windows disagreed widely on at least one param (${fmtNum(worstSpread * 100)}% of its search range) — check Best Parameter Combinations first.`);
+  }
+  if (ret != null && baseRet != null && baseRet > ret) {
+    presetWarnings.push(`The untuned base params beat this set on the same span (${fmtPct(baseRet)} vs ${fmtPct(ret)}). The search is not paying for itself.`);
+  }
+  if (stability != null && stability < 0.4) {
+    presetWarnings.push("Nudging the params collapses the score — these winners are lone spikes, not a plateau.");
+  }
+
   return (
     <div className={`rounded-xl border p-4 space-y-3 ${verdict.cls}`}>
       <div className="flex items-start justify-between gap-3">
@@ -509,7 +706,7 @@ export function RecommendedParams({ result, stability }) {
             the combined out-of-sample span, {fmtDateLong(dc.oos_start)} – {fmtDateLong(dc.oos_end)}.
           </div>
         </div>
-        {copyBtn}
+        {actions(presetWarnings, presetSevere, ret)}
       </div>
 
       <ParamGrid params={params} tunedNames={tunedNames} />
@@ -549,6 +746,8 @@ export function RecommendedParams({ result, stability }) {
         Honest caveat: this span is out-of-sample relative to each window&apos;s tuning, but you have now looked at
         it. The locked holdout is still the only untouched test.
       </div>
+
+      <FixedParamEquityModal open={curvesOpen} onClose={() => setCurvesOpen(false)} result={result} />
     </div>
   );
 }
@@ -612,273 +811,11 @@ export function CurrentParams({ result, strategies }) {
 }
 
 export function WFVerdictPanel({ result, strategies }) {
-  const s = result.stats || {};
   const windows = result.windows || [];
-  const adv = result.analytics?.advanced || {};
-  const rob = adv.robustness || {};
-  const dist = adv.distribution || {};
-  const tstats = adv.trade_stats || {};
-  const hasSearchSpace = (result?.wf_spec?.search_space || []).length > 0;
 
-  // --- Gate data ---
-  const positiveWins = windows.filter((w) => (w.oos_stats?.sharpe ?? 0) > 0).length;
-  const pctPositive = windows.length ? positiveWins / windows.length : 0;
-
-  // Stitched buy-and-hold return (compound each window's B&H %).
-  let bhVal = 100, hasBh = false;
-  for (const w of windows) {
-    if (w.bh_return_pct == null) continue;
-    hasBh = true;
-    bhVal *= (1 + w.bh_return_pct / 100);
-  }
-  const bhReturnPct = hasBh ? bhVal - 100 : null;
-  const stratReturnPct = s.total_return_pct ?? 0;
-
-  const nTrades = s.trades ?? 0;
-  const stability = rob.parameter_stability_score;   // 0..1 or null
-  const deflated = rob.deflated_sharpe_probability;  // 0..1 or null (only when metric=sharpe)
-  const sig = dist.significance;                      // 'significant'|'marginal'|'not_significant'
-  const pval = dist.t_pvalue;
-  const top10 = tstats.top10_winners_share;          // 0..1 or null
-  const luckWins = tstats.luck_dependent_wins;
-
-  const gates = [];
-
-  // 1 — Parameter plateau. Measured in PARAMETER space: for each window, how
-  // well the configs within a small nudge of that window's winner hold up
-  // against it (median across windows). The old score was the stdev of the top
-  // decile of trial SCORES — it never looked at a parameter value, so it read
-  // "stable" whenever many unrelated configs scored alike, which actually means
-  // the metric can't tell them apart and the argmax is a coin flip.
-  if (!hasSearchSpace) {
-    gates.push({ light: "na", title: "Parameter plateau", value: "—",
-      plain: "No parameters were optimized in this run, so there's nothing to be robust to. Add a search space to test plateau vs. spike." });
-  } else if (stability == null) {
-    gates.push({ light: "na", title: "Parameter plateau", value: "—",
-      plain: "Not enough trials clustered near each window's winner to judge flatness. Run more trials per window." });
-  } else {
-    const light = stability >= 0.7 ? "pass" : stability >= 0.4 ? "warn" : "fail";
-    const nw = rob.parameter_stability_windows;
-    gates.push({ light, title: "Parameter plateau",
-      value: `${fmtNum(stability)}${nw ? ` · ${fmtInt(nw)}w` : ""}`,
-      plain: light === "pass"
-        ? "Nudge the winning params and the score barely moves — neighbours perform similarly. That's a structural edge, not one lucky setting."
-        : light === "warn"
-        ? "Nudging the params costs real performance. The edge partly depends on the exact numbers — treat with caution."
-        : "The winning params are a lone spike — nudge them and the score collapses. Classic curve-fit warning." });
-  }
-
-  // 1b — Did the windows agree on anything? Uniform-random draws over a search
-  // range have std = 1/sqrt(12) = 0.289 of that range. At or above that, the
-  // per-window "best" values are indistinguishable from guessing.
-  {
-    const disp = rob.param_pick_dispersion;
-    const randomLevel = rob.param_pick_dispersion_random_level ?? 1 / Math.sqrt(12);
-    if (!hasSearchSpace || disp == null) {
-      gates.push({ light: "na", title: "Windows agree on the params", value: "—",
-        plain: "Needs at least two windows with numeric parameter picks to compare." });
-    } else {
-      const ratio = disp / randomLevel;
-      const light = ratio <= 0.5 ? "pass" : ratio < 0.9 ? "warn" : "fail";
-      gates.push({ light, title: "Windows agree on the params",
-        value: `${fmtNum(disp * 100)}% vs ${fmtNum(randomLevel * 100)}% random`,
-        plain: light === "pass"
-          ? "Independent windows keep landing on similar values. The search is finding something real and repeatable."
-          : light === "warn"
-          ? "Windows land on fairly different values from window to window — the optimum drifts, so any single set is shaky."
-          : "The windows' picks are spread as widely as random guessing over the search range. The optimizer is not finding an optimum, it's sampling noise — and the median of those picks is an average of noise." });
-    }
-  }
-
-  // 1c — Did tuning beat NOT tuning? The control arm: the same OOS windows
-  // traded with the untuned base params. Every other gate is measured only on
-  // the tuned arm, so all of them look identical whether the search found a real
-  // optimum or not. This is the only gate that can tell the difference.
-  {
-    const tv = result.tuning_value;
-    if (!tv || !tv.control) {
-      gates.push({ light: "na", title: "Tuning beat not-tuning", value: "—",
-        plain: "This run has no control arm. Re-run to compare the tuned picks against the untuned base params on the same windows." });
-    } else {
-      const edge = tv.tuning_edge_pct ?? 0;
-      const corr = tv.is_oos_correlation;
-      const light = edge > 0 && (corr == null || corr > 0.1) ? "pass"
-        : edge > 0 ? "warn" : "fail";
-      gates.push({ light, title: "Tuning beat not-tuning",
-        value: `${fmtPct(tv.tuned.compounded_return_pct)} vs ${fmtPct(tv.control.compounded_return_pct)}`,
-        plain: light === "pass"
-          ? `Re-optimizing each window beat leaving the base params alone by ${fmtPct(edge)} compounded, and a good in-sample score does predict the next window (correlation ${fmtNum(corr)}). The search is earning its keep.`
-          : light === "warn"
-          ? `Tuning came out ${fmtPct(edge)} ahead of doing nothing, but a good in-sample score barely predicts the next window (correlation ${fmtNum(corr)}). The gain may be luck rather than skill.`
-          : `Leaving the base params ALONE beat re-optimizing every window (${fmtPct(tv.control.compounded_return_pct)} vs ${fmtPct(tv.tuned.compounded_return_pct)}). The optimization step is costing you money — correlation between in-sample score and out-of-sample Sharpe is ${fmtNum(corr)}.` });
-    }
-  }
-
-  // 1d — How thin a sample each window's winner was chosen on. A great
-  // annualized Sharpe on 9 trades is noise wearing a good number.
-  {
-    const tv = result.tuning_value;
-    const med = tv?.median_is_trades_behind_pick;
-    if (med == null) {
-      gates.push({ light: "na", title: "Picks rest on a real sample", value: "—",
-        plain: "This run didn't record how many in-sample trades each winning config was chosen on. Re-run to capture it." });
-    } else {
-      const thin = tv.windows_picked_on_thin_sample ?? 0;
-      const known = tv.n_picked_on_known || 1;
-      const light = med >= 30 ? "pass" : med >= 15 ? "warn" : "fail";
-      gates.push({ light, title: "Picks rest on a real sample",
-        value: `median ${fmtInt(med)} trades`,
-        plain: light === "pass"
-          ? `Each window's winner was chosen on a median of ${fmtInt(med)} in-sample trades — enough for the score to mean something.`
-          : light === "warn"
-          ? `Each window's winner was chosen on a median of only ${fmtInt(med)} in-sample trades (${fmtInt(thin)} of ${fmtInt(known)} windows picked on under 20). Raise "Min IS trades" so picks rest on a real sample.`
-          : `Each window's winner was chosen on a median of just ${fmtInt(med)} in-sample trades, and ${fmtInt(thin)} of ${fmtInt(known)} windows picked on under 20. At that sample size the winning Sharpe is noise — raise "Min IS trades".` });
-    }
-  }
-
-  // 2 — Out-of-sample holds
-  {
-    const light = pctPositive >= 0.7 ? "pass" : pctPositive >= 0.5 ? "warn" : "fail";
-    const wfe = rob.walk_forward_efficiency;
-    gates.push({ light, title: "Holds out-of-sample",
-      value: `${fmtInt(positiveWins)}/${fmtInt(windows.length)}${wfe != null ? ` · WFE ${fmtNum(wfe)}` : ""}`,
-      plain: light === "pass"
-        ? `${fmtNum(pctPositive * 100)}% of unseen windows made money. The edge generalizes past the data it was tuned on.`
-        : light === "warn"
-        ? `Only ${fmtNum(pctPositive * 100)}% of unseen windows were profitable — a coin-flip edge, not a reliable one.`
-        : `Most unseen windows lost money (${fmtNum(pctPositive * 100)}% positive). The in-sample promise didn't survive out-of-sample.` });
-  }
-
-  // 3 — Enough trades
-  {
-    const light = nTrades >= 100 ? "pass" : nTrades >= 30 ? "warn" : "fail";
-    gates.push({ light, title: "Enough trades", value: fmtInt(nTrades),
-      plain: light === "pass"
-        ? `${fmtInt(nTrades)} trades is a healthy sample — the stats above mean something.`
-        : light === "warn"
-        ? `${fmtInt(nTrades)} trades is a thin sample. Metrics can swing on a few trades — don't over-trust them yet.`
-        : `Only ${fmtInt(nTrades)} trades. Any great-looking number here is likely noise, not skill.` });
-  }
-
-  // 4 — Statistically significant (average trade ≠ 0)
-  if (sig == null) {
-    gates.push({ light: "na", title: "Distinguishable from zero", value: "—",
-      plain: "Not enough trades to run the significance test." });
-  } else {
-    const light = sig === "significant" ? "pass" : sig === "marginal" ? "warn" : "fail";
-    gates.push({ light, title: "Distinguishable from zero",
-      value: pval != null ? `p=${fmtNum(pval)}` : sig,
-      plain: light === "pass"
-        ? "The average trade is statistically different from zero — unlikely to be pure luck."
-        : light === "warn"
-        ? "Borderline significance. The edge might be real, might be chance — more data would settle it."
-        : "The average trade is NOT statistically different from zero. This could easily be luck." });
-  }
-
-  // 5 — Beats buy-and-hold
-  if (!hasBh) {
-    gates.push({ light: "na", title: "Beats buy-and-hold", value: "—",
-      plain: "No buy-and-hold benchmark available for these windows." });
-  } else {
-    const edge = stratReturnPct - bhReturnPct;
-    const light = edge > Math.abs(bhReturnPct) * 0.1 && edge > 0 ? "pass" : edge >= 0 ? "warn" : "fail";
-    gates.push({ light, title: "Beats buy-and-hold",
-      value: `${fmtPct(stratReturnPct)} vs ${fmtPct(bhReturnPct)}`,
-      plain: light === "pass"
-        ? "The strategy beat simply holding the asset — the complexity earned its keep."
-        : light === "warn"
-        ? "Roughly ties buy-and-hold. All that machinery bought you little over just holding."
-        : "Underperforms buy-and-hold. You'd have done better doing nothing — rethink or shelve it." });
-  }
-
-  // 6 — Survives the many-trials penalty (deflated Sharpe)
-  if (deflated == null) {
-    gates.push({ light: "na", title: "Survives trial-count penalty", value: "—",
-      plain: "Deflated Sharpe only applies when optimizing on Sharpe. Switch the metric to Sharpe to judge this." });
-  } else {
-    const light = deflated >= 0.9 ? "pass" : deflated >= 0.6 ? "warn" : "fail";
-    gates.push({ light, title: "Survives trial-count penalty", value: `${fmtNum(deflated * 100)}%`,
-      plain: light === "pass"
-        ? "Even after penalizing for how many parameter combos were tried, the Sharpe holds up as real."
-        : light === "warn"
-        ? "The Sharpe partly survives the many-trials penalty, but some of it may be luck-of-search."
-        : "Once you account for how many combos were tested, this Sharpe is probably a lucky draw." });
-  }
-
-  // 7 — Not luck-dependent (P&L concentration)
-  if (top10 == null) {
-    gates.push({ light: "na", title: "Not carried by a few trades", value: "—",
-      plain: "Not enough winning trades to measure concentration." });
-  } else {
-    const light = !luckWins && top10 <= 0.5 ? "pass" : top10 <= 0.7 ? "warn" : "fail";
-    gates.push({ light, title: "Not carried by a few trades", value: `top10 = ${fmtNum(top10 * 100)}%`,
-      plain: light === "pass"
-        ? "Profit is spread across many trades, not a couple of jackpots. Repeatable, not lucky."
-        : light === "warn"
-        ? `The top 10 winners are ${fmtNum(top10 * 100)}% of all profit — leans a bit on a few big trades.`
-        : `The top 10 winners are ${fmtNum(top10 * 100)}% of all profit. Remove those and the edge may vanish.` });
-  }
-
-  // 8 — Recent decay: are the LATEST windows as good as the earlier ones?
-  // Distinct from "holds out-of-sample" (overall green rate): this compares the
-  // most recent third of windows against the rest, to catch an edge that worked
-  // for years but is fading now — the thing that kills a strategy live.
-  if (windows.length < 6) {
-    gates.push({ light: "na", title: "No recent decay", value: "—",
-      plain: "Too few windows to compare recent vs. earlier performance — run over a longer range." });
-  } else {
-    const recentN = Math.max(4, Math.round(windows.length * 0.33));
-    const earlier = windows.slice(0, windows.length - recentN);
-    const recent = windows.slice(windows.length - recentN);
-    const greens = (arr) => arr.filter((w) => (w.oos_stats?.sharpe ?? 0) > 0).length;
-    const rWins = greens(recent), eWins = greens(earlier);
-    const rRate = rWins / recent.length, eRate = eWins / earlier.length;
-    const drop = eRate - rRate;
-    const light = drop <= 0.1 ? "pass" : drop <= 0.25 ? "warn" : "fail";
-    gates.push({ light, title: "No recent decay",
-      value: `recent ${fmtNum(rRate * 100)}% vs ${fmtNum(eRate * 100)}%`,
-      plain: light === "pass"
-        ? `The most recent ${fmtInt(recent.length)} windows (${fmtInt(rWins)} green) hold up against the earlier ones. No sign the edge is fading.`
-        : light === "warn"
-        ? `The recent ${fmtInt(recent.length)} windows (${fmtInt(rWins)} green) are softer than the earlier stretch (${fmtNum(eRate * 100)}% green). The edge may be starting to fade — watch it.`
-        : `The recent ${fmtInt(recent.length)} windows (only ${fmtInt(rWins)} green) are much weaker than the earlier ${fmtNum(eRate * 100)}%. The edge looks like it's decaying — a real red flag for trading it now.` });
-  }
-
-  // --- Overall verdict from the data-backed gates ---
-  // Reading order matters. "Tuning beat not-tuning" and "Windows agree on the
-  // params" can invalidate everything below them: if the search found nothing,
-  // a green plateau or a green OOS rate is describing noise. So they lead, and
-  // the two that qualify the sample come next. Sorting here rather than moving
-  // the blocks keeps each gate's logic where it was written.
-  const GATE_ORDER = [
-    "Tuning beat not-tuning",
-    "Windows agree on the params",
-    "Picks rest on a real sample",
-    "Parameter plateau",
-    "Holds out-of-sample",
-    "Enough trades",
-    "Distinguishable from zero",
-    "Beats buy-and-hold",
-    "Survives trial-count penalty",
-    "Not carried by a few trades",
-    "No recent decay",
-  ];
-  gates.sort((a, b) => {
-    const ia = GATE_ORDER.indexOf(a.title), ib = GATE_ORDER.indexOf(b.title);
-    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
-  });
-  const DECISIVE = new Set(GATE_ORDER.slice(0, 2));
-
-  const scored = gates.filter((g) => g.light !== "na");
-  const val = { pass: 1, warn: 0.5, fail: 0 };
-  const ratio = scored.length ? scored.reduce((a, g) => a + val[g.light], 0) / scored.length : 0;
-  const fails = scored.filter((g) => g.light === "fail").map((g) => g.title);
-  const warns = scored.filter((g) => g.light === "warn").map((g) => g.title);
-
-  let tone, headline;
-  if (ratio >= 0.75 && fails.length === 0) { tone = "profit"; headline = "🟢 Looks Real — a deploy candidate worth the locked-holdout test"; }
-  else if (ratio >= 0.5) { tone = "amber"; headline = "🟡 Fragile — has an edge but leans on something; size small and keep watching"; }
-  else { tone = "loss"; headline = "🔴 Likely Overfit / Luck — most gates failed; kill or rework before trusting it"; }
+  // One computation, two renderers — the Overview banner (WFVerdict) reads the
+  // exact same object, so the two can never disagree about the same run again.
+  const { gates, tone, headline, fails, warns, stability, flats } = computeWFGates(result);
 
   const toneClasses = {
     profit: "border-profit/40 bg-profit/5 text-profit",
@@ -928,7 +865,7 @@ export function WFVerdictPanel({ result, strategies }) {
       {/* The data-backed gates, most-decisive first */}
       <div className="space-y-2">
         <div className="text-[10px] uppercase tracking-wider text-muted">
-          Read these first — they can invalidate everything below
+          Read these first — a red here overrides every gate below
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {gates.filter((g) => DECISIVE.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
@@ -946,8 +883,14 @@ export function WFVerdictPanel({ result, strategies }) {
         <div className="text-[11px] uppercase tracking-wider text-muted">Per-window consistency</div>
         <WindowConsistencyStrip windows={windows} />
         <div className="text-[11px] text-muted">
-          Each square is one out-of-sample window, in time order. Green = made money, red = lost. You want a
-          mostly-green row, not one green patch doing all the work.
+          Each square is one out-of-sample window, in time order. Green = made money, red = lost,
+          grey = the strategy never fired. You want a mostly-green row, not one green patch doing all the work.
+          {flats > 0 && (
+            <span className="text-amber-400">
+              {" "}{fmtInt(flats)} window{flats === 1 ? "" : "s"} never traded — those are excluded from the
+              green rate rather than counted as losses.
+            </span>
+          )}
         </div>
       </div>
 

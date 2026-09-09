@@ -6,11 +6,20 @@ import { fmtUsd, fmtNum } from "../services/format.js";
  * panel width. No zoom, no scroll. One line per active strategy.
  *
  * props:
- *   strategies:        [{id, color, params}]
+ *   strategies:        [{id, color, params, label?, dash?}]  // label shows in the tooltip
  *   pointsByStrategy:  {id: [{time, value}, ...]}     // value = % of starting (100 baseline)
  *   startingCapital:   number (USD) — used for $ axis label
+ *   markers:           [{time, label?, color?}]       // optional vertical dividers
+ *   shades:            [{from, to, fill?, label?}]    // optional shaded time bands
+ *
+ * `markers` / `shades` exist so a curve can carry its own caveat: the
+ * full-history run on the walk-forward page shades the stretch the optimizer
+ * tuned on, which otherwise looks exactly like the honest half.
  */
-export default function CustomEquityChart({ strategies, pointsByStrategy, startingCapital = 100000 }) {
+export default function CustomEquityChart({
+  strategies, pointsByStrategy, startingCapital = 100000,
+  markers = [], shades = [],
+}) {
   const wrapRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 240 });
   const [hover, setHover] = useState(null); // {x, y, time, valuesByStrategy}
@@ -61,8 +70,9 @@ export default function CustomEquityChart({ strategies, pointsByStrategy, starti
   // Build paths.
   const paths = useMemo(() => {
     return strategies.map((s) => {
+      const style = { id: s.id, color: s.color, dash: s.dash, width: s.width ?? 1.5, opacity: s.opacity ?? 1 };
       const pts = pointsByStrategy[s.id];
-      if (!pts || pts.length === 0) return { id: s.id, color: s.color, d: "" };
+      if (!pts || pts.length === 0) return { ...style, d: "" };
       // Downsample if too many points (keep visual fidelity but limit DOM cost).
       const max = Math.min(pts.length, Math.max(800, innerW * 2));
       const step = Math.max(1, Math.floor(pts.length / max));
@@ -76,7 +86,7 @@ export default function CustomEquityChart({ strategies, pointsByStrategy, starti
       // ensure last point included
       const last = pts[pts.length - 1];
       d += "L" + xOf(last.time).toFixed(1) + "," + yOf(last.value).toFixed(1);
-      return { id: s.id, color: s.color, d };
+      return { ...style, d };
     });
   }, [strategies, pointsByStrategy, tMin, tMax, vMin, vMax, innerW, innerH]);
 
@@ -146,6 +156,25 @@ export default function CustomEquityChart({ strategies, pointsByStrategy, starti
         onMouseLeave={onMouseLeave}
         className="block"
       >
+        {/* shaded time bands (drawn first — everything else sits on top) */}
+        {hasData && shades.map((sh, i) => {
+          const x1 = Math.max(padding.l, Math.min(size.w - padding.r, xOf(sh.from ?? tMin)));
+          const x2 = Math.max(padding.l, Math.min(size.w - padding.r, xOf(sh.to ?? tMax)));
+          if (x2 - x1 < 1) return null;
+          return (
+            <g key={`shade-${i}`}>
+              <rect x={x1} y={padding.t} width={x2 - x1} height={innerH}
+                    fill={sh.fill || "rgba(245,158,11,0.07)"} />
+              {sh.label && (
+                <text x={x1 + 6} y={padding.t + 14} className="fill-muted"
+                      fontSize="9" fontFamily="JetBrains Mono, monospace">
+                  {sh.label}
+                </text>
+              )}
+            </g>
+          );
+        })}
+
         {/* grid + y-axis */}
         {yTicks.map((tk, i) => (
           <g key={i}>
@@ -184,9 +213,28 @@ export default function CustomEquityChart({ strategies, pointsByStrategy, starti
           start
         </text>
 
+        {/* vertical dividers */}
+        {hasData && markers.map((m, i) => {
+          const x = xOf(m.time);
+          if (x < padding.l || x > size.w - padding.r) return null;
+          return (
+            <g key={`marker-${i}`}>
+              <line x1={x} x2={x} y1={padding.t} y2={size.h - padding.b}
+                    stroke={m.color || "rgba(245,158,11,0.6)"} strokeWidth={1} strokeDasharray="3 3" />
+              {m.label && (
+                <text x={x + 4} y={size.h - padding.b - 5} fill={m.color || "rgba(245,158,11,0.85)"}
+                      fontSize="9" fontFamily="JetBrains Mono, monospace">
+                  {m.label}
+                </text>
+              )}
+            </g>
+          );
+        })}
+
         {/* lines */}
         {paths.map((p) => (
-          <path key={p.id} d={p.d} fill="none" stroke={p.color} strokeWidth={1.5} />
+          <path key={p.id} d={p.d} fill="none" stroke={p.color} strokeWidth={p.width}
+                strokeDasharray={p.dash || ""} opacity={p.opacity} />
         ))}
 
         {/* hover crosshair + dots */}
@@ -222,8 +270,9 @@ export default function CustomEquityChart({ strategies, pointsByStrategy, starti
             const pnl = dollars - startingCapital;
             return (
               <div key={s.id} className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full" style={{ background: s.color }} />
-                <span className="text-text">{fmtNum(pt.value)}%</span>
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: s.color }} />
+                {s.label && <span className="text-muted">{s.label}</span>}
+                <span className="text-text ml-auto">{fmtNum(pt.value)}%</span>
                 <span className={pnl >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(pnl)}</span>
               </div>
             );

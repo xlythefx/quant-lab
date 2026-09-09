@@ -18,6 +18,29 @@ import TimePickerModal from "./TimePickerModal.jsx";
  *   searchSpace:  [{ name, type, low, high, step }, ...]
  *   onChange({ baseParams, searchSpace })
  */
+
+/**
+ * Sizing params are never offered here — they are leverage, not edge.
+ *
+ * `risk_pct` was already excluded. `contracts` was not, and it is
+ * `INT min=1 max=100` in 10 of 27 strategies, so the auto-enable below picked it
+ * up on every fresh strategy. That is actively harmful:
+ *
+ *   - On crypto it is INERT (backtest_engine sizes by risk_pct), so each
+ *     window's "best" value is arbitrary. `_param_pick_dispersion` reports the
+ *     WORST param's spread, so one dead dimension at the uniform-random 0.289
+ *     level turns the "Windows agree on the params" gate red on its own — and
+ *     that gate now vetoes the whole verdict.
+ *   - It also dilutes the plateau score: neighbours have to be close in the dead
+ *     dimension too, so fewer trials qualify.
+ *   - On futures it is live, but optimizing it is a leverage decision. On
+ *     total_return it always slams to max=100; on Sharpe (scale-invariant) the
+ *     pick is pure noise.
+ *
+ * Both stay editable as FIXED values in the Dashboard settings panel.
+ */
+const SIZING_PARAMS = new Set(["risk_pct", "contracts"]);
+
 export default function WalkForwardParamEditor({ schema, baseParams, searchSpace, onChange }) {
   // Map for quick lookup.
   const searchByName = useMemo(() => {
@@ -29,7 +52,7 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
   const groups = useMemo(() => {
     const g = {};
     for (const s of schema || []) {
-      if (s.name === "risk_pct") continue;
+      if (SIZING_PARAMS.has(s.name)) continue;
       (g[s.group] ||= []).push(s);
     }
     return g;
@@ -45,7 +68,7 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
     let touched = false;
     const next = { ...(baseParams || {}) };
     for (const s of schema) {
-      if (s.name === "risk_pct") continue;
+      if (SIZING_PARAMS.has(s.name)) continue;
       if (next[s.name] === undefined) {
         next[s.name] = s.default;
         touched = true;
@@ -56,7 +79,7 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
     if (nextSearch.length === 0) {
       const auto = [];
       for (const s of schema) {
-        if (s.name === "risk_pct") continue;
+        if (SIZING_PARAMS.has(s.name)) continue;
         const numeric = s.type === "int" || s.type === "float";
         // Only params with a real [min, max] range are worth searching — a
         // missing/zero-width range would add a useless single-value "search".
@@ -138,8 +161,9 @@ export default function WalkForwardParamEditor({ schema, baseParams, searchSpace
         <div>
           Toggle <span className="text-text">Search</span> on a param to sweep it over IS windows.
           Untoggled params use the fixed value below.
-          Position sizing (<span className="font-mono">risk_pct</span>) is per-strategy and
-          not searched — edit it on the Strategies page.
+          Position sizing (<span className="font-mono">risk_pct</span>,{" "}
+          <span className="font-mono">contracts</span>) is leverage, not edge, so it is never
+          searched — edit it on the Strategies page.
         </div>
         {perParam.entries.length > 0 ? (
           <div>

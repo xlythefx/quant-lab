@@ -115,6 +115,148 @@ def _window_stats(result: dict, window_start_ts: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Equity curves for a FIXED parameter set (the "See Equity Curve" button)
+# ---------------------------------------------------------------------------
+
+_CURVE_MAX_POINTS = 3000
+
+
+def _thin_curve(pts: list, max_points: int = _CURVE_MAX_POINTS) -> list:
+    """Shrink an equity series for the wire while keeping its visible shape.
+
+    A plain stride ("keep every Nth point") silently deletes the drawdown
+    troughs and the peaks that define them, so a thinned curve can look calmer
+    than the run actually was. Instead bucket the series and keep each bucket's
+    MIN and MAX in time order: ~2 points per bucket, but the envelope — and so
+    every drawdown you can see — survives intact.
+    """
+    n = len(pts)
+    if n <= max_points:
+        return [{"time": int(p["time"]), "value": float(p["value"])} for p in pts]
+
+    n_buckets = max(1, max_points // 2)
+    size = n / n_buckets
+    out: list = []
+
+    def _push(p):
+        t = int(p["time"])
+        if out and out[-1]["time"] == t:
+            return
+        out.append({"time": t, "value": float(p["value"])})
+
+    _push(pts[0])
+    for b in range(n_buckets):
+        lo, hi = int(b * size), min(n, int((b + 1) * size))
+        if hi <= lo:
+            continue
+        chunk = pts[lo:hi]
+        lo_pt = min(chunk, key=lambda p: p["value"])
+        hi_pt = max(chunk, key=lambda p: p["value"])
+        for p in sorted((lo_pt, hi_pt), key=lambda p: p["time"]):
+            _push(p)
+    _push(pts[-1])
+    return out
+
+
+def fixed_param_curves(req: dict) -> dict:
+    """Equity curves for parameter sets held FIXED — what deploying actually means.
+
+    The walk-forward report measures a procedure (re-optimize every N bars). Its
+    stitched curve therefore switches params mid-flight and is not something you
+    can trade. This runs the opposite experiment: pick one set, never touch it,
+    and see the curve.
+
+    Two spans, because they answer different questions and only one is evidence:
+
+      * `curves` — each named set backtested over the COMBINED out-of-sample
+        span, warm-started exactly the way `_build_deploy_candidate` does
+        (extra history before the span so rolling indicators are valid, with
+        pre-span entries masked via trade_start_time). These start flat at
+        100% on the same bar, so they are directly comparable.
+
+      * `full` — one set over every bar in the cache. This span INCLUDES the
+        windows the optimizer tuned on, so it is not out-of-sample and not
+        evidence of anything; it is there to show the shape of the strategy and
+        how much of the curve came from data it had already seen. The caller
+        gets `oos_start` back so it can draw that line.
+
+    Returns thinned {time, value} points only — no candles, no trades, no
+    overlays. A full-history 1m run is ~1M bars; shipping the engine's raw
+    result would be a hundreds-of-MB payload for a chart that draws 3000 points.
+    """
+    strategy_id = (req.get("strategy_id") or "").strip()
+    if not strategy_id:
+        raise ValueError("strategy_id is required")
+    symbol = req["symbol"]
+    timeframe = req["timeframe"]
+    oos_start = int(req["oos_start"])
+    oos_end = int(req["oos_end"])
+    if oos_end <= oos_start:
+        raise ValueError("oos_end must be after oos_start")
+    warmup_bars = max(0, int(req.get("warmup_bars") or 0))
+    sets = req.get("sets") or {}
+    if not isinstance(sets, dict) or not sets:
+        raise ValueError("sets must be a non-empty object of {name: params}")
+
+    df = market_data.load_parquet(symbol, timeframe)
+    time_col = df["time"].to_numpy()
+    if not len(time_col):
+        raise ValueError(f"no cached bars for {symbol} {timeframe}")
+
+    # Same warm-up rule the walk-forward run used when it built each window, so
+    # these numbers reproduce the ones already printed on the deploy card.
+    start_idx = int(np.searchsorted(time_col, oos_start, side="left"))
+    warm_start = int(time_col[max(0, start_idx - warmup_bars)])
+
+    curves: dict[str, dict] = {}
+    for name, params in sets.items():
+        res = backtest_engine.run(
+            strategy_id, symbol, timeframe, dict(params or {}),
+            start_time=warm_start, end_time=oos_end, trade_start_time=oos_start)
+        pts = [p for p in (res.get("equity") or [])
+               if int(p.get("time") or 0) >= oos_start]
+        curves[name] = {
+            "points": _thin_curve(pts),
+            "stats": _window_stats(res, oos_start),
+        }
+
+    out = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "strategy_id": strategy_id,
+        "oos_start": oos_start,
+        "oos_end": oos_end,
+        "warm_start": warm_start,
+        "curves": curves,
+    }
+
+    # ---- optional: the same set over everything we have on disk -------------
+    full_key = req.get("full_history")
+    if full_key:
+        if full_key not in sets:
+            raise ValueError(f"full_history refers to unknown set '{full_key}'")
+        res = backtest_engine.run(
+            strategy_id, symbol, timeframe, dict(sets[full_key] or {}))
+        pts = res.get("equity") or []
+        # Where the tuned-on region ends. Everything left of this on the chart
+        # is data the optimizer already saw.
+        pre = [p for p in pts if int(p.get("time") or 0) <= oos_start]
+        out["full"] = {
+            "set": full_key,
+            "points": _thin_curve(pts),
+            "stats": res.get("stats"),
+            "first_time": int(pts[0]["time"]) if pts else None,
+            "last_time": int(pts[-1]["time"]) if pts else None,
+            # Equity (% of start) at the moment the out-of-sample span begins —
+            # lets the UI split the curve's return into "tuned on this" vs "not".
+            "value_at_oos_start": float(pre[-1]["value"]) if pre else None,
+            "bars": len(pts),
+        }
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Job registry (one job at a time)
 # ---------------------------------------------------------------------------
 
@@ -838,6 +980,11 @@ class WalkForwardJob:
                 "purge_radius": s["purge_radius"],
                 "min_trades": s["min_trades"],
                 "warmup_bars": s["warmup_bars"],
+                # How this run's OOS windows were stitched. The UI needs it to
+                # build a FAIR buy-and-hold: fixed-contract futures don't
+                # compound (multiplier_carry is pinned to 1.0 above), so a
+                # compounding benchmark would beat them on convention alone.
+                "contract_sized": bool(contract_sized),
             },
             "windows": self.window_summaries,
             # Empty candles/overlays: WFA result reuses analytics UI, not the

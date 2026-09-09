@@ -106,6 +106,77 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
 - **Old `#livealerts` page stays fully working** until the cutover soak completes
   (plans/10) — don't remove it before then.
 
+## Deployment reality — how a strategy actually reaches the market
+
+**QuantLab is the research lab, not the execution venue.** The full path is:
+
+1. **Research here** — backtest, walk-forward, cost sweep, Monte Carlo, the gauntlet below.
+   This is where a strategy earns the right to be traded, and where its params are chosen.
+2. **Convert to Pine Script** and paste into TradingView, carrying the researched params
+   across by hand (see the Pine section below for the faithfulness rules).
+3. **TradingView fires the alerts** on "Order fills only" with
+   `{{strategy.order.alert_message}}`, POSTing the `build_payload` JSON to a **Flask
+   webhook acceptor** (the Binance/TradeStation endpoint), which places the real order.
+4. QuantLab's own Live Terminal / `alerts_daemon` fires the **same payload shape** to the
+   **same acceptor** — it is a second, independent signal source, not a different system.
+
+So there are always **two implementations of every strategy** (Python `on_candle` and the
+Pine port) pointed at **one acceptor**. Any claim that "live matches the backtest" has to
+survive both hops: signal parity (Python vs Pine) *and* execution parity (modeled fill and
+size vs what the acceptor actually does).
+
+### ⚠ Sizing is owned by the acceptor, and the backtest models a DIFFERENT scheme
+
+This is by design and is not to be "fixed" in the payload: `build_payload` deliberately
+sends only `{secret, strategy, leverage, action, symbol}` — no quantity, no risk_pct. One
+place owns risk, and the same shape works for both TradingView and QuantLab alerts.
+
+**What live actually trades** (`_scale_qty` in the acceptor,
+`C:/Users/Xlythe/trading-flask/src/routes/webhook.py`):
+
+```
+quantity = base_size × (balance / 500)      # stepped; BTCUSDT uses coarse whole steps
+                                            # below a 500 balance it's a flat base_size
+```
+
+`base_size` is a per-asset constant from the acceptor's `assets` DB row. This is
+**fixed-lot** sizing. `leverage` (default 25 in `live_alerts_config`) does NOT enter this
+formula — it only sets margin and the liquidation distance on the exchange.
+
+**What the backtest models**: `units = equity × risk_pct / price`, `risk_pct` default 3.0.
+This is **fixed-fraction** sizing, and it compounds. Grep `leverage` in
+[backtest_engine.py](backend/services/backtest_engine.py) / `portfolio_runner.py` — no hits,
+the simulator has no leverage or liquidation concept at all.
+
+**Consequence — the two schemes are not interchangeable, in two separate ways:**
+
+1. **Scale.** Whether live risks more or less than the modeled 3% depends entirely on
+   `base_size` vs balance. A `base_size` worth more than 3% of the account means every live
+   trade is proportionally bigger than anything the backtest ever simulated.
+2. **Shape.** Fixed-fraction shrinks size after losses (self-protective); fixed-lot does
+   not. So even at the same starting scale the two equity paths diverge — fixed-lot
+   drawdowns run deeper and recover slower. Max drawdown %, Sharpe and Calmar are all
+   **sizing-dependent**, so the gauntlet's risk numbers describe a scheme you don't trade.
+
+The *signals* transfer between the two; the *risk numbers* do not. So a strategy can show
+an identical equity-curve **shape** live, in QuantLab, and in TradingView while its live
+P&L looks nothing like the backtest — that is a sizing-model mismatch, not a signal bug.
+
+**Sizing does NOT affect entry/exit timing.** The only equity term in the entry condition
+is a `cur_eq > 0` bankruptcy guard (backtest_engine ~L514); signals come from `vectorized()`
+/ `on_candle()`, which see only OHLCV and params, and exits are price-based (ATR stops,
+mean-revert crosses). So the parity that matters — **same bars in, same bars out** — is
+unaffected by any of the above. Two exceptions only: total ruin stops entries in the
+backtest, and a live **liquidation** at 25× is an exit the simulator cannot produce at all.
+
+**Rule:** compare live to backtest on **direction and % return per trade**, never on
+dollars or drawdown. If direction and % match, live is faithful — a bigger loss is then
+the position size you chose in `base_size`, not a bug.
+
+Teaching the backtest a fixed-lot mode (mirroring `contract_sizing`, which futures already
+use) is OPTIONAL — do it only if you want drawdown/Sharpe to describe the real account.
+Do NOT add sizing to the webhook; the acceptor owns that deliberately.
+
 ## Pine Script conversions (Python → TradingView)
 
 When converting a QuantLab strategy to Pine Script, ALWAYS map to the four canonical

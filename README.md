@@ -23,7 +23,13 @@ quantlab/
 
 ## Setup
 
-**Prerequisites:** Python 3.11+ (developed on 3.14) and Node 18+.
+**Prerequisites:** Python 3.10+ and Node 18+ (Node is needed for the frontend
+only — the backend, backtests and the data seeder run without it).
+
+The launcher checks both for you: run `python ui.py` and open the
+**Dependencies** tab. It reports the detected Python and Node versions, links
+to the official download pages if either is missing or too old, and installs
+the project's pip and npm packages with one button.
 
 ### 1. Backend dependencies
 
