@@ -176,6 +176,12 @@ export default function WalkForward() {
   // crown a set picked on a handful of lucky trades — measured on OPUSDT 15m the
   // median winner rested on 9 IS trades and 82/100 windows picked on under 20.
   const [minTrades, setMinTrades] = usePersistentState("ql.wf.min_trades", 30);
+  // TPE is stochastic: same seed, same picks. Exposed so you can spot-check
+  // "does seed 7 tell the same story" without paying for a full Seed Check.
+  const [seed, setSeed] = usePersistentState("ql.wf.seed", 42);
+  // "best" = Optuna's argmax (default, keeps old runs comparable).
+  // "plateau" = highest neighbourhood average, so a shelf beats a lone spike.
+  const [selection, setSelection] = usePersistentState("ql.wf.selection", "best");
   const [showGuide, setShowGuide] = useState(false);
   const maxWorkers = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 8;
 
@@ -266,6 +272,11 @@ export default function WalkForward() {
     // remember. A bigger IS window does not fix thin picks on its own — the
     // optimizer can always favour params that fire rarely.
     if (values.minTrades != null) setMinTrades(values.minTrades);
+    // Leak guards travel with the preset for the same reason the trade floor
+    // does — embargo and purge are the two settings most easily left at 0.
+    if (values.embargoBars != null) setEmbargoBars(values.embargoBars);
+    if (values.purgeRadius != null) setPurgeRadius(values.purgeRadius);
+    if (values.selection != null) setSelection(values.selection);
     setMetric(values.metric);
     setAiSuggestResult(null);
     setAiSuggestError(null);
@@ -432,6 +443,8 @@ export default function WalkForward() {
         embargo_bars: embargoBars,
         purge_radius: purgeRadius,
         min_trades: minTrades,
+        seed,
+        selection,
       });
     } catch (e) {
       setError(e?.response?.data?.error || e.message);
@@ -467,6 +480,9 @@ export default function WalkForward() {
         embargo_bars: embargoBars,
         purge_radius: purgeRadius,
         min_trades: minTrades,
+        // Not `seed` — this run sweeps its own. Selection mode still carries,
+        // so a seed check of a plateau run stays a plateau run.
+        selection,
         n_seeds: nSeeds,
       });
     } catch (e) {
@@ -548,6 +564,7 @@ export default function WalkForward() {
     nTrials, setNTrials, metric, setMetric,
     nWorkers, setNWorkers, maxWorkers,
     embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius, minTrades, setMinTrades,
+    seed, setSeed, selection, setSelection,
     searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
     onStart, onCancel,
   };
@@ -687,6 +704,7 @@ function SetupTab({
   nTrials, setNTrials, metric, setMetric,
   nWorkers, setNWorkers, maxWorkers,
   embargoBars, setEmbargoBars, purgeRadius, setPurgeRadius, minTrades, setMinTrades,
+  seed, setSeed, selection, setSelection,
   searchSpace, activeStrategy, baseParams, setBaseParams, setSearchSpace,
   onStart, onCancel,
 }) {
@@ -865,6 +883,39 @@ function SetupTab({
             winner picked on a handful of lucky trades. 30 makes each pick rest on a real
             sample; windows that then report no eligible config are telling you the truth.
           </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Selection">
+              <select
+                value={selection}
+                onChange={(e) => setSelection(e.target.value)}
+                disabled={running}
+                className="px-2 py-1 text-xs font-mono rounded-md bg-bg-panel border border-line focus:outline-none focus:border-accent-blue disabled:opacity-40"
+                title="How each window's winner is chosen from its trials"
+              >
+                <option value="best">best (argmax)</option>
+                <option value="plateau">plateau</option>
+              </select>
+            </Field>
+            <Field label="Seed">
+              <NumInput value={seed} onChange={setSeed} min={0} />
+            </Field>
+          </div>
+          <div className="text-[11px] text-muted/70">
+            <span className="text-text">Selection</span> decides which trial wins a window.
+            <span className="font-mono"> best</span> takes the single highest score — which on a noisy
+            surface is often a lone spike that won&apos;t repeat.
+            <span className="font-mono"> plateau</span> scores each trial by the average of its nearest
+            neighbours instead, so a broad shelf outranks a spike. It costs nothing extra (the trials
+            already ran) and the report tells you how often it changed the pick. With many searched
+            params and few trials, neighbours are sparse and it mostly just rejects spikes.
+          </div>
+          <div className="text-[11px] text-muted/70">
+            <span className="text-text">Seed</span> fixes the optimizer&apos;s randomness — same seed,
+            same picks. Change it and re-run to check the story doesn&apos;t depend on the draw. If it
+            does, that means the search hasn&apos;t converged and the fix is usually more trials, not
+            more seeds. Seed Check runs several at once.
+          </div>
         </div>
       </div>
 
@@ -1041,6 +1092,8 @@ function OverviewTab({ result, onOpenVerdict }) {
           )}
           {result.wf_spec?.embargo_bars > 0 && <> · embargo={result.wf_spec.embargo_bars}</>}
           {result.wf_spec?.purge_radius > 0 && <> · purge={result.wf_spec.purge_radius}</>}
+          {result.wf_spec?.selection === "plateau" && <> · selection=plateau</>}
+          {result.wf_spec?.seed != null && result.wf_spec.seed !== 42 && <> · seed={result.wf_spec.seed}</>}
         </div>
         <button
           onClick={exportJson}
@@ -1452,10 +1505,73 @@ function ParametersTab({ result }) {
   const searchSpace = result?.wf_spec?.search_space || [];
   return (
     <section className="space-y-4">
+      <PlateauSelectionCard result={result} />
       <ParameterDriftChart windows={windows} searchSpace={searchSpace} />
       <BestParamRankings result={result} />
       <TopCombinations result={result} />
     </section>
+  );
+}
+
+/**
+ * What plateau selection actually did — the control arm for the selection mode.
+ *
+ * Turning a knob that silently changes nothing is worse than leaving it off, so
+ * the argmax pick is recorded in every window even when plateau mode wins. If
+ * this says it changed the pick in 0 windows, the surface was smooth enough
+ * that the mode was a no-op; if it changed most of them, the raw peaks were
+ * isolated spikes and that's the finding.
+ *
+ * Renders nothing on runs that used plain argmax.
+ */
+function PlateauSelectionCard({ result }) {
+  const windows = result.windows || [];
+  if (result?.wf_spec?.selection !== "plateau") return null;
+
+  const scored = windows.filter((w) => w.selection_changed_pick != null);
+  if (!scored.length) return null;
+  const changed = scored.filter((w) => w.selection_changed_pick);
+
+  // What preferring the shelf cost in in-sample score, averaged over the
+  // windows where it actually moved the pick. Negative by construction — the
+  // question is whether it's a rounding error or a real haircut.
+  const gaps = changed
+    .map((w) => (typeof w.argmax_score === "number" && typeof w.is_score === "number")
+      ? w.is_score - w.argmax_score : null)
+    .filter((v) => v != null);
+  const avgGap = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : null;
+  const pct = (changed.length / scored.length) * 100;
+
+  return (
+    <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-2">
+      <div className="text-[11px] uppercase tracking-wider text-muted">
+        Plateau selection · what it changed
+      </div>
+      <div className="text-sm text-text">
+        Moved the pick off the raw peak in{" "}
+        <span className="font-mono">{fmtInt(changed.length)}</span> of{" "}
+        <span className="font-mono">{fmtInt(scored.length)}</span> windows ({fmtNum(pct)}%).
+      </div>
+      {avgGap != null && (
+        <div className="text-[11px] text-muted">
+          In those windows the chosen shelf scored {fmtNum(Math.abs(avgGap))} lower in sample than the
+          spike it replaced, on average — that gap is the premium you paid for a pick that should
+          repeat. Whether it was worth it shows up in the out-of-sample numbers, not here.
+        </div>
+      )}
+      {changed.length === 0 && (
+        <div className="text-[11px] text-amber-400">
+          The mode was a no-op on this run — the raw peak was already the centre of its neighbourhood
+          in every window. Either the surface is genuinely smooth, or there were too few trials for the
+          neighbourhood average to differ from the peak. Compare against a{" "}
+          <span className="font-mono">best</span> run to confirm they're identical.
+        </div>
+      )}
+      <div className="text-[10px] text-muted/70">
+        Selection only changes which of the already-run trials is declared the winner — it costs no
+        extra backtests, and it cannot rescue a search space with no edge in it.
+      </div>
+    </div>
   );
 }
 

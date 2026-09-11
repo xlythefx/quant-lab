@@ -42,6 +42,10 @@ def start_job():
             # sample instead of a handful of lucky trades.
             "min_trades": body.get("min_trades"),
             "warmup_bars": body.get("warmup_bars"),
+            # Optimizer seed (TPE is stochastic — same seed, same picks) and how
+            # each window's winner is chosen: "best" (argmax) or "plateau".
+            "seed": body.get("seed"),
+            "selection": body.get("selection"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")
@@ -148,6 +152,10 @@ def robustness_start():
             # sample instead of a handful of lucky trades.
             "min_trades": body.get("min_trades"),
             "warmup_bars": body.get("warmup_bars"),
+            # Optimizer seed (TPE is stochastic — same seed, same picks) and how
+            # each window's winner is chosen: "best" (argmax) or "plateau".
+            "seed": body.get("seed"),
+            "selection": body.get("selection"),
         }
         if not spec["strategy_id"]:
             raise ValidationError("strategy_id is required")

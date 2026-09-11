@@ -378,11 +378,19 @@ def _normalize_spec(spec: dict) -> dict:
         # to rest on a real sample; windows that then report no eligible config
         # are telling you the truth rather than inventing a winner.
         "min_trades": max(0, int(spec["min_trades"]) if spec.get("min_trades") is not None else 1),
+        # How a window's winner is chosen from its trials.
+        #   "best"    — Optuna's argmax. The single highest-scoring trial.
+        #   "plateau" — the highest NEIGHBOURHOOD average (see _plateau_scores),
+        #               so a broad shelf outranks a lone spike.
+        # Defaults to "best" so existing runs stay comparable; plateau is opt-in.
+        "selection": str(spec.get("selection") or "best"),
     }
     if not out["strategy_id"]:
         raise ValueError("strategy_id is required")
     if out["metric"] not in _METRIC_KEYS:
         raise ValueError(f"unknown metric: {out['metric']}")
+    if out["selection"] not in ("best", "plateau"):
+        raise ValueError(f"unknown selection mode: {out['selection']}")
     if out["is_bars"] < 10:
         raise ValueError("is_bars must be >= 10")
     if out["oos_bars"] < 1:
@@ -404,6 +412,58 @@ def _normalize_spec(spec: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Per-window optimization (module-level so it's picklable for ProcessPoolExecutor)
 # ---------------------------------------------------------------------------
+
+# How many neighbours a trial is averaged with under `selection="plateau"`.
+_PLATEAU_NEIGHBOURS = 5
+
+
+def _plateau_scores(completed: list, search_space: list, k: int = _PLATEAU_NEIGHBOURS) -> list:
+    """Smooth each trial's score by its neighbourhood in normalized param space.
+
+    Optuna's argmax takes the single highest point, which is the wrong thing to
+    do on a noisy surface: a lone spike beats a broad shelf scoring marginally
+    less, and the spike is the one that won't survive out of sample. The plateau
+    gate on the Verdict tab MEASURES this after the fact but never influenced
+    which config won — this closes that loop by scoring each trial as the mean
+    of itself plus its `k` nearest neighbours, so a shelf outranks a spike.
+
+    Distance is Gower-style: per-param |difference| divided by that param's
+    search RANGE, averaged over params, so every dimension counts equally no
+    matter its units. Params with a zero-width range contribute nothing.
+
+    Honest limit: with ~50 trials spread over 5-6 searched params, neighbours
+    are far apart and the smoothing is blunt — it reliably kills isolated
+    spikes, but it is not a substitute for more trials or a smaller space.
+
+    Returns raw scores unchanged when there is too little to smooth over.
+    """
+    n = len(completed)
+    names, spans = [], []
+    for e in search_space or []:
+        span = float(e["high"]) - float(e["low"])
+        if span > 0:
+            names.append(e["name"])
+            spans.append(span)
+    vals = [float(t.value) for t in completed]
+    if n < k + 1 or not names:
+        return vals
+
+    X = np.empty((n, len(names)), dtype=float)
+    for i, t in enumerate(completed):
+        for j, name in enumerate(names):
+            X[i, j] = float(t.params.get(name, 0.0)) / spans[j]
+    v = np.asarray(vals, dtype=float)
+
+    # Pairwise mean-|diff| distance. n is trials-per-window (tens to low
+    # hundreds), so the dense O(n^2) form is far cheaper than a single backtest.
+    d = np.abs(X[:, None, :] - X[None, :, :]).mean(axis=2)
+    out = np.empty(n, dtype=float)
+    for i in range(n):
+        # k nearest INCLUDING itself (distance 0), so the trial's own score
+        # still carries weight rather than being replaced by its surroundings.
+        idx = np.argpartition(d[i], k)[:k + 1]
+        out[i] = float(v[idx].mean())
+    return out.tolist()
 
 def _optimize_window_pure(spec: dict, is_warm_start: int, is_start: int, is_end: int,
                           on_trial=None, cancel_check=None):
@@ -481,16 +541,34 @@ def _optimize_window_pure(spec: dict, is_warm_start: int, is_start: int, is_end:
     if not completed:
         return (dict(s["base_params"]), None, [],
                 {"n_eligible": 0, "n_pruned": n_pruned, "best_trades": None})
-    best_trial = max(completed, key=lambda t: float(t.value))
+    # The argmax pick is computed either way — under plateau selection it becomes
+    # the control: the report can then say how often smoothing changed the winner,
+    # which is the only way to tell whether the mode is doing anything.
+    argmax_trial = max(completed, key=lambda t: float(t.value))
+    selection = s.get("selection") or "best"
+    if selection == "plateau":
+        smoothed = _plateau_scores(completed, s["search_space"])
+        winner = completed[int(np.argmax(smoothed))]
+    else:
+        winner = argmax_trial
+
     best_params = dict(s["base_params"])
-    best_params.update(best_trial.params)
+    best_params.update(winner.params)
     trial_records = [{"params": t.params, "value": float(t.value)} for t in completed]
     audit = {
         "n_eligible": len(completed),
         "n_pruned": n_pruned,
-        "best_trades": best_trial.user_attrs.get("n_trades"),
+        "best_trades": winner.user_attrs.get("n_trades"),
+        "selection": selection,
+        # Did smoothing actually move the pick off the raw peak?
+        "selection_changed_pick": bool(winner.number != argmax_trial.number),
+        # What the raw peak scored, so the cost of preferring the shelf is visible.
+        "argmax_score": float(argmax_trial.value),
     }
-    return best_params, float(best_trial.value), trial_records, audit
+    # The IS score stays the winner's RAW score — "what this config scored in
+    # sample". The smoothed value is a selection device, not a measurement, and
+    # feeding it downstream would corrupt WFE and the IS/OOS correlation.
+    return best_params, float(winner.value), trial_records, audit
 
 
 def _task_payload(spec: dict, w: dict) -> dict:
@@ -980,6 +1058,8 @@ class WalkForwardJob:
                 "purge_radius": s["purge_radius"],
                 "min_trades": s["min_trades"],
                 "warmup_bars": s["warmup_bars"],
+                "seed": s["seed"],
+                "selection": s["selection"],
                 # How this run's OOS windows were stitched. The UI needs it to
                 # build a FAIR buy-and-hold: fixed-contract futures don't
                 # compound (multiplier_carry is pinned to 1.0 above), so a
@@ -1218,6 +1298,11 @@ class WalkForwardJob:
             "best_trades": audit.get("best_trades"),
             "n_eligible_trials": audit.get("n_eligible"),
             "n_pruned_trials": audit.get("n_pruned"),
+            # Plateau selection: whether smoothing moved this window's winner off
+            # the raw peak, and what the peak scored. Lets the report say "changed
+            # the pick in N of M windows" instead of leaving the mode unmeasured.
+            "selection_changed_pick": audit.get("selection_changed_pick"),
+            "argmax_score": audit.get("argmax_score"),
             **extras,
         }
         control = r.get("control_result")

@@ -53,7 +53,7 @@ export default function WalkForwardPresetPicker({ dataset, timeframe, onApply, d
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
         {computedPresets.map((p) => (
           <PresetCard
             key={p.id}
@@ -121,6 +121,10 @@ function PresetCard({ preset, disabled, onOpenModal, onQuickApply }) {
       <div className="text-[10px] font-mono text-muted/80 pt-1 border-t border-line/30 space-y-0.5">
         <div>IS {fmtInt(v.isBars)}b · OOS {fmtInt(v.oosBars)}b</div>
         <div>~{fmtInt(v.expectedWindows)} windows · {v.nTrials} trials</div>
+        <div className="text-muted/60">
+          embargo {fmtInt(v.embargoBars || 0)}b · purge {fmtInt(v.purgeRadius || 0)}b
+          {v.selection === "plateau" && <span className="text-accent-blue"> · plateau</span>}
+        </div>
       </div>
       <button
         onClick={handleClick}
@@ -181,6 +185,10 @@ function PresetModal({ preset, onClose, onApply, disabled }) {
               <KV k="OOS bars"    v={fmtInt(v.oosBars)} />
               <KV k="Trials/win"  v={fmtInt(v.nTrials)} />
               <KV k="Metric"      v={v.metric} />
+              <KV k="Min IS trades" v={fmtInt(v.minTrades)} />
+              <KV k="Selection"   v={v.selection === "plateau" ? "plateau" : "best (argmax)"} />
+              <KV k="Embargo"     v={`${fmtInt(v.embargoBars || 0)}b`} />
+              <KV k="Purge"       v={`${fmtInt(v.purgeRadius || 0)}b`} />
               <KV k="Expected windows" v={`~${fmtInt(v.expectedWindows)}`} />
               <KV k="Backtest range"   v={`~${v.rangeDays} days`} />
             </div>
@@ -245,6 +253,36 @@ function daysBetween(startEpoch, endEpoch) {
   return Math.max(0, Math.round((endEpoch - startEpoch) / 86400));
 }
 
+/**
+ * Embargo + purge, sized in days of bars.
+ *
+ * Both guard the IS/OOS seam. Embargo gaps the boundary so params tuned on the
+ * last training bars aren't immediately tested on the bars right after them —
+ * which are serially correlated with what they were just fitted to. Purge drops
+ * the training bars at the edge whose trades could still be open once testing
+ * starts.
+ *
+ * The correct size for both is ONE TYPICAL TRADE, which a preset can't know.
+ * A day covers any intraday strategy, so that's the default; if you hold
+ * positions for a week, raise them by hand in the Rigor row.
+ *
+ * Clamped under the engine's limits (embargo < oosBars, purge < isBars) so a
+ * coarse timeframe can't build a spec the backend refuses.
+ */
+function leakGuard(days, tf, oosBars, isBars) {
+  const want = barsForDays(days, tf);
+  return {
+    embargoBars: Math.max(0, Math.min(want, oosBars - 1)),
+    purgeRadius: Math.max(0, Math.min(want, isBars - 1)),
+  };
+}
+
+// Embargo eats into the stride, so it costs windows — mirrors the backend's
+// n_splits and the RunCost estimate, which both subtract it.
+function countWindows(rows, isBars, oosBars, embargoBars) {
+  return Math.max(2, Math.floor((rows - isBars - (embargoBars || 0)) / oosBars));
+}
+
 const PRESETS = [
   {
     id: "full",
@@ -263,15 +301,17 @@ const PRESETS = [
     compute: (ds, tf) => {
       const isBars = barsForDays(180, tf);
       const oosBars = barsForDays(30, tf);
+      const leak = leakGuard(1, tf, oosBars, isBars);
       const totalDays = daysBetween(ds.first_time, ds.last_time);
-      const windows = Math.max(2, Math.floor((ds.rows - isBars) / oosBars));
+      const windows = countWindows(ds.rows, isBars, oosBars, leak.embargoBars);
       return {
         start: epochToDateStr(ds.first_time),
         end:   epochToDateStr(ds.last_time),
-        isBars, oosBars,
+        isBars, oosBars, ...leak,
         nTrials: 50,
         minTrades: 30,
         metric: "sharpe",
+        selection: "best",
         expectedWindows: windows,
         rangeDays: totalDays,
       };
@@ -294,6 +334,7 @@ const PRESETS = [
     compute: (ds, tf) => {
       const isBars = barsForDays(180, tf);
       const oosBars = barsForDays(30, tf);
+      const leak = leakGuard(1, tf, oosBars, isBars);
       // 365, not 90. docs/plans/validation-checklist.md asks for the most
       // recent 6-12 months; 90 days is half that floor, and on a multi-year
       // dataset it holds back ~4% while leaving dozens of windows unused.
@@ -302,14 +343,15 @@ const PRESETS = [
       if (adjustedEnd <= ds.first_time) return null;  // dataset too small
       const totalDays = daysBetween(ds.first_time, adjustedEnd);
       const usableBars = ds.rows - barsForDays(holdoutDays, tf);
-      const windows = Math.max(2, Math.floor((usableBars - isBars) / oosBars));
+      const windows = countWindows(usableBars, isBars, oosBars, leak.embargoBars);
       return {
         start: epochToDateStr(ds.first_time),
         end:   epochToDateStr(adjustedEnd),
-        isBars, oosBars,
+        isBars, oosBars, ...leak,
         nTrials: 50,
         minTrades: 30,
         metric: "sharpe",
+        selection: "best",
         expectedWindows: windows,
         rangeDays: totalDays,
       };
@@ -335,17 +377,60 @@ const PRESETS = [
       const adjustedStart = Math.max(ds.first_time, ds.last_time - years * 365.25 * 86400);
       const isBars = barsForDays(90, tf);
       const oosBars = barsForDays(14, tf);
+      const leak = leakGuard(1, tf, oosBars, isBars);
       const totalDays = daysBetween(adjustedStart, ds.last_time);
       const usableBars = barsForDays(totalDays, tf);
-      const windows = Math.max(2, Math.floor((usableBars - isBars) / oosBars));
+      const windows = countWindows(usableBars, isBars, oosBars, leak.embargoBars);
       return {
         start: epochToDateStr(adjustedStart),
         end:   epochToDateStr(ds.last_time),
-        isBars, oosBars,
+        isBars, oosBars, ...leak,
         nTrials: 50,
         minTrades: 30,
         metric: "sharpe",
+        selection: "best",
         expectedWindows: windows,
+        rangeDays: totalDays,
+      };
+    },
+  },
+  {
+    id: "gauntlet",
+    name: "Pre-Deploy Gauntlet",
+    tagline: "Strictest run. 12-month holdout, 3-day leak guard, plateau picks, 100 trials.",
+    description:
+      "Every guard this app has, switched on at once. Holds back the last 12 months untouched, gaps the IS/OOS seam by 3 days at both ends (embargo + purge), demands 50 in-sample trades before a config may win a window, runs 100 trials instead of 50, and picks the broadest plateau rather than the highest spike. Expect it to take several times as long as Full History — and expect worse numbers than Full History gave you. That is the point: this is the version of the result you can defend.",
+    whenToUse: [
+      "Final check before converting to Pine Script and deploying.",
+      "A strategy already looked good on Full History and you want to know whether the edge survives strict conditions.",
+      "You're about to risk real money and want the pessimistic number, not the flattering one.",
+    ],
+    whenNotToUse: [
+      "Early experimentation — this is by far the slowest preset.",
+      "Datasets under ~2 years: after the 12-month holdout there isn't enough left to roll windows across.",
+      "Comparing against your earlier runs — the stricter settings make the numbers deliberately not comparable.",
+    ],
+    compute: (ds, tf) => {
+      const isBars = barsForDays(180, tf);
+      const oosBars = barsForDays(30, tf);
+      const leak = leakGuard(3, tf, oosBars, isBars);
+      const holdoutDays = 365;
+      const adjustedEnd = ds.last_time - holdoutDays * 86400;
+      if (adjustedEnd <= ds.first_time) return null;      // dataset too small
+      const totalDays = daysBetween(ds.first_time, adjustedEnd);
+      const usableBars = ds.rows - barsForDays(holdoutDays, tf);
+      if (usableBars <= isBars + leak.embargoBars + oosBars) return null;
+      return {
+        start: epochToDateStr(ds.first_time),
+        end:   epochToDateStr(adjustedEnd),
+        isBars, oosBars, ...leak,
+        nTrials: 100,
+        minTrades: 50,
+        metric: "sharpe",
+        // The one preset that opts into plateau selection. The Rigor row still
+        // shows it, so you can see what was set and change it back.
+        selection: "plateau",
+        expectedWindows: countWindows(usableBars, isBars, oosBars, leak.embargoBars),
         rangeDays: totalDays,
       };
     },
@@ -369,16 +454,18 @@ const PRESETS = [
       const adjustedStart = Math.max(ds.first_time, ds.last_time - 365 * 86400);
       const isBars = barsForDays(60, tf);
       const oosBars = barsForDays(14, tf);
+      const leak = leakGuard(1, tf, oosBars, isBars);
       const totalDays = daysBetween(adjustedStart, ds.last_time);
       const usableBars = barsForDays(totalDays, tf);
-      const windows = Math.max(2, Math.floor((usableBars - isBars) / oosBars));
+      const windows = countWindows(usableBars, isBars, oosBars, leak.embargoBars);
       return {
         start: epochToDateStr(adjustedStart),
         end:   epochToDateStr(ds.last_time),
-        isBars, oosBars,
+        isBars, oosBars, ...leak,
         nTrials: 20,
         minTrades: 30,
         metric: "sharpe",
+        selection: "best",
         expectedWindows: windows,
         rangeDays: totalDays,
       };
