@@ -77,7 +77,7 @@ def datasets():
     return jsonify({"datasets": market_data.list_datasets()})
 
 
-_BROKERS = ("binance", "dukascopy", "yahoo", "tradestation", "databento")
+_BROKERS = ("binance", "binance_perp", "dukascopy", "yahoo", "tradestation", "databento")
 
 
 @market_bp.post("/datasets/download")

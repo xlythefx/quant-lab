@@ -87,6 +87,29 @@ const TABS = [
   },
 ];
 
+/**
+ * Crypto tab only: Binance spot vs USDT-M perpetuals. Perps are what the live
+ * acceptor actually trades. They're stored under their own broker folder AND
+ * with a ".P" suffix on the symbol (BTCUSDT.P — TradingView's convention) so a
+ * perp file can never be shadowed by its spot twin when research pages load
+ * by symbol alone.
+ */
+const CRYPTO_MARKETS = {
+  spot: {
+    label: "Spot",
+    broker: "binance",
+    source: "Binance Spot via CCXT",
+    note: "Pair-shaped tickers (BASE+QUOTE concatenated, e.g. BTCUSDT). Re-running merges into the existing file.",
+  },
+  perp: {
+    label: "Perps",
+    broker: "binance_perp",
+    source: "Binance USDT-M Perps via CCXT",
+    note: "Perpetual futures — the market the live acceptor trades. Saved as SYMBOL.P (e.g. BTCUSDT.P) in its own folder, so it sits next to the spot file, never on top of it. History starts Sep 2019 for BTC, ~Sep 2020 for most alts.",
+  },
+};
+const PERP_SUFFIX = ".P";
+
 // ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
@@ -140,6 +163,21 @@ export default function Downloads() {
   useEffect(() => {
     setSymbol(tab.defaultSymbol);
   }, [tab.id, tab.defaultSymbol]);
+
+  // Crypto tab: Spot vs Perps toggle. The toggle owns the ".P" suffix — the
+  // user types the bare pair and we derive the symbol that actually gets saved.
+  const [cryptoMarket, setCryptoMarket] = useState("spot");
+  const market = tab.id === "crypto" ? CRYPTO_MARKETS[cryptoMarket] : null;
+  const isPerp = market === CRYPTO_MARKETS.perp;
+  const effectiveBroker = market ? market.broker : tab.broker;
+  const effectiveSource = market ? market.source : tab.source;
+  const effectiveNote = market ? market.note : tab.note;
+  const effectiveSymbol = useMemo(() => {
+    let s = symbol.trim().toUpperCase();
+    if (tab.id !== "crypto") return s;
+    if (s.endsWith(PERP_SUFFIX)) s = s.slice(0, -PERP_SUFFIX.length);
+    return isPerp && s ? s + PERP_SUFFIX : s;
+  }, [symbol, tab.id, isPerp]);
 
   // Download state lives in a module-level store so the in-flight POST + socket
   // events survive navigation. useSyncExternalStore re-renders us on change.
@@ -204,12 +242,12 @@ export default function Downloads() {
   const onDownload = async (e) => {
     e?.preventDefault?.();
     if (!tab.enabled) return;
-    const sym = symbol.trim().toUpperCase();
-    const jobId = `${tab.broker}_${sym}_${timeframe}_${Date.now()}`;
+    const sym = effectiveSymbol;
+    const jobId = `${effectiveBroker}_${sym}_${timeframe}_${Date.now()}`;
     let sid = null;
     try { sid = await waitForSocketId(2000); } catch { /* progress just won't stream */ }
     try {
-      await startDownload({ symbol: sym, timeframe, start, end, sid, jobId, broker: tab.broker });
+      await startDownload({ symbol: sym, timeframe, start, end, sid, jobId, broker: effectiveBroker });
     } catch { /* error already on the store */ }
   };
 
@@ -356,9 +394,9 @@ export default function Downloads() {
         <div className="flex items-start justify-between gap-4 -mt-3">
           <div>
             <div className="text-[10px] uppercase tracking-wider text-accent-blue">Source</div>
-            <div className="text-sm font-mono text-text mt-0.5">{tab.source}</div>
+            <div className="text-sm font-mono text-text mt-0.5">{effectiveSource}</div>
           </div>
-          <div className="text-[11px] text-muted/80 max-w-md text-right">{tab.note}</div>
+          <div className="text-[11px] text-muted/80 max-w-md text-right">{effectiveNote}</div>
         </div>
 
         {/* Form (only when tab is enabled and not tradestation WebAPI) */}
@@ -380,7 +418,33 @@ export default function Downloads() {
             className="rounded-xl border border-line bg-bg-panel/60 p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end"
           >
             <div className="md:col-span-2">
-              <label className="block text-xs uppercase tracking-wider text-muted mb-1">Symbol</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs uppercase tracking-wider text-muted">Symbol</label>
+                {market && (
+                  <div
+                    role="radiogroup"
+                    aria-label="Binance market"
+                    className="inline-flex rounded-md border border-line overflow-hidden text-[11px] font-mono"
+                  >
+                    {Object.entries(CRYPTO_MARKETS).map(([id, m]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        role="radio"
+                        aria-checked={cryptoMarket === id}
+                        onClick={() => setCryptoMarket(id)}
+                        className={`px-2.5 py-0.5 transition ${
+                          cryptoMarket === id
+                            ? "bg-accent-blue/20 text-accent-blue"
+                            : "text-muted hover:text-text"
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <input
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value.toUpperCase())}
@@ -391,6 +455,12 @@ export default function Downloads() {
               <datalist id={`symbol-suggestions-${tab.id}`}>
                 {tab.suggested.map((s) => <option key={s} value={s} />)}
               </datalist>
+              {isPerp && effectiveSymbol && (
+                <div className="mt-1 text-[11px] font-mono text-muted">
+                  saves as <span className="text-accent-blue">{effectiveSymbol}</span> · folder{" "}
+                  <span className="text-text">binance_perp</span>
+                </div>
+              )}
             </div>
 
             <div>
@@ -439,7 +509,7 @@ export default function Downloads() {
                   disabled={!symbol || !start || !end}
                   className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
                 >
-                  Download from {tab.source.split(" ")[0]}
+                  Download from {effectiveSource.split(" ")[0]}{isPerp ? " Perps" : ""}
                 </button>
               )}
               <span className="text-xs text-muted">

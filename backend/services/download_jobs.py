@@ -37,7 +37,7 @@ from services.brokers import databento
 
 log = logging.getLogger(__name__)
 
-_BROKERS = ("binance", "dukascopy", "yahoo", "tradestation", "databento")
+_BROKERS = ("binance", "binance_perp", "dukascopy", "yahoo", "tradestation", "databento")
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +99,13 @@ def _normalize_spec(spec: dict) -> dict:
     symbol = str(spec.get("symbol") or "").strip().upper()
     if not symbol:
         raise ValueError("symbol is required")
+    # Binance perps are keyed by the ".P" suffix (see market_data.PERP_SUFFIX):
+    # the suffix decides both the CCXT client and the data/{broker}/ folder,
+    # so keep broker and symbol in agreement whichever one the caller set.
+    if broker == "binance_perp" and not market_data.is_perp_symbol(symbol):
+        symbol += market_data.PERP_SUFFIX
+    elif broker == "binance" and market_data.is_perp_symbol(symbol):
+        broker = "binance_perp"
     timeframe = str(spec.get("timeframe") or "").strip()
     if not timeframe:
         raise ValueError("timeframe is required")
@@ -193,7 +200,7 @@ class DownloadJob:
             self.state = "running"
             # Initial 0% event so the UI paints the bar immediately.
             self._record_progress(status="starting")
-            if self.spec["broker"] == "binance":
+            if self.spec["broker"] in ("binance", "binance_perp"):
                 meta = self._run_binance()
             elif self.spec["broker"] == "yahoo":
                 meta = self._run_yahoo()

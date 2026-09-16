@@ -51,7 +51,7 @@ _CACHE_LOCK = threading.Lock()
 # ---------------------------------------------------------------------------
 
 ASSET_CLASSES = ("crypto", "forex", "stock", "index", "commodity", "futures")
-EXECUTION_MODELS = ("spot_crypto", "forex_cfd", "stock_cfd", "stock_cash", "commodity_cfd", "futures")
+EXECUTION_MODELS = ("spot_crypto", "perp_crypto", "forex_cfd", "stock_cfd", "stock_cash", "commodity_cfd", "futures")
 
 
 @dataclass(frozen=True)
@@ -140,6 +140,8 @@ def _split_crypto_pair(symbol: str) -> tuple[str, str]:
     """BTCUSDT → ('BTC', 'USDT'). Splits on the longest matching quote suffix.
     Falls back to (symbol[:-4], symbol[-4:]) if no known quote matches."""
     s = symbol.upper()
+    if s.endswith(".P"):  # Binance perp suffix (BTCUSDT.P) — not part of the pair
+        s = s[:-2]
     for q in sorted(_CRYPTO_QUOTES, key=len, reverse=True):
         if s.endswith(q) and len(s) > len(q):
             return s[: -len(q)], q
@@ -155,7 +157,7 @@ def _default_meta(symbol: str, broker: str) -> AssetMetadata:
         symbol=symbol,
         broker=broker,
         asset_class="crypto",
-        execution_model="spot_crypto",
+        execution_model="perp_crypto" if symbol.upper().endswith(".P") else "spot_crypto",
         base=base,
         quote=quote,
         contract_size=1.0,

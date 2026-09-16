@@ -36,6 +36,18 @@ log = logging.getLogger(__name__)
 # Current default broker. Future stages introduce capital.com / ig.com etc.
 BROKER_DEFAULT = "binance"
 
+# Binance USDT-M perpetuals live in their own namespace and carry a ".P"
+# suffix on the symbol (BTCUSDT.P — TradingView's convention). The suffix is
+# what keeps a perp dataset from colliding with its spot twin: every research
+# page loads by symbol only, and `find_parquet` prefers the spot folder, so a
+# same-named perp file would silently be shadowed by spot.
+BROKER_PERP = "binance_perp"
+PERP_SUFFIX = ".P"
+
+
+def is_perp_symbol(symbol: str) -> bool:
+    return symbol.upper().endswith(PERP_SUFFIX)
+
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
@@ -75,8 +87,19 @@ def _migrate_flat_layout_to_broker_namespace() -> None:
 
 _migrate_flat_layout_to_broker_namespace()
 
-# Single shared CCXT client. enableRateLimit avoids hammering Binance.
+# Single shared CCXT client per market. enableRateLimit avoids hammering Binance.
+# `binance` = spot (api.binance.com); `binanceusdm` = USDT-M perps (fapi.binance.com).
 _exchange = ccxt.binance({"enableRateLimit": True, "timeout": 20000})
+_exchange_perp = ccxt.binanceusdm({"enableRateLimit": True, "timeout": 20000})
+
+
+def _client_for(symbol: str):
+    return _exchange_perp if is_perp_symbol(symbol) else _exchange
+
+
+def _broker_for_binance_symbol(symbol: str) -> str:
+    """Which data/{broker}/ folder a Binance-sourced symbol belongs in."""
+    return BROKER_PERP if is_perp_symbol(symbol) else BROKER_DEFAULT
 
 
 _QUOTES = ("USDT", "USDC", "BUSD", "BTC", "ETH", "FDUSD", "TUSD", "EUR", "TRY", "BNB")
@@ -110,13 +133,22 @@ def _resample_ohlcv_ms(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 
 
 def _to_ccxt_symbol(symbol: str) -> str:
-    """BTCUSDT -> BTC/USDT. Splits on the longest known quote suffix."""
+    """BTCUSDT -> BTC/USDT (spot); BTCUSDT.P -> BTC/USDT:USDT (USDT-M perp).
+    Splits on the longest known quote suffix. CCXT names a linear perp
+    "BASE/QUOTE:SETTLE" — plain "BTC/USDT" is NOT a market on binanceusdm."""
     s = symbol.upper()
+    perp = is_perp_symbol(s)
+    if perp:
+        s = s[: -len(PERP_SUFFIX)]
+    base, quote = None, None
     for q in sorted(_QUOTES, key=len, reverse=True):
         if s.endswith(q) and len(s) > len(q):
-            return f"{s[:-len(q)]}/{q}"
-    # Fallback: assume last 4 chars are the quote.
-    return s[:-4] + "/" + s[-4:]
+            base, quote = s[:-len(q)], q
+            break
+    if base is None:
+        # Fallback: assume last 4 chars are the quote.
+        base, quote = s[:-4], s[-4:]
+    return f"{base}/{quote}:{quote}" if perp else f"{base}/{quote}"
 
 
 def _ohlcv_to_records(rows) -> List[Dict]:
@@ -154,7 +186,7 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 500) -> List[Dict]:
     """Recent N candles via CCXT REST. Used for initial chart paint."""
     pair = _to_ccxt_symbol(symbol)
     try:
-        rows = _exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+        rows = _client_for(symbol).fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
     except (ccxt.NetworkError, ccxt.ExchangeError) as e:
         log.error("fetch_ohlcv failed for %s %s: %s", symbol, timeframe, e)
         raise
@@ -167,7 +199,7 @@ def fetch_ticker(symbol: str) -> Dict:
     refreshes comes from the kline stream, this fills the 24h stats."""
     pair = _to_ccxt_symbol(symbol)
     try:
-        t = _exchange.fetch_ticker(pair)
+        t = _client_for(symbol).fetch_ticker(pair)
     except (ccxt.NetworkError, ccxt.ExchangeError) as e:
         log.error("fetch_ticker failed for %s: %s", symbol, e)
         raise
@@ -200,12 +232,13 @@ def ensure_parquet(symbol: str, timeframe: str, force: bool = False) -> Dict:
     Ensure a Parquet file with ~BACKTEST_LOOKBACK_DAYS of history exists.
     Returns metadata: {cached, rows, path}.
     """
-    path = parquet_path(symbol, timeframe)
+    path = parquet_path(symbol, timeframe, _broker_for_binance_symbol(symbol))
     if not force and _is_fresh(path):
         df = pd.read_parquet(path)
         return {"cached": True, "rows": len(df), "path": path}
 
     pair = _to_ccxt_symbol(symbol)
+    client = _client_for(symbol)
     tf_seconds = TIMEFRAME_SECONDS[timeframe]
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - BACKTEST_LOOKBACK_DAYS * 86400 * 1000
@@ -217,7 +250,7 @@ def ensure_parquet(symbol: str, timeframe: str, force: bool = False) -> Dict:
 
     while since < end_ms:
         try:
-            rows = _exchange.fetch_ohlcv(
+            rows = client.fetch_ohlcv(
                 pair, timeframe=timeframe, since=since, limit=page_limit
             )
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
@@ -271,6 +304,8 @@ def download_range(
         raise ValueError("start must be before end")
 
     pair = _to_ccxt_symbol(symbol)
+    client = _client_for(symbol)
+    broker = _broker_for_binance_symbol(symbol)
     # Binance can't fetch odd intervals (6/10/12/23/46m) — pull 1m and resample.
     native = timeframe in _CCXT_TFS
     fetch_tf = timeframe if native else "1m"
@@ -279,14 +314,14 @@ def download_range(
 
     new_rows = []
     since = start_ms
-    log.info("Downloading %s %s from %s to %s (fetch_tf=%s)", symbol, timeframe, start_ms, end_ms, fetch_tf)
+    log.info("Downloading %s %s from %s to %s (fetch_tf=%s, broker=%s)", symbol, timeframe, start_ms, end_ms, fetch_tf, broker)
 
     while since < end_ms:
         if cancel_check is not None and cancel_check():
             log.info("download_range cancelled at since=%s", since)
             break
         try:
-            rows = _exchange.fetch_ohlcv(pair, timeframe=fetch_tf, since=since, limit=page_limit)
+            rows = client.fetch_ohlcv(pair, timeframe=fetch_tf, since=since, limit=page_limit)
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
             log.warning("page failed since=%s: %s — retrying", since, e)
             time.sleep(2)
@@ -318,7 +353,7 @@ def download_range(
     new_df = pd.DataFrame(new_rows, columns=["ts_ms", "open", "high", "low", "close", "volume"])
     if new_df.empty:
         # Nothing fetched — but file may still exist.
-        path = parquet_path(symbol, timeframe)
+        path = parquet_path(symbol, timeframe, broker)
         if os.path.exists(path):
             existing = pd.read_parquet(path)
             return {
@@ -339,7 +374,7 @@ def download_range(
         new_df = new_df[new_df["ts_ms"] <= end_ms]
         new_df = _resample_ohlcv_ms(new_df, timeframe)
 
-    path = parquet_path(symbol, timeframe)
+    path = parquet_path(symbol, timeframe, broker)
     rows_before = 0
     if os.path.exists(path):
         existing = pd.read_parquet(path)

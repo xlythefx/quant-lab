@@ -11,13 +11,16 @@ class ValidationError(ValueError):
     pass
 
 
-_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,16}$")
+# Alphanumeric ticker, optionally suffixed ".P" (Binance USDT-M perpetual —
+# TradingView's own convention, e.g. BINANCE:BTCUSDT.P).
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,16}(\.P)?$")
 
 
 def validate_symbol(symbol: str) -> str:
     """Symbols are user-driven (downloads page). Accept any alphanumeric ticker
-    1-16 chars long. Examples:
+    1-16 chars long, with an optional ".P" perp suffix. Examples:
       crypto pairs: BTCUSDT, FETUSDT, SOLUSDC, 1000PEPEUSDT
+      crypto perps: BTCUSDT.P, SOLUSDT.P
       CFD / FX:     XAUUSD, EURUSD
       futures:      ES, NQ, CL, GC, MES, S (soybeans is 1-char)
     Per-broker symbol→ticker translation happens in the broker module
@@ -26,7 +29,7 @@ def validate_symbol(symbol: str) -> str:
         raise ValidationError("symbol is required")
     s = symbol.upper().strip()
     if not _SYMBOL_RE.match(s):
-        raise ValidationError(f"symbol '{symbol}' is malformed (alphanumeric only, 1-16 chars)")
+        raise ValidationError(f"symbol '{symbol}' is malformed (alphanumeric only, 1-16 chars, optional .P suffix)")
     return s
 
 
