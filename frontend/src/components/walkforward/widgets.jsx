@@ -6,7 +6,7 @@ import { useMemo, useRef, useState } from "react";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../../services/format.js";
 import { aiAnalyzeWalkForward, getPresetsFull, savePresets } from "../../services/api.js";
 import { fmtParamValue } from "../../services/paramFormat.js";
-import { computeWFGates, windowOutcome, DECISIVE } from "../../services/wfVerdict.js";
+import { computeWFGates, windowOutcome, verdictById, DECISIVE } from "../../services/wfVerdict.js";
 import { resolveDefaultParams } from "../dashboardv2/metrics.js";
 import { convertUtcHHmm, tzShort } from "../../services/timezone.js";
 import { useDisplayTz } from "../../services/useDisplayTz.js";
@@ -815,7 +815,11 @@ export function WFVerdictPanel({ result, strategies }) {
 
   // One computation, two renderers — the Overview banner (WFVerdict) reads the
   // exact same object, so the two can never disagree about the same run again.
-  const { gates, tone, headline, fails, warns, stability, flats } = computeWFGates(result);
+  const { gates, tone, headline, verdictId, worstParam, fails, warns, stability, flats } = computeWFGates(result);
+  // The catalog entry for THIS verdict — what triggers it and what to do next.
+  // Steps take the run's context so "mixed signal" can name the actual param.
+  const verdict = verdictById(verdictId);
+  const steps = verdict ? verdict.steps({ worstParam }) : [];
 
   const toneClasses = {
     profit: "border-profit/40 bg-profit/5 text-profit",
@@ -857,6 +861,23 @@ export function WFVerdictPanel({ result, strategies }) {
           A verdict, not a guarantee. Read the gates together — full method in docs/plans/validation-checklist.md.
         </div>
       </div>
+
+      {/* What this verdict means and what to do about it. Same catalog the
+          Walk-Forward Guide lists in full, so the two can't disagree. */}
+      {verdict && (
+        <div className="rounded-xl border border-line bg-bg-panel/60 p-4 space-y-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-muted">Why this verdict</div>
+            <div className="text-xs text-muted leading-relaxed mt-1">{verdict.why}</div>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-muted">How to resolve it</div>
+            <ol className="mt-1.5 space-y-1.5 text-xs text-text leading-relaxed list-decimal pl-5">
+              {steps.map((st, i) => <li key={i}>{st}</li>)}
+            </ol>
+          </div>
+        </div>
+      )}
 
       {/* Recommended params to deploy (latest re-tune) + current-vs-recommended */}
       <RecommendedParams result={result} stability={stability} />

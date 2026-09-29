@@ -2,15 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import IconNavRail from "../components/dashboardv2/IconNavRail.jsx";
 import StrategyEditor from "../components/StrategyEditor.jsx";
 import LookAheadComparisonModal from "../components/LookAheadComparisonModal.jsx";
-import { KpiCard, Section, TabBar } from "../components/analytics/primitives.jsx";
+import { TabBar } from "../components/analytics/primitives.jsx";
 import StrategySidebar, { PORTFOLIO_ID } from "../components/dashboardv2/StrategySidebar.jsx";
-import EquityCurveV2 from "../components/dashboardv2/EquityCurveV2.jsx";
 import PriceChartV2 from "../components/dashboardv2/PriceChartV2.jsx";
-import UnderwaterChart from "../components/dashboardv2/UnderwaterChart.jsx";
-import MonthlyReturnsHeatmap from "../components/dashboardv2/MonthlyReturnsHeatmap.jsx";
 import RangeSelector from "../components/dashboardv2/RangeSelector.jsx";
-import RiskReturnPanel from "../components/dashboardv2/RiskReturnPanel.jsx";
-import InterpretationCard from "../components/dashboardv2/InterpretationCard.jsx";
+import PerformanceTab, { deriveSliceMetrics } from "../components/dashboardv2/PerformanceReport.jsx";
 import { getSymbols, getStrategies, getRiskConfig, runPortfolioBacktest, getPortfolioChartData } from "../services/api.js";
 import {
   useActiveStrategies, addStrategy, removeStrategy, updateParams, saveUserDefaults, getUserDefaults,
@@ -20,10 +16,10 @@ import { goLive } from "../services/appMode.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
 import { socket } from "../services/socket.js";
 import { ProgressBar } from "../components/walkforward/widgets.jsx";
-import { fmtUsd, fmtNum, fmtInt, fmtPct, fmtRatio, fmtDate, fmtDateLong, fmtTime } from "../services/format.js";
+import { fmtUsd, fmtNum, fmtInt, fmtPct, fmtDate, fmtDateLong, fmtTime } from "../services/format.js";
 import {
   startingCapital, rangeToWindow, resolveWindowDates, epochToDateStr, resolveDefaultParams,
-  annualizedVol, underwaterSeries, monthlyReturnsGrid, bestWorstMonth, statusPill, interpretation,
+  underwaterSeries, monthlyReturnsGrid, statusPill, interpretation,
 } from "../components/dashboardv2/metrics.js";
 
 const ASSET_LABELS = {
@@ -344,10 +340,17 @@ export default function DashboardV2() {
   // Fetched the first time the Chart tab is opened for a given run + selection,
   // then cached. Uses the SAME window as the run so the bars line up with the
   // equity curve exactly.
+  //
+  // No cleanup-cancel here on purpose: `chartLoading` is a dependency, so the
+  // effect re-runs the instant it flips to true — a cleanup flag would cancel
+  // the very fetch it just started and the spinner would never clear. The
+  // request records which run it belongs to and is ignored if a new run started.
+  const chartRunRef = useRef(0);
+  useEffect(() => { chartRunRef.current++; }, [result]);
   useEffect(() => {
     if (tab !== "chart" || !result || !chartKey) return;
     if (chartData?.key === chartKey || chartLoading) return;
-    let cancelled = false;
+    const run = chartRunRef.current;
     const { start_time, end_time } = rangeToWindow(rangeKey, bounds, customRange);
     setChartLoading(true);
     getPortfolioChartData({
@@ -357,17 +360,16 @@ export default function DashboardV2() {
       })),
       start_time, end_time,
     })
-      .then((d) => { if (!cancelled) setChartData({ key: chartKey, data: d }); })
+      .then((d) => { if (run === chartRunRef.current) setChartData({ key: chartKey, data: d }); })
       .catch((e) => {
-        if (cancelled) return;
+        if (run !== chartRunRef.current) return;
         setError(e?.response?.data?.error || e.message || "Could not load chart data.");
         // Record the failure AGAINST THIS KEY so the effect's guard stops it
         // from immediately refetching in a loop. Changing tab/selection or
         // re-running clears it and allows a fresh attempt.
         setChartData({ key: chartKey, data: null });
       })
-      .finally(() => { if (!cancelled) setChartLoading(false); });
-    return () => { cancelled = true; };
+      .finally(() => setChartLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, result, chartKey, chartData, chartLoading]);
 
@@ -385,25 +387,7 @@ export default function DashboardV2() {
 
   // ---- derived metrics for the selected slice ----
   const sc = startingCapital(slice || result, riskConfig);
-  const derived = useMemo(() => {
-    if (!slice) return null;
-    const st = slice.stats || {};
-    const ra = slice.analytics?.advanced?.risk_adjusted || {};
-    const { best, worst } = bestWorstMonth(slice.analytics?.monthly_returns, sc);
-    return {
-      sharpe: st.sharpe,
-      cagr: ra.cagr_pct,
-      totalReturn: st.total_return_pct,
-      maxDD: st.max_drawdown_pct_peak,
-      sortino: ra.sortino,
-      winRate: typeof st.win_rate === "number" ? st.win_rate * 100 : null,
-      vol: annualizedVol(slice.equity),
-      calmar: ra.calmar,
-      profitFactor: st.profit_factor,
-      exposure: slice.analytics?.exposure_pct,
-      best, worst,
-    };
-  }, [slice, sc]);
+  const derived = useMemo(() => deriveSliceMetrics(slice, sc), [slice, sc]);
 
   const monthGrid = useMemo(() => monthlyReturnsGrid(slice?.analytics?.monthly_returns, sc), [slice, sc]);
   const underwater = useMemo(() => underwaterSeries(slice), [slice]);
@@ -962,102 +946,6 @@ function GhostReport() {
                 fill="url(#ghostfill)" stroke="none" />
         </svg>
       </div>
-    </div>
-  );
-}
-
-// Three toggles above the equity curve: With cost (reality) / No cost / Look-ahead.
-// The gap between lines is the teaching point — cost drag and fill fantasy made visible.
-function EquityVariantToggles({ ctl }) {
-  const { show, toggle, loading, meta, noCostIsReality } = ctl;
-  const Item = ({ kind, label, color, dash, hint }) => {
-    const on = show[kind];
-    const busy = loading?.[kind];
-    return (
-      <button
-        onClick={() => toggle(kind)}
-        title={hint}
-        className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] transition ${on ? "border-line bg-bg-elev text-text" : "border-line/50 text-muted hover:text-text"}`}
-      >
-        <svg width="18" height="6" aria-hidden="true">
-          <line x1="0" y1="3" x2="18" y2="3" stroke={color} strokeWidth="2" strokeDasharray={dash || ""} opacity={on ? 1 : 0.35} />
-        </svg>
-        <span>{label}</span>
-        {busy && <span className="text-muted animate-pulse">…</span>}
-        {kind === "no_cost" && noCostIsReality && <span className="text-muted/70">(= with cost · costs are 0)</span>}
-      </button>
-    );
-  };
-  return (
-    <div className="flex items-center gap-2 mb-2 flex-wrap">
-      <span className="text-[10px] uppercase tracking-widest text-muted">Compare</span>
-      <Item kind="reality" label="With cost" color="#e5e7eb" dash=""
-            hint="Honest fills + your configured trading costs — what's actually tradeable." />
-      <Item kind="no_cost" label={meta.no_cost.label} color={meta.no_cost.color} dash={meta.no_cost.dash}
-            hint="Honest fills, zero trading costs — the gap to 'With cost' is what fees + slippage eat." />
-      <Item kind="look_ahead" label={meta.look_ahead.label} color={meta.look_ahead.color} dash={meta.look_ahead.dash}
-            hint="Fictitious perfect fills (diagnostic) — the gap to 'With cost' is pure fill fantasy." />
-    </div>
-  );
-}
-
-function PerformanceTab({ derived, sc, chart, variantCtl, scale, setScale, underwater, monthGrid, interpText, hasAdvanced }) {
-  const d = derived || {};
-  return (
-    <div className="space-y-5">
-      {/* metric cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <KpiCard title="Sharpe Ratio" value={fmtRatio(d.sharpe)} sub="risk-adjusted" positive={d.sharpe == null ? null : d.sharpe > 0} />
-        <KpiCard title="CAGR" value={fmtPct(d.cagr)} sub="annualized" positive={d.cagr == null ? null : d.cagr >= 0} />
-        <KpiCard title="Total Return" value={fmtPct(d.totalReturn)} sub="cumulative" positive={d.totalReturn == null ? null : d.totalReturn >= 0} />
-        <KpiCard title="Max Drawdown" value={d.maxDD == null ? "—" : fmtPct(-Math.abs(d.maxDD))} sub="peak-to-trough" positive={false} />
-        <KpiCard title="Sortino" value={fmtRatio(d.sortino)} sub="downside-adjusted" positive={d.sortino == null ? null : d.sortino > 0} />
-        <KpiCard title="Win Rate" value={d.winRate == null ? "—" : `${fmtNum(d.winRate)}%`} sub="of trades" />
-      </div>
-
-      {!hasAdvanced && (
-        <div className="text-[11px] text-muted/80 italic">
-          Some risk-adjusted metrics are unavailable for this result — re-run the backtest to compute them.
-        </div>
-      )}
-
-      {/* equity + risk panel */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
-        <Section title="Equity Curve" hint="value as % of starting capital">
-          {variantCtl && <EquityVariantToggles ctl={variantCtl} />}
-          <div className="rounded-xl border border-line bg-bg-panel/40 relative" style={{ height: 320 }}>
-            <div className="absolute top-2 right-3 z-10 flex items-center gap-1 p-0.5 rounded-md border border-line bg-bg-elev">
-              {["linear", "log"].map((sv) => (
-                <button
-                  key={sv}
-                  onClick={() => setScale(sv)}
-                  className={`px-2 py-0.5 text-[11px] rounded transition ${scale === sv ? "bg-accent-grad text-white" : "text-muted hover:text-text"}`}
-                >
-                  {sv}
-                </button>
-              ))}
-            </div>
-            <EquityCurveV2 strategies={chart.strategies} pointsByStrategy={chart.points} startingCapital={sc} scale={scale} />
-          </div>
-        </Section>
-        <RiskReturnPanel m={d} />
-      </div>
-
-      {/* underwater */}
-      <Section title="Underwater / Drawdown" hint="depth below the running peak">
-        <div className="rounded-xl border border-line bg-bg-panel/40" style={{ height: 150 }}>
-          <UnderwaterChart points={underwater} />
-        </div>
-      </Section>
-
-      {/* monthly heatmap */}
-      <Section title="Monthly Returns" hint="% of starting capital, by calendar month">
-        <div className="rounded-xl border border-line bg-bg-panel/40 p-4">
-          <MonthlyReturnsHeatmap grid={monthGrid} />
-        </div>
-      </Section>
-
-      <InterpretationCard text={interpText} />
     </div>
   );
 }

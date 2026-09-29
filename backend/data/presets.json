@@ -1,5 +1,71 @@
 {
   "vwma_reversion": {
+    "BCHUSDT 15m \u00b7 WF Sep 08, 2026": {
+      "params": {
+        "allowed_hmm_moods": {
+          "Bearish Normal": true,
+          "Bearish Volatile": false,
+          "Bullish Normal": true,
+          "Bullish Volatile": false,
+          "Ranging": true
+        },
+        "allowed_regimes": {
+          "Choppy-Range": true,
+          "High-Volatility": false,
+          "Quiet": true,
+          "Trending Down": false,
+          "Trending Up": false
+        },
+        "atr_length": 10,
+        "atr_mult": 6,
+        "atr_stop": false,
+        "pyramiding": 7,
+        "regime_adx_period": 20,
+        "regime_adx_threshold": 40,
+        "regime_method": "adx",
+        "risk_pct": 10,
+        "rsi_length": 20,
+        "rsi_long_max": 35,
+        "rsi_short_min": 65,
+        "sessions": {
+          "london": {
+            "enabled": false,
+            "end": "12:30",
+            "start": "05:00"
+          },
+          "ny_am": {
+            "enabled": true,
+            "end": "08:00",
+            "start": "04:00"
+          },
+          "ny_pm": {
+            "enabled": true,
+            "end": "12:00",
+            "start": "08:00"
+          },
+          "tokyo": {
+            "enabled": false,
+            "end": "04:00",
+            "start": "00:00"
+          }
+        },
+        "sides": {
+          "long": true,
+          "short": true
+        },
+        "trade_24_7": true,
+        "use_regime": false,
+        "vwma_length": 50,
+        "z_threshold": 1.3
+      },
+      "meta": {
+        "symbol": "BCHUSDT",
+        "timeframe": "15m",
+        "source": "walkforward",
+        "created": 1788838911,
+        "oos_return_pct": -27.045398515368124
+      }
+    },
     "BICOUSDT": {
       "params": {
         "allowed_hmm_moods": {
@@ -120,13 +186,13 @@
       },
       "meta": {}
     },
-    "BCHUSDT 15m \u00b7 WF Sep 08, 2026": {
+    "PUNDIX": {
       "params": {
-        "vwma_length": 50,
-        "z_threshold": 1.3,
-        "rsi_length": 20,
-        "rsi_long_max": 35,
-        "rsi_short_min": 65,
+        "vwma_length": 96,
+        "z_threshold": 1.4,
+        "rsi_length": 35,
+        "rsi_long_max": 33,
+        "rsi_short_min": 66,
         "atr_stop": false,
         "atr_length": 10,
         "atr_mult": 6,
@@ -138,14 +204,10 @@
             "start": "05:00"
           },
           "ny_am": {
-            "enabled": true,
-            "end": "08:00",
-            "start": "04:00"
+            "enabled": false
           },
           "ny_pm": {
-            "enabled": true,
-            "end": "12:00",
-            "start": "08:00"
+            "enabled": false
           },
           "tokyo": {
             "enabled": false,
@@ -154,7 +216,7 @@
           }
         },
         "sides": {
-          "long": true,
+          "long": false,
           "short": true
         },
         "use_regime": false,
@@ -175,15 +237,14 @@
           "Bullish Volatile": false,
           "Ranging": true
         },
-        "pyramiding": 7,
-        "risk_pct": 10
+        "pyramiding": 1,
+        "risk_pct": 3
       },
       "meta": {
-        "symbol": "BCHUSDT",
+        "symbol": "PUNDIXUSDT",
         "timeframe": "15m",
-        "source": "walkforward",
-        "created": 1788838911,
-        "oos_return_pct": -27.045398515368124
+        "source": "manual",
+        "created": 1789520756
       }
     }
   },

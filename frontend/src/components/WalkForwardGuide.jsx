@@ -1,10 +1,15 @@
 import { useEffect } from "react";
+import { GATE_ORDER, VERDICTS } from "../services/wfVerdict.js";
 
 /**
  * Plain-English guide for the Walk-Forward setup form.
  *
  * Triggered by the "?" button next to the page title. Pure UI — no state,
  * no API calls. Content lives here so it lives next to the feature it documents.
+ *
+ * The verdict section is NOT written here: it iterates the same VERDICTS catalog
+ * the Verdict tab reads, so the guide can never describe an outcome the page
+ * doesn't produce, or miss one it does.
  */
 export default function WalkForwardGuide({ open, onClose }) {
   useEffect(() => {
@@ -110,6 +115,46 @@ time ─────────────────────────
           </section>
 
           <section>
+            <h4 className="text-text font-semibold mb-1">The verdict — how it&apos;s decided</h4>
+            <p className="text-muted leading-relaxed">
+              The Verdict tab runs {GATE_ORDER.length} gates over the result and boils them down to one
+              headline. The first two are <span className="text-text">decisive</span> — they can veto
+              everything else, because if the search found nothing, a green plateau or a green OOS rate is
+              describing noise:
+            </p>
+            <ul className="list-disc pl-5 mt-2 space-y-1 text-muted leading-relaxed">
+              <li>
+                <span className="text-text">Tuning beat not-tuning</span> — the control arm. Every window is run a
+                second time with the untuned base params. If leaving them alone did better, the optimizer is
+                costing you money and nothing below can rescue it.
+              </li>
+              <li>
+                <span className="text-text">Windows agree on the params</span> — how far apart the windows&apos;
+                picks landed, as a fraction of the search range. 28.9% is what random guessing produces. This
+                reports the <em>worst</em> parameter, so one knob the strategy ignores can turn it red alone.
+              </li>
+            </ul>
+            <p className="text-muted leading-relaxed mt-2">
+              The other {GATE_ORDER.length - 2} — trade floor, plateau, OOS consistency, trade count, significance,
+              buy-and-hold, deflated Sharpe, concentration, decay — each vote. The headline is then chosen in
+              strict priority order: a failed decisive gate wins outright, then the mixed case, then &ldquo;too
+              little measured&rdquo;, and only after all of that does the pass ratio decide between green, amber
+              and red.
+            </p>
+          </section>
+
+          <section>
+            <h4 className="text-text font-semibold mb-2">Every verdict, and what to do about it</h4>
+            <div className="space-y-3">
+              {VERDICTS.map((v) => <VerdictEntry key={v.id} v={v} />)}
+            </div>
+            <p className="text-[11px] text-muted/70 mt-3 leading-relaxed">
+              Two more gates — the locked holdout and cross-strategy honesty — can&apos;t be judged from a single run
+              and are shown as grey reminders. No verdict here ever says you&apos;ve passed them.
+            </p>
+          </section>
+
+          <section>
             <h4 className="text-text font-semibold mb-1">Speed knobs</h4>
             <p className="text-muted leading-relaxed">
               Cost scales like <span className="font-mono">windows × trials × IS-bar work</span>.
@@ -129,6 +174,38 @@ time ─────────────────────────
             Got it
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+const TONE = {
+  profit: { badge: "🟢", cls: "border-profit/40 bg-profit/5" },
+  amber:  { badge: "🟡", cls: "border-amber-400/40 bg-amber-400/5" },
+  loss:   { badge: "🔴", cls: "border-loss/40 bg-loss/5" },
+};
+
+// One catalog entry. Steps are called with no context, so a verdict that names
+// a specific parameter on the Verdict tab reads generically here.
+function VerdictEntry({ v }) {
+  const t = TONE[v.tone] || TONE.amber;
+  const steps = v.steps({});
+  return (
+    <div className={`rounded-lg border p-3 space-y-2 ${t.cls}`}>
+      <div className="text-sm font-semibold text-text">{t.badge} {v.label}</div>
+      <div className="text-xs leading-relaxed">
+        <span className="text-text">When: </span>
+        <span className="text-muted">{v.when}</span>
+      </div>
+      <div className="text-xs leading-relaxed">
+        <span className="text-text">Why: </span>
+        <span className="text-muted">{v.why}</span>
+      </div>
+      <div className="text-xs">
+        <div className="text-text mb-1">What to do:</div>
+        <ol className="list-decimal pl-5 space-y-1 text-muted leading-relaxed">
+          {steps.map((s, i) => <li key={i}>{s}</li>)}
+        </ol>
       </div>
     </div>
   );

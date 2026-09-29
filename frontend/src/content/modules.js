@@ -1,0 +1,1171 @@
+/**
+ * Modules — the study material behind QuantLab.
+ *
+ * Plain-language definitions, the "why it matters" behind each, and where the
+ * number already lives in the app. Written for a starting quant; every term is
+ * explained in one breath before it is used anywhere else.
+ *
+ * Shape:
+ *   MODULES   → sections of {term, plain, why, inApp?, link?, caution?}
+ *   SMOOTHING → ways to smooth an equity curve / raise Sharpe, with the catch
+ *   PLAN      → phased plan; each step is a persisted checkbox on the page
+ */
+
+export const MODULES = [
+  {
+    id: "measure",
+    title: "Measuring a strategy",
+    blurb: "The numbers every result card shows. Learn what each one is actually measuring before trusting it.",
+    items: [
+      {
+        term: "Return (total, %)",
+        plain: "How much the account grew over the test, as a percent of what you started with.",
+        why: "It is the headline, but on its own it says nothing about how bumpy the ride was or how much you risked to get it.",
+        inApp: "KPI strip on Dashboard V2 / Multi-Asset · total_return_pct", link: "#dashboardv2",
+      },
+      {
+        term: "CAGR",
+        plain: "Compound annual growth rate — the steady yearly growth that would have turned the start into the end. A 2-year test that doubled is ~41% CAGR, not 100%.",
+        why: "Lets you compare a 6-month test to a 5-year one on equal footing.",
+        formula: "CAGR = (end_equity / start_equity) ^ (1 / years) − 1\nyears = (last_bar_time − first_bar_time) / 365.25 days",
+        inApp: "Performance tab · CAGR card",
+      },
+      {
+        term: "Volatility (vol)",
+        plain: "How much returns wobble from bar to bar, annualized. High vol = big swings both ways.",
+        why: "It is the denominator of Sharpe. Two strategies with the same return but different vol are not equally good — the calmer one is.",
+        formula: "r_t = equity_t / equity_{t−1} − 1        (per-bar return)\nvol_annual = stdev(r) × √(bars_per_year)\nbars_per_year: 15m crypto ≈ 35,040 · 1h ≈ 8,760 · 1d ≈ 365",
+        inApp: "Risk / Return panel · Ann. volatility · quant_metrics.infer_bars_per_year",
+      },
+      {
+        term: "Drawdown / Max drawdown",
+        plain: "How far the account fell from its highest point before recovering. Max drawdown is the worst such fall (peak-to-trough).",
+        why: "It is the pain you must sit through. Most people quit a system during its drawdown, not because it stopped working. Note: it depends on position size — double the size, roughly double the drawdown.",
+        formula: "peak_t = max(equity_0 … equity_t)\ndd_t   = (equity_t − peak_t) / peak_t        (≤ 0)\nmax_dd = min over t of dd_t",
+        inApp: "Underwater chart · max_drawdown_pct_peak",
+      },
+      {
+        term: "Sharpe ratio",
+        plain: "Return per unit of wobble: average excess return divided by volatility, annualized. Roughly: > 1 decent, > 2 very good, > 3 suspicious on a backtest.",
+        why: "The standard 'quality of return' number. It rewards smooth, consistent gains and punishes big swings — even upward ones.",
+        formula: "Sharpe = mean(r − r_f) / stdev(r) × √(bars_per_year)\nr = per-bar return, r_f = risk-free per bar (≈ 0 here)",
+        inApp: "Every result card · sharpe", caution: "Sharpe on ~20 trades is noise. Also see 'Deflated Sharpe' below.",
+      },
+      {
+        term: "Sortino ratio",
+        plain: "Like Sharpe but only counts downside wobble. Big up-moves are not penalized.",
+        why: "Better for strategies with rare big winners (trend following) that Sharpe unfairly punishes.",
+        formula: "downside_dev = √( mean( min(r, 0)² ) )\nSortino = mean(r) / downside_dev × √(bars_per_year)",
+        inApp: "Performance tab · Sortino card",
+      },
+      {
+        term: "Calmar ratio",
+        plain: "CAGR divided by max drawdown. 'How much yearly growth do I get per unit of worst pain?'",
+        why: "The most intuitive risk-adjusted number for a discretionary reader: 20% a year with a 10% worst dip is a Calmar of 2.",
+        formula: "Calmar = CAGR / |max_dd|",
+        inApp: "Risk / Return panel · Calmar",
+      },
+      {
+        term: "Win rate & payoff ratio",
+        plain: "Win rate: share of trades that made money. Payoff ratio: average winner ÷ average loser.",
+        why: "They only mean something together. 30% win rate is fine if winners are 4× losers; 70% win rate can lose money if losers are huge.",
+        formula: "win_rate = wins / trades\npayoff   = avg_win / |avg_loss|\nbreak-even win rate = 1 / (1 + payoff)     (payoff 2 → need > 33%)",
+        inApp: "Trades tab · win_rate", caution: "Chasing a high win rate usually means letting losers run — the classic beginner trap.",
+      },
+      {
+        term: "Expectancy",
+        plain: "Average profit per trade = (win rate × avg win) − (loss rate × avg loss). What you expect to earn each time you press the button.",
+        why: "If it is not clearly positive after costs, nothing else matters.",
+        formula: "E = W × avg_win − (1 − W) × |avg_loss|\nin R-multiples: E_R = W × payoff − (1 − W)",
+      },
+      {
+        term: "Profit factor",
+        plain: "Gross profit ÷ gross loss. 1.0 is break-even; 1.5+ is healthy.",
+        why: "Quick sanity check of edge size. Very high values (> 3) on a backtest usually mean overfitting or too few trades.",
+        formula: "PF = Σ(winning P&L) / |Σ(losing P&L)|",
+        inApp: "Risk / Return panel · Profit factor",
+      },
+      {
+        term: "Exposure",
+        plain: "Percent of the time the strategy actually holds a position.",
+        why: "A 20% return while exposed 10% of the time is a much stronger edge than the same return fully invested. Also tells you how much capital sits idle for other strategies.",
+        inApp: "Risk / Return panel · Exposure",
+      },
+    ],
+  },
+  {
+    id: "alphabeta",
+    title: "Alpha, beta & benchmarks",
+    blurb: "Was it skill, or did you just ride the market? These separate the two.",
+    items: [
+      {
+        term: "Benchmark / buy-and-hold",
+        plain: "What you would have made by simply buying the asset at the start and doing nothing.",
+        why: "The bar every strategy must clear. A 40% return on BTC in a year BTC did 80% is a losing strategy in disguise.",
+        inApp: "Walk-forward windows · bh_return_pct · Analytics benchmark line", link: "#walkforward",
+      },
+      {
+        term: "Beta",
+        plain: "How much your returns move with the market. Beta 1 = moves with it one-for-one; 0 = unrelated; −0.5 = tends to move the other way, half as much.",
+        why: "High beta means your 'strategy' is mostly just market exposure. When the market falls, so will you — no edge required.",
+        formula: "β = cov(r_strategy, r_market) / var(r_market)\n  = corr(r_s, r_m) × stdev(r_s) / stdev(r_m)\n(the slope of the line fitting strategy returns against market returns)",
+        caution: "A long-only crypto strategy almost always has beta near 1. Its real edge is what is left AFTER removing that.",
+      },
+      {
+        term: "Alpha",
+        plain: "The return left over after subtracting what beta alone explains. The part you cannot get by simply holding the market.",
+        why: "Alpha is the only thing worth paying for (in time, risk, or fees). Everything else can be bought cheaply by holding the index.",
+        formula: "r_strategy = α + β × r_market + noise\nα = mean(r_strategy) − β × mean(r_market)      (per bar; annualize × bars_per_year)",
+        caution: "Backtest alpha shrinks live — assume half, and be happy if it holds.",
+      },
+      {
+        term: "Excess return",
+        plain: "Your return minus a risk-free rate (or minus the benchmark, depending on context).",
+        why: "It is the numerator in Sharpe. 5% a year is not impressive if cash pays 5%.",
+      },
+      {
+        term: "Correlation",
+        plain: "A number from −1 to +1 saying how much two return streams move together. 0 = unrelated.",
+        why: "The whole point of diversification: combining two uncorrelated strategies with the same Sharpe raises the combined Sharpe by about √2 (≈ 41%) at no cost.",
+        formula: "ρ = cov(x, y) / (stdev(x) × stdev(y))\nN equal-Sharpe streams, correlation ρ:\nSharpe_combined ≈ Sharpe × √N / √(1 + (N−1)ρ)     (ρ=0 → ×√N; ρ=1 → no gain)",
+        inApp: "Market Lab · cross-asset stats", link: "#marketlab",
+      },
+      {
+        term: "Market-neutral",
+        plain: "A strategy built so its beta is roughly zero — e.g. long one asset, short a related one.",
+        why: "The purest form of alpha-hunting; it should make money regardless of market direction. Hard, but the goal to aim at.",
+      },
+    ],
+  },
+  {
+    id: "honesty",
+    title: "Statistical honesty",
+    blurb: "Why most backtests lie, and the vocabulary for catching it. This is the section that separates researchers from gamblers.",
+    items: [
+      {
+        term: "Overfitting / curve-fitting",
+        plain: "Tuning a strategy until it fits the past perfectly — including the random noise that will never repeat.",
+        why: "It is THE failure mode. An overfit backtest looks brilliant and loses money the day it goes live. Everything below exists to detect it.",
+      },
+      {
+        term: "In-sample vs out-of-sample (IS / OOS)",
+        plain: "In-sample: the data you tuned on. Out-of-sample: data the tuning never saw.",
+        why: "Only OOS results count as evidence. IS results are, at best, a hypothesis.",
+        inApp: "Walk-Forward page · per-window IS/OOS", link: "#walkforward",
+      },
+      {
+        term: "Walk-forward analysis",
+        plain: "Tune on a window, test on the next unseen window, slide forward, repeat. Stitch the OOS pieces into one equity curve.",
+        why: "Closest thing to simulating 'what if I had run this for real, re-tuning as I went'. If the stitched OOS curve is ugly, so will live be.",
+        inApp: "Walk-Forward page · stitched OOS equity · pct_windows_positive_oos", link: "#walkforward",
+      },
+      {
+        term: "Walk-forward efficiency (WFE)",
+        plain: "OOS performance ÷ IS performance. 1.0 means OOS matched IS; 0.5 means it kept half.",
+        why: "A cheap overfitting gauge. Under ~0.5 means the tuning captured mostly noise.",
+        formula: "WFE = annualized_OOS_return / annualized_IS_return\n(or the same ratio on Sharpe — check which the page reports)",
+        inApp: "Walk-Forward robustness block · WFE",
+      },
+      {
+        term: "Parameter plateau vs spike",
+        plain: "Plot performance against a parameter. A plateau is a wide flat region of good values; a spike is one great value surrounded by bad ones.",
+        why: "Real edges are robust — nearby parameters work too. A spike is the fingerprint of curve-fitting. Pick the middle of a plateau, never the peak.",
+        inApp: "Walk-forward · parameter_stability_score · Grid Search heatmap", link: "#gridsearch",
+      },
+      {
+        term: "Look-ahead bias",
+        plain: "Accidentally using information that was not available at decision time — e.g. filling at this bar's close when the signal needs this bar's close.",
+        why: "Creates edges that literally cannot exist live. QuantLab's honest mode fills next-bar open for this reason.",
+        inApp: "Dashboard V2 · 'Look-ahead' compare overlay · look_ahead param", link: "#dashboardv2",
+      },
+      {
+        term: "Survivorship bias",
+        plain: "Testing only on assets that still exist / are still popular today.",
+        why: "The coins that went to zero are missing from your basket, so your multi-asset result is rosier than reality would have been.",
+        inApp: "Multi-Asset: remember the basket is today's survivors", link: "#multiasset",
+      },
+      {
+        term: "Selection bias / multiple testing",
+        plain: "Try 100 ideas, keep the best one — it will look great even if all 100 were random.",
+        why: "The more things you tried (params, assets, timeframes, strategies), the higher the bar for the winner. Count your attempts honestly.",
+        caution: "Keeping only the profitable assets from a multi-asset run is exactly this. Report the whole basket.",
+      },
+      {
+        term: "Deflated Sharpe ratio",
+        plain: "Sharpe adjusted downward for how many trials you ran to find it and how few trades it rests on.",
+        why: "Turns 'Sharpe 1.8 after 500 optimizer trials' into the honest 'Sharpe 0.6'.",
+        formula: "Idea (Bailey & López de Prado):\nexpected max Sharpe from N random trials ≈ stdev(Sharpes) × √(2 ln N)\nDSR = probability the observed Sharpe beats that luck ceiling,\n      corrected for track length, skew and fat tails",
+        inApp: "Walk-forward robustness · deflated Sharpe (within one run only)",
+      },
+      {
+        term: "t-statistic & p-value",
+        plain: "t-stat: how many 'standard errors' the average trade is above zero. p-value: the chance you would see an edge this big from pure luck.",
+        why: "Rule of thumb: t > 2 (p < 0.05) before you believe anything. With few trades you simply cannot get there — which is the point.",
+        formula: "t = mean(trade_pnl) / ( stdev(trade_pnl) / √n )\nSharpe-style: t ≈ Sharpe_annual × √(years)     (Sharpe 1 needs ~4 years for t ≈ 2)",
+        inApp: "Analytics · t_pvalue / significance",
+      },
+      {
+        term: "Sample size (enough trades)",
+        plain: "How many trades the result rests on. Aim for 100+; 30 is the bare minimum for the stats to mean anything.",
+        why: "A great Sharpe on 15 trades is a coin-flip streak with a chart.",
+      },
+      {
+        term: "Monte Carlo",
+        plain: "Shuffle the order of trades (or resample them) thousands of times and look at the spread of outcomes.",
+        why: "Tells you whether the drawdown you saw was typical or lucky, and what a bad-but-plausible path looks like. Size for the bad path, not the one you saw.",
+        inApp: "Monte Carlo page", link: "#montecarlo",
+      },
+      {
+        term: "Locked holdout",
+        plain: "A recent slice of data you never touch during research, then run the finished strategy on exactly once.",
+        why: "The only data that is truly unseen. One shot — if you peek and re-tune, it is no longer a holdout.",
+      },
+      {
+        term: "Regime",
+        plain: "The market's current 'mood': trending, ranging, calm, wild. Strategies that work in one often fail in another.",
+        why: "Explains why an edge disappears for months. A regime filter can help — but only if it proves itself out-of-sample, per strategy.",
+        inApp: "Market Lab regime ribbon · use_regime param (default OFF)", link: "#marketlab",
+      },
+    ],
+  },
+  {
+    id: "costs",
+    title: "Costs & execution",
+    blurb: "The gap between a backtest and a bank balance. Most retail edges die here.",
+    items: [
+      {
+        term: "Fees / commission",
+        plain: "What the exchange charges per trade — a percent of the amount (crypto) or a flat $ per contract (futures). Paid on entry AND exit.",
+        why: "A 0.04% fee sounds tiny; on a 15-minute strategy taking 800 trades it is 64% of capital per year.",
+        formula: "crypto:  fee_side = fee_flat + |units × price| × fee_pct\nfutures: fee_side = fee_flat + futures_commission × contracts\nround trip = 2 × fee_side   (charged on entry AND exit)",
+        inApp: "Risk Settings · fee_pct / futures_commission · _fee() in backtest_engine", link: "#settings",
+      },
+      {
+        term: "Slippage",
+        plain: "The difference between the price you expected and the price you actually got. Measured in basis points (1 bp = 0.01%).",
+        why: "Always against you on average. Fast markets and thin books make it worse — exactly when breakouts fire.",
+        formula: "buy fill  = price × (1 + slippage_bps / 10,000)\nsell fill = price × (1 − slippage_bps / 10,000)\n1 bp = 0.01% · 10 bp = 0.1%",
+        inApp: "Risk Settings · slippage_bps (default 1 bp — that is optimistic)",
+      },
+      {
+        term: "Spread",
+        plain: "Gap between the best buy and best sell price. You pay half of it every time you cross it with a market order.",
+        why: "A hidden cost the candle chart never shows. On small coins it can be 10× the fee.",
+      },
+      {
+        term: "Fill assumption",
+        plain: "Which price the simulator pretends you traded at. QuantLab honest mode: next bar's open.",
+        why: "Assuming you get the signal bar's close is look-ahead. The difference between the two is often the entire edge on short timeframes.",
+        inApp: "look_ahead param · Look-ahead comparison modal",
+      },
+      {
+        term: "Cost sweep",
+        plain: "Re-run the strategy at 2×, 3×, 5× the assumed costs and see where it breaks.",
+        why: "If it only works at 1 bp slippage, it does not work. Demand it survives pessimistic costs.",
+        inApp: "Cost Sweep page", link: "#costsweep",
+      },
+      {
+        term: "Turnover",
+        plain: "How often you trade — roughly total traded value per year ÷ capital.",
+        why: "Costs scale with turnover. Halving trades while keeping most of the edge is usually the single biggest Sharpe improvement available.",
+      },
+      {
+        term: "Capacity",
+        plain: "How much money the strategy can run before its own orders move the price and kill the edge.",
+        why: "Small-coin, short-timeframe strategies have tiny capacity. Not your problem yet — but it is why the edge exists at all: big players cannot use it.",
+      },
+      {
+        term: "Sizing mismatch (backtest vs live)",
+        plain: "QuantLab sizes by a percent of equity (compounding). The live acceptor sizes by a fixed lot. Same signals, different dollars.",
+        why: "Compare live to backtest on direction and % per trade — never on dollars or drawdown. If those match, live is faithful; the P&L gap is the size you chose.",
+        inApp: "CLAUDE.md 'Deployment reality' · base_size in the acceptor",
+      },
+    ],
+  },
+  {
+    id: "sizing",
+    title: "Sizing & risk",
+    blurb: "The signal decides IF; sizing decides HOW MUCH. Sizing determines whether you survive to see the edge play out.",
+    items: [
+      {
+        term: "Risk per trade",
+        plain: "The percent of the account you lose if the stop is hit. 1–2% is the conventional ceiling for a single position.",
+        why: "Ten losses in a row at 2% costs ~18%. At 10% it costs 65% and you need +186% to get back. Survival first.",
+        formula: "after n losses of r each: equity = start × (1 − r)^n\nrecovery needed after a loss L: gain = L / (1 − L)     (−50% → +100%)\nrisk-based size: units = (equity × risk_per_trade) / (entry − stop)",
+        inApp: "risk_pct per strategy (crypto) · contracts (futures)",
+      },
+      {
+        term: "Fixed-fraction vs fixed-lot",
+        plain: "Fixed-fraction: bet a percent of current equity (shrinks after losses, grows after wins). Fixed-lot: same size every time.",
+        why: "Fixed-fraction is self-protecting and compounds. Fixed-lot drawdowns go deeper and recover slower. Know which one you are actually running.",
+        formula: "backtest (crypto):   units = equity × risk_pct/100 / fill_price      ← notional, NOT stop-based\nbacktest (futures):  units = contracts × contract_size\nlive acceptor:       qty   = base_size × floor(balance / 500)   (flat base_size under 500)",
+        inApp: "Backtest = fixed-fraction · live acceptor = fixed-lot",
+      },
+      {
+        term: "Leverage & liquidation",
+        plain: "Borrowing to hold more than your cash. Liquidation: the exchange force-closes you when losses approach your margin.",
+        why: "Leverage does not create edge, it multiplies whatever you have — including the drawdown. Liquidation is an exit the backtest cannot model.",
+        formula: "liquidation distance ≈ 1 / leverage − maintenance_margin\n25× → ~4% − 0.5% ≈ 3.5% adverse move",
+        caution: "25× leverage means a ~4% adverse move can wipe the position. Size as if leverage were 1× and use it only for margin efficiency.",
+      },
+      {
+        term: "Kelly criterion",
+        plain: "The formula for the bet size that maximizes long-run growth: f = W − (1−W)/R (W win rate, R payoff ratio).",
+        why: "Full Kelly is a wild ride; practitioners use a quarter to a half of it. It is a ceiling, not a target.",
+        formula: "f* = W − (1 − W) / R\nW = 0.55, R = 1.2 → f* = 0.55 − 0.45/1.2 = 0.175 (17.5% of equity)\nuse f*/4 … f*/2 in practice",
+        caution: "Kelly assumes you know W and R exactly. You do not — backtest estimates are optimistic, so real Kelly is smaller than computed.",
+      },
+      {
+        term: "Volatility targeting",
+        plain: "Size positions so each one carries the same expected wobble: smaller size when the market is wild, larger when calm.",
+        why: "One of the few sizing tricks that reliably raises Sharpe. It keeps risk constant instead of letting the market decide it.",
+        formula: "weight = target_vol / realized_vol_annual        (capped, e.g. ≤ 1.5×)\nATR form: units = (equity × risk_per_trade) / (k × ATR)",
+      },
+      {
+        term: "Pyramiding",
+        plain: "Adding to a position that is already open.",
+        why: "Increases size right when you are most confident — which is often right before the reversal. Keep it at 1 for live parity.",
+        inApp: "pyramiding param (locked to 1 live)",
+      },
+      {
+        term: "Portfolio heat",
+        plain: "Total risk across all open positions at once.",
+        why: "Five positions at 2% each is 10% at risk if they are correlated — and in a crash, everything is correlated.",
+      },
+    ],
+  },
+  {
+    id: "families",
+    title: "Strategy families",
+    blurb: "Most ideas are one of these. Knowing the family tells you what to expect and what usually breaks.",
+    items: [
+      {
+        term: "Mean reversion",
+        plain: "Bet that a stretched price snaps back to its average (VWMA, RSI-2).",
+        why: "High win rate, small winners, occasional large losers when the 'stretch' becomes a trend. Needs a hard stop and a regime that is actually ranging.",
+        inApp: "vwma_reversion · rsi2_reversion",
+      },
+      {
+        term: "Trend / momentum",
+        plain: "Bet that what has been going up keeps going up (moving-average cross, momentum).",
+        why: "Low win rate (30–40%), a few huge winners pay for many small losses. Psychologically hard; statistically the most durable family.",
+        inApp: "vwma_momentum",
+      },
+      {
+        term: "Breakout",
+        plain: "Enter when price leaves a range it has been stuck in (pivots, Asia range).",
+        why: "Trend's impatient cousin. Suffers most from false breakouts and slippage — the cost sweep is essential here.",
+        inApp: "pivot_breakout · asia_range_breakout",
+      },
+      {
+        term: "Seasonality / session effects",
+        plain: "Time-of-day or day-of-week patterns (the Asia session range, the open, weekends).",
+        why: "Real but small and decaying — everyone can see the clock. Validate across years; effects that held in 2021 often vanish by 2024.",
+        inApp: "Market Lab · session stats", link: "#marketlab",
+      },
+      {
+        term: "Carry",
+        plain: "Earning a payment for holding a position (perp funding rates, interest differentials).",
+        why: "Steady income with rare big hits. The funding study found ~12% APR over 7 years but decaying hard toward ~3%.",
+        inApp: "Funding carry study (research only)",
+      },
+      {
+        term: "Regime gating",
+        plain: "Only allow entries when the market is in the 'right' mood for the strategy.",
+        why: "A strategy feature, validated per-strategy through the same gauntlet — never bolted on globally afterward. Default OFF until it earns its place.",
+        inApp: "use_regime · regime.py (deterministic) · HMM experiment",
+      },
+    ],
+  },
+  {
+    id: "strategy-formulas",
+    title: "Strategy formulas — as implemented",
+    blurb: "Not the textbook version: these are transcribed from the Python the engine actually runs, so what you read here is what the backtest and the live daemon compute. VWMA Reversion first; other strategies can be added the same way.",
+    items: [
+      {
+        term: "VWMA Reversion · 1. the mean",
+        plain: "The 'fair price' is a volume-weighted moving average of the close over the last vwma_length bars (default 30).",
+        why: "Bars where more volume traded pull the average harder — a level a lot of money agreed on is a better anchor than a plain average.",
+        formula: "VWMA_t = Σ_{i=t−N+1..t} (close_i × volume_i) / Σ_{i=t−N+1..t} volume_i\nN = vwma_length",
+        inApp: "_vwma() in vwma_reversion.py",
+      },
+      {
+        term: "VWMA Reversion · 2. the stretch (z-score)",
+        plain: "How far the close sits from the VWMA, measured in standard deviations of the close over the same window. Note the σ is of the CLOSE (not of close − VWMA), population form (ddof=0) to match TradingView's ta.stdev.",
+        why: "Dividing by σ makes 'stretched' mean the same thing on a calm day and a wild day, and on BTC and on a small coin.",
+        formula: "σ_t = stdev_pop(close over last N bars)      (ddof=0; 0 → 1e-9 to avoid ÷0)\nz_t = (close_t − VWMA_t) / σ_t\nupper_band = VWMA + z_threshold × σ · lower_band = VWMA − z_threshold × σ",
+        inApp: "zscore / upper_band / lower_band columns · the dashed ±z·σ lines on the chart",
+      },
+      {
+        term: "VWMA Reversion · 3. the RSI filter",
+        plain: "Wilder RSI over rsi_length bars (default 25). Longs need RSI below rsi_long_max (35); shorts need RSI above rsi_short_min (65).",
+        why: "A second, independent 'is it really oversold?' vote. z-score says price is far from average; RSI says the recent bars were mostly down. Both must agree.",
+        formula: "up_t = max(close_t − close_{t−1}, 0) · down_t = max(close_{t−1} − close_t, 0)\navg_up = EWM(up, α=1/rsi_length) · avg_down = EWM(down, α=1/rsi_length)\nRSI = 100 − 100 / (1 + avg_up / avg_down)",
+        inApp: "_rsi() · rsi_length / rsi_long_max / rsi_short_min",
+      },
+      {
+        term: "VWMA Reversion · 4. entry conditions",
+        plain: "Only when flat, only inside an enabled UTC session (unless trade_24_7), only if the side is enabled, and only if the regime gate (when on) allows. Long when stretched DOWN and oversold; short when stretched UP and overbought.",
+        why: "Every AND is a filter that removes trades. The session gate exists because the same stretch means different things at 03:00 UTC and 14:00 UTC.",
+        formula: "long_cond_t  = in_session_t AND z_t < −z_threshold AND RSI_t < rsi_long_max  [AND in_regime_t]\nshort_cond_t = in_session_t AND z_t > +z_threshold AND RSI_t > rsi_short_min [AND in_regime_t]\nentry fires on bar t; honest mode fills at open_{t+1}",
+        inApp: "vectorized(): long_cond / short_cond · sessions · sides · use_regime",
+      },
+      {
+        term: "VWMA Reversion · 5. exit — mean revert",
+        plain: "A long closes the first bar the close is back at or above the VWMA; a short closes when the close is at or below it. No profit target: the target IS the average.",
+        why: "This is what makes it mean reversion rather than a dip-buy: you are paid exactly for the snap-back, nothing more. It exits regardless of session or regime.",
+        formula: "exit_long_t  = close_t ≥ VWMA_t\nexit_short_t = close_t ≤ VWMA_t",
+        inApp: "bar_exit_long / bar_exit_short · reason 'z_revert' live",
+      },
+      {
+        term: "VWMA Reversion · 6. exit — ATR stop (optional, default OFF)",
+        plain: "When atr_stop is on, a fixed stop is set at entry: atr_mult (default 6) ATRs away, ATR being Wilder-smoothed over atr_length (10) bars. Checked on the CLOSE, not the wick.",
+        why: "It is OFF by default because the reference TradingView version has none; turning it on breaks parity with the Pine. 6 ATR is deliberately wide — it is disaster insurance, not the normal exit.",
+        formula: "TR_t  = max(high−low, |high−close_{t−1}|, |low−close_{t−1}|)\nATR_t = EWM(TR, α=1/atr_length)\nlong stop  = entry_price − atr_mult × ATR_entry  → exit if close_t ≤ stop\nshort stop = entry_price + atr_mult × ATR_entry  → exit if close_t ≥ stop",
+        inApp: "atr_stop / atr_length / atr_mult · dashed red line while a trade is open",
+      },
+      {
+        term: "VWMA Reversion · 7. size & cost per trade",
+        plain: "Crypto sizing is a notional fraction of current equity — it is NOT stop-based. Fees are charged on both sides; slippage moves the fill against you.",
+        why: "This is why risk_pct 3.0 does not mean 'lose 3% if wrong'. With no stop, the loss is whatever the snap-back fails to deliver — sizing and stop are separate decisions here.",
+        formula: "units    = equity_t × risk_pct/100 / fill_price\nfill     = open_{t+1} × (1 ± slippage_bps/10,000)\nfee_side = fee_flat + |units × fill| × fee_pct         (entry and exit)\nP&L      = units × (exit_fill − entry_fill) − fees      (long; sign flips for short)",
+        inApp: "risk_pct · Risk Settings · backtest_engine / portfolio_runner",
+      },
+      {
+        term: "VWMA Reversion · 8. what the regime gate adds",
+        plain: "With use_regime on, entries are ANDed with one of: ADX below regime_adx_threshold (ranging), the 5-label classifier being in an allowed label, or an HMM mood in the allowed set. Exits are never gated.",
+        why: "Mean reversion loses in trends. The gate tries to keep it out of them — but it adds parameters, so it must earn its place OOS. HMM gating is backtest-only; live falls through, so an HMM-gated backtest will not match live.",
+        formula: "adx:  in_regime_t = ADX_t(regime_adx_period) < regime_adx_threshold\nfive: in_regime_t = label_t ∈ allowed_regimes\nhmm:  in_regime_t = mood_t ∈ allowed_hmm_moods   (Warmup/Undecided never allowed)",
+        inApp: "use_regime · regime_method · regime.py · _regime_ok_live()",
+      },
+    ],
+  },
+  {
+    id: "engine",
+    title: "Backtest mechanics",
+    blurb: "What the simulator does bar by bar. If you don't know these rules you will misread every result — and mis-port every strategy to Pine.",
+    items: [
+      {
+        term: "Signal bar vs fill bar",
+        plain: "A strategy decides on the CLOSE of bar t. Honest mode fills at the OPEN of bar t+1. Look-ahead mode fills at the close of t itself — impossible live.",
+        why: "One bar of delay is the difference between a real edge and a fantasy on short timeframes. Pine parity: process_orders_on_close = false.",
+        formula: "signal computed with data ≤ close_t\nfill_price = open_{t+1} × (1 ± slippage)",
+        inApp: "look_ahead param · Look-ahead comparison modal",
+      },
+      {
+        term: "Mark-to-market (MTM) equity",
+        plain: "Every bar, open positions are re-valued at that bar's close, so the equity curve moves while you are in a trade, not only when you exit.",
+        why: "Drawdown is measured on MTM equity, so an open trade that goes deep underwater and recovers still counts as a drawdown. Trade-by-trade P&L hides that.",
+        formula: "equity_t = cash + Σ_open units × (close_t − entry_fill)   (long)\nrealized only on exit; fees deducted from cash on both sides",
+      },
+      {
+        term: "Stop checks on the close",
+        plain: "This engine checks stops against the bar's close, not its high/low wick.",
+        why: "Kinder than reality: a wick through your stop that closes back inside does not stop you out here, but would on the exchange. Treat backtest stop losses as slightly optimistic.",
+        formula: "long stop hit  ⇔ close_t ≤ stop_level     (not low_t ≤ stop_level)",
+      },
+      {
+        term: "One position per side, unless pyramiding",
+        plain: "With pyramiding = 1 the strategy is flat, long, or short — a new signal while in a trade is ignored. Higher values stack tranches, each sized at risk_pct.",
+        why: "Live parity holds only at 1: the daemon can flatten a whole stack but cannot close one tranche. Keep 1 unless you have modeled the difference.",
+        inApp: "pyramiding param (locked to 1 live)",
+      },
+      {
+        term: "Flip (long → short on the same bar)",
+        plain: "If an exit and an opposite entry fire on the same bar, QuantLab emits EXIT_LONG then SELL; Pine emits a single SELL that closes and reverses in one order.",
+        why: "Same position result, different order count and fees. Know it before comparing fee totals between the two.",
+        inApp: "_ACTION_MAP in live_alerter.py",
+      },
+      {
+        term: "Warm-up handling",
+        plain: "Indicators return NaN until they have enough bars; the strategy skips any bar where the mean is not finite. Live, on_candle waits for ~4× the longest lookback before acting.",
+        why: "Trades in the first bars of a test are on half-built indicators. If your result depends on them, it is broken.",
+        formula: "live warmup = max(vwma_length, rsi_length, atr_length) × 4 bars",
+        inApp: "on_candle() warmup",
+      },
+      {
+        term: "Two engines, one truth",
+        plain: "Single-strategy runs go through portfolio_runner (its own loop); backtest_engine is the other simulator. They must agree.",
+        why: "A fix in one and not the other is a silent divergence. When a number looks odd, check which engine produced it.",
+        inApp: "portfolio_runner.py · backtest_engine.py",
+      },
+    ],
+  },
+  {
+    id: "exits",
+    title: "Exits & trade management",
+    blurb: "Entries get all the attention; exits decide the P&L distribution. Every exit type changes the shape of the equity curve in a predictable way.",
+    items: [
+      {
+        term: "R-multiple",
+        plain: "A trade's result measured in units of its initial risk: risked $100, made $250 → +2.5R. Lost $100 → −1R.",
+        why: "Puts every trade on one scale regardless of size or asset, so 'average winner 2.1R, average loser −0.9R' describes the system, not the account.",
+        formula: "R = (exit − entry) / (entry − stop)      (long)\nexpectancy_R = W × avg_win_R − (1 − W) × |avg_loss_R|",
+      },
+      {
+        term: "Fixed stop",
+        plain: "A price level set at entry (e.g. entry − k × ATR) that never moves.",
+        why: "Defines the R. Without a stop, 'risk per trade' has no meaning and sizing is a guess. Wide stops = high win rate, big losers; tight = many small losses.",
+        inApp: "atr_stop / atr_mult",
+      },
+      {
+        term: "Trailing stop",
+        plain: "A stop that follows price as the trade moves in your favour (e.g. highest close since entry − k × ATR) and never moves back.",
+        why: "Converts a trend's open profit into a locked one. Turns a negative-skew system into a positive-skew one — fewer, bigger winners.",
+        formula: "trail_t = max(trail_{t−1}, highest_close_since_entry − k × ATR_t)",
+      },
+      {
+        term: "Profit target",
+        plain: "Exit at a fixed distance in your favour (a level, an R-multiple, or 'back to the mean').",
+        why: "Raises win rate, caps the upside. Mean reversion's natural target is the average; trend following usually has none.",
+      },
+      {
+        term: "Time stop",
+        plain: "Exit after N bars regardless of price.",
+        why: "A mean-reversion trade that has not reverted in N bars is probably a trend. Frees capital and cuts the tail of long losing trades.",
+      },
+      {
+        term: "MAE / MFE",
+        plain: "Maximum adverse excursion: the worst point a trade went against you before closing. Maximum favourable: the best point it reached.",
+        why: "Plot MAE of winners vs losers: if winners rarely go more than 1 ATR against you, a 1.2-ATR stop loses almost nothing. This is how stop width should be chosen — from data, not feel.",
+      },
+      {
+        term: "Scaling out",
+        plain: "Close part of the position at a first target, let the rest run with a trailing stop.",
+        why: "Smooths per-trade P&L (fewer full-size losers after being in profit) at the cost of capping some winners. Costs more in fees; breaks live parity at pyramiding=1.",
+      },
+      {
+        term: "Daily / weekly loss limit",
+        plain: "Stop trading for the period once losses hit a threshold (e.g. 3R or 2% of equity in a day).",
+        why: "Losses cluster: the same regime that produced the first loss produces the next. A limit is a crude but effective regime filter — and a kill switch for you.",
+        inApp: "Live Terminal · DISARM ALL",
+      },
+    ],
+  },
+  {
+    id: "stats",
+    title: "Statistics you actually use",
+    blurb: "Not a math course — the handful of ideas behind every number on the result cards.",
+    items: [
+      {
+        term: "Mean vs median",
+        plain: "Mean: the average. Median: the middle value when sorted. One giant trade moves the mean a lot and the median not at all.",
+        why: "Average trade P&L can be positive because of one lucky outlier. If the median trade is negative, the edge is the outlier, not the rule.",
+        inApp: "Multi-Asset summary uses the median return across assets", link: "#multiasset",
+      },
+      {
+        term: "Standard deviation (σ)",
+        plain: "The typical distance from the average. Small σ = values cluster tightly; big σ = spread out.",
+        why: "Volatility IS the standard deviation of returns. Sharpe = mean ÷ σ. Once this clicks, half the metrics page reads itself.",
+        formula: "σ = √( Σ(x_i − mean)² / N )          population (ddof=0) — what the strategies use\nσ = √( Σ(x_i − mean)² / (N−1) )      sample (ddof=1) — pandas default; beware the mismatch",
+      },
+      {
+        term: "Distribution & fat tails",
+        plain: "The shape of 'how often each outcome happens'. Markets have fat tails: extreme moves happen far more often than a bell curve predicts.",
+        why: "A 5-σ day 'should' happen once in 14,000 years. Crypto has several per year. Anything that assumes a bell curve underestimates the disaster.",
+        caution: "Max drawdown in a backtest is one draw from a fat-tailed distribution. The next one can be bigger.",
+      },
+      {
+        term: "Skew",
+        plain: "Whether a distribution leans: negative skew = many small wins, rare big losses (selling insurance); positive skew = many small losses, rare big wins (trend following).",
+        why: "Tells you what the equity curve will FEEL like. Negative-skew strategies look amazing right up to the day they don't.",
+      },
+      {
+        term: "Autocorrelation",
+        plain: "Whether today's return says anything about tomorrow's. Positive = trends persist; negative = moves tend to reverse.",
+        why: "It is the statistical basis of the two big strategy families. Near zero (most liquid markets, most timeframes) means no simple edge from price alone.",
+        inApp: "Market Lab · autocorrelation / Hurst", link: "#marketlab",
+      },
+      {
+        term: "Stationarity",
+        plain: "Whether the statistical rules stay the same over time. Price is not stationary (it wanders); returns are closer to it; a spread between two related assets can be.",
+        why: "Every backtest assumes the future resembles the past. Non-stationary = the rules changed = your parameters are tuned to a market that no longer exists.",
+      },
+      {
+        term: "Z-score",
+        plain: "How many standard deviations a value is from its average. z = 2 means 'unusually high', z = −2 'unusually low'.",
+        why: "The universal 'is this stretched?' measure. VWMA bands at ±z·σ are exactly this; so is 'vol is in its 90th percentile'.",
+        formula: "z = (x − mean) / σ",
+        inApp: "vwma_reversion z-threshold · bands on the price chart",
+      },
+      {
+        term: "Percentile",
+        plain: "Where a value ranks against its own history: 90th percentile = higher than 90% of past readings.",
+        why: "Percentiles adapt to the asset. 'Vol above 2%' means different things on BTC and ES; 'vol above its 80th percentile' means the same thing everywhere.",
+        inApp: "regime.py uses a trailing volatility percentile",
+      },
+      {
+        term: "Standard error & confidence interval",
+        plain: "Standard error: how much an average would jiggle if you re-ran the experiment. Confidence interval: the range the true value probably sits in.",
+        why: "A Sharpe of 1.2 with a confidence interval of −0.3 to 2.7 is 'we don't know'. More trades shrink the interval — that is the only way.",
+        formula: "SE = σ / √n\n95% CI ≈ mean ± 1.96 × SE\nfor Sharpe: SE ≈ √( (1 + Sharpe²/2) / years )",
+      },
+      {
+        term: "Law of large numbers",
+        plain: "Averages settle down as you collect more samples. Short runs are wild; long runs converge to the truth.",
+        why: "Why 30 trades cannot prove anything and 300 can start to. Also why a bad week means nothing and a bad year might.",
+      },
+      {
+        term: "Regression to the mean (of luck)",
+        plain: "An extreme result is usually part skill, part luck — and the luck part does not repeat.",
+        why: "The best backtest out of 50 is the luckiest, not the best. Expect the winner to do worse live. This is the intuition behind 'deflated Sharpe'.",
+      },
+    ],
+  },
+  {
+    id: "indicators",
+    title: "Indicators & features",
+    blurb: "The building blocks the strategies in this repo are made of, and what each one is really measuring.",
+    items: [
+      {
+        term: "Moving averages (SMA / EMA / VWMA)",
+        plain: "The average price over the last N bars. SMA: plain average. EMA: recent bars weigh more. VWMA: bars with more volume weigh more.",
+        why: "A smoothed 'fair price' to measure distance from (mean reversion) or direction of (trend). VWMA is used here because volume-weighted levels are where real money traded.",
+        formula: "SMA_N  = Σ close / N\nEMA_t  = α × close_t + (1 − α) × EMA_{t−1},   α = 2 / (N + 1)\nVWMA_N = Σ(close × volume) / Σ volume        over the last N bars",
+        inApp: "vwma_reversion · vwma_momentum",
+      },
+      {
+        term: "ATR (Average True Range)",
+        plain: "The average size of a bar's full move (including gaps) over N bars. A ruler for 'how much does this thing move per bar'.",
+        why: "Stops and targets in ATR units adapt to the asset and the regime automatically. A 2-ATR stop is the same 'distance' on BTC and on gold.",
+        formula: "TR_t  = max( high − low, |high − close_{t−1}|, |low − close_{t−1}| )\nATR_t = Wilder EMA of TR with α = 1/N    (ewm(alpha=1/N))",
+        inApp: "ATR stop (dashed line on the price chart)",
+      },
+      {
+        term: "ADX",
+        plain: "Trend strength, 0–100, regardless of direction. Below ~20–25: ranging; above: trending.",
+        why: "The switch in the deterministic regime detector. Mean reversion is gated to low-ADX; trend to high-ADX.",
+        formula: "+DM = high − high_{t−1} (if > down move, else 0) · −DM likewise\n+DI = 100 × Wilder(+DM)/ATR · −DI = 100 × Wilder(−DM)/ATR\nDX  = 100 × |+DI − −DI| / (+DI + −DI) · ADX = Wilder(DX)",
+        inApp: "RegimeDetector(period, threshold) in regime.py",
+      },
+      {
+        term: "RSI",
+        plain: "Relative strength: ratio of recent up-moves to down-moves, scaled 0–100. Under 30 'oversold', over 70 'overbought'.",
+        why: "A short RSI (2 bars) is one of the oldest mean-reversion signals in equities. Its edge in crypto must be re-proven, not assumed.",
+        formula: "up = max(Δclose, 0) · down = max(−Δclose, 0)\navg_up, avg_down = Wilder EMA (α = 1/N)\nRS = avg_up / avg_down · RSI = 100 − 100 / (1 + RS)",
+        inApp: "rsi2_reversion · _rsi() in vwma_reversion",
+      },
+      {
+        term: "Bollinger / z-score bands",
+        plain: "A moving average with lines at ±k standard deviations. Price outside the band is 'stretched'.",
+        why: "Turns 'is this far from normal?' into a number. Same idea as the z-score entry above, drawn on the chart.",
+        inApp: "±z·σ bands on the V2 price chart",
+      },
+      {
+        term: "Realized volatility",
+        plain: "The standard deviation of recent returns, usually over 20 bars, annualized.",
+        why: "Input to vol targeting, regime labels, and the Sharpe denominator. 'Realized' = what actually happened, vs 'implied' = what options expect.",
+        inApp: "HMM features · regime volatility percentile",
+      },
+      {
+        term: "Hurst exponent",
+        plain: "0–1 measure of memory in a series. ~0.5 random walk; > 0.5 trending; < 0.5 mean-reverting.",
+        why: "A one-number answer to 'which strategy family fits this asset/timeframe?'. Noisy on short windows; read it as a lean, not a verdict.",
+        formula: "R/S method: for window size n, R = range of cumulative deviations, S = σ\nE[R/S] ∝ n^H  →  H = slope of log(R/S) vs log(n)",
+        inApp: "HMM experiment features · Market Lab",
+      },
+      {
+        term: "Linear-regression slope",
+        plain: "Fit a straight line through the last N closes; the slope is the trend's direction and speed.",
+        why: "Cleaner than 'price above MA' for labelling Trending Up / Down, because it uses every bar in the window, not just the last one.",
+        inApp: "regime.py · _regime_labels",
+      },
+      {
+        term: "VWAP",
+        plain: "Volume-weighted average price since the session open — the average price at which everyone traded today.",
+        why: "Institutions benchmark fills against it, so price tends to react around it. A session-anchored fair value.",
+      },
+      {
+        term: "Donchian channel / range breakout",
+        plain: "The highest high and lowest low of the last N bars. A close outside the channel is a breakout.",
+        why: "The simplest trend-entry rule there is. On raw futures data, roll seams create fake breakouts — the CL lesson.",
+        inApp: "pivot_breakout · asia_range_breakout",
+      },
+      {
+        term: "Causal (no-peek) feature",
+        plain: "A feature at bar i that uses only bars ≤ i. Anything centered, forward-filled from the future, or computed on the full sample is not causal.",
+        why: "Non-causal features are look-ahead bias in disguise. Every feature in regime.py is causal on purpose; the HMM full-sample fit is NOT, which is why it is not tradeable yet.",
+      },
+    ],
+  },
+  {
+    id: "markets",
+    title: "Markets & instruments",
+    blurb: "What you are actually trading on each broker, and the mechanics that bite when you don't know them.",
+    items: [
+      {
+        term: "Spot vs perpetual futures (perps)",
+        plain: "Spot: you own the coin. Perp: a contract that tracks the price with leverage and never expires, kept in line by a funding payment.",
+        why: "Perps are what the live acceptor trades. They allow shorts and leverage — and liquidation. Backtests on spot candles are close but not identical.",
+      },
+      {
+        term: "Funding rate",
+        plain: "A small payment every 8 hours between longs and shorts on a perp, positive when the perp trades above spot (longs pay shorts).",
+        why: "A cost if you are on the paying side, income if not. The carry study earned ~12% APR over 7 years from it — decaying to ~3% now.",
+        formula: "payment = position_notional × funding_rate        every 8h (3×/day)\nAPR ≈ funding_rate × 3 × 365     (0.01% per 8h ≈ 11% APR)",
+        inApp: "Funding carry study (research)",
+      },
+      {
+        term: "Basis",
+        plain: "The gap between a futures price and spot. Positive basis (contango) = futures above spot.",
+        why: "Basis trades (long spot, short future) collect that gap with almost no price risk. Also why funding exists — it forces the perp basis back toward zero.",
+      },
+      {
+        term: "Contract size & tick value (CME)",
+        plain: "One futures contract controls a fixed multiple of the index: ES = $50 per point, NQ = $20, GC = 100 oz, CL = 1,000 barrels. Tick = smallest price step.",
+        why: "It is why futures P&L is 'move × contracts × multiplier' and why the backtest switches to fixed contract sizing for them.",
+        formula: "P&L = (exit − entry) × contract_size × contracts       (long; flip sign for short)\n1 ES, +10 points → 10 × $50 × 1 = $500",
+        inApp: "data/assets/{broker}.json · contract_size · contracts param",
+      },
+      {
+        term: "Margin",
+        plain: "The deposit the exchange holds while you have a leveraged position open. Initial margin to open, maintenance margin to keep it.",
+        why: "It is what leverage actually sets. Hitting maintenance margin = liquidation. The backtest has no margin concept — you must size sanely yourself.",
+      },
+      {
+        term: "Roll & back-adjustment",
+        plain: "Futures expire, so a continuous series stitches contracts together. Raw stitching leaves price jumps (seams) at each roll; back-adjusting shifts history to remove them.",
+        why: "Seams look like breakouts and volatility that never happened. Donchian died on raw CL for exactly this reason.",
+        inApp: "databento_v2 de-seams · TradeStation is back-adjusted",
+      },
+      {
+        term: "Sessions (Asia / London / New York)",
+        plain: "The three overlapping trading days. Asia ~00:00–08:00 UTC is quiet; London and NY bring volume and range.",
+        why: "Volatility and behaviour differ by session. The Asia-range breakout literally trades the quiet range being broken by the busy session.",
+        inApp: "sessions param · Market Lab session stats",
+      },
+      {
+        term: "Order types & maker/taker",
+        plain: "Market order: fill now at whatever price (taker). Limit order: fill only at your price or better (maker, may never fill). Stop: becomes a market order at a trigger.",
+        why: "Taker fees are higher and you pay the spread; makers earn a rebate but risk not getting filled. The backtest assumes taker-style next-open fills.",
+      },
+      {
+        term: "Order book depth",
+        plain: "How much is resting to buy and sell at each price level near the market.",
+        why: "Thin depth = your order moves the price = slippage. Small coins at 3 a.m. have almost none.",
+        inApp: "Live Terminal · orderbook_hub",
+      },
+      {
+        term: "Liquidation cascade",
+        plain: "A price drop liquidates leveraged longs, whose forced sells drop the price further, liquidating more.",
+        why: "The mechanism behind crypto's fattest tails. A stop-loss does not protect you from a 15% wick in 2 minutes; only size does.",
+      },
+    ],
+  },
+  {
+    id: "data",
+    title: "Data & bars",
+    blurb: "The input to everything. Most 'strategy bugs' are data-handling bugs.",
+    items: [
+      {
+        term: "OHLCV bar",
+        plain: "One row per time bucket: open, high, low, close, volume. The bar's time is its OPEN time in this repo's parquet files.",
+        why: "Knowing whether a timestamp means 'bar started' or 'bar ended' decides whether a signal is causal. Get it wrong and you peek one bar ahead.",
+        inApp: "market_data.load_parquet → [time, open, high, low, close, volume]",
+      },
+      {
+        term: "Timeframe & resampling",
+        plain: "1m, 5m, 15m, 1h… Higher timeframes are built by grouping lower ones (first open, max high, min low, last close, sum volume).",
+        why: "Shorter = more trades and more cost; longer = fewer samples. Resampling errors (wrong alignment) silently shift every bar.",
+      },
+      {
+        term: "UTC & timezone discipline",
+        plain: "All timestamps are stored in UTC. Manila is UTC+8 with no daylight saving.",
+        why: "Session filters and 'the daily open' depend on it. A strategy tuned on local-time sessions breaks the moment the data is UTC.",
+        inApp: "Rail clock · double-click for the PHT ↔ UTC converter",
+      },
+      {
+        term: "Gaps & bad prints",
+        plain: "Missing bars (exchange downtime) and impossible prices (a $0 wick).",
+        why: "A gap makes an indicator's 'last 20 bars' span days. A bad print creates a fake stop-out. Look at the raw candles once before trusting a result.",
+        inApp: "Downloads page · dataset date ranges", link: "#downloads",
+      },
+      {
+        term: "Warm-up (look-back) bars",
+        plain: "The first N bars a strategy needs before its indicators are valid (a 200-bar MA needs 200 bars).",
+        why: "Trades taken during warm-up are on garbage indicators. Results that start on bar 1 are suspicious.",
+      },
+      {
+        term: "Data snooping via the chart",
+        plain: "Looking at the price chart, noticing a pattern, then 'testing' it on the same chart.",
+        why: "You already saw the answer. The test can only confirm. Form the rule from a reason, test it on data you have not eyeballed.",
+      },
+      {
+        term: "Enough history",
+        plain: "At least two full years, and at least one period the strategy should hate (a crash, a chop, a melt-up).",
+        why: "A strategy tested only on a bull market has never met its enemy. Which years your data covers is part of the result.",
+      },
+    ],
+  },
+  {
+    id: "process",
+    title: "Process, psychology & biases",
+    blurb: "The part no library implements. The biggest risk to the account is the person operating it. First the working habits, then the wiring faults every human brain ships with.",
+    items: [
+      {
+        term: "Hypothesis first",
+        plain: "Write down WHY the edge should exist before running anything: who is on the other side, and why they lose to you.",
+        why: "Without a reason, a good backtest is a pattern found in noise. With a reason, you know what would make it stop working.",
+      },
+      {
+        term: "Research log",
+        plain: "A dated list of every idea, every setting, every result — including the failures.",
+        why: "It is your multiple-testing counter. 'This is my 40th idea' changes how much you believe the 40th.",
+      },
+      {
+        term: "One change at a time",
+        plain: "Change one parameter, one filter, or one asset per experiment.",
+        why: "Change three things and improve — which one did it? You cannot know, so you cannot learn.",
+      },
+      {
+        term: "Pre-commitment",
+        plain: "Decide the rules for stopping (max drawdown, daily loss, 'if live diverges from backtest') BEFORE the first trade, in writing.",
+        why: "Decisions made inside a drawdown are made by a different, worse person. Let the calm version of you decide.",
+        inApp: "Live Terminal · DISARM ALL kill switch",
+      },
+      {
+        term: "Sunk cost",
+        plain: "Keeping a strategy because of the months you spent building it.",
+        why: "The market does not know how hard you worked. A retired strategy costs nothing; a kept-out-of-pride one costs money.",
+      },
+      {
+        term: "Story bias ('it's different this time')",
+        plain: "Explaining every loss with a news event and every win with the edge.",
+        why: "If the losses are always excusable, nothing can ever falsify the strategy — which means you are not doing research.",
+      },
+      {
+        term: "Retiring a strategy",
+        plain: "A strategy is retired when it fails a walk-forward re-run on new data, not when it has a bad month.",
+        why: "Every strategy has bad months. Retire on evidence (OOS edge gone), not on pain.",
+      },
+      {
+        term: "Small size until proven",
+        plain: "Trade the smallest size the exchange allows until live matches the backtest for weeks.",
+        why: "The goal of the first live month is zero surprises, not profit. Surprises found at tiny size are cheap lessons.",
+      },
+      {
+        term: "Signal vs sizing separation",
+        plain: "Entries/exits decide WHEN; sizing decides HOW MUCH. Keep them in separate code, separate decisions.",
+        why: "It is why live and backtest can agree on every bar while their dollar P&L differs — and why that is not a bug.",
+      },
+      {
+        term: "Survivorship bias (the thinking error)",
+        plain: "You only hear from the winners. The traders posting 300% years exist; the ten thousand who blew up and went quiet are invisible — so 'everyone is making money' is an illusion of the sample you can see.",
+        why: "It sets your expectations too high and makes a real 15%-a-year edge feel like failure, which pushes you toward more risk. The same bias in DATA form (testing only coins that still exist) is in Statistical honesty — same mechanism, two places it bites.",
+        caution: "Every strategy that 'always works' is a survivor of the ones that didn't. Ask what happened to the others.",
+      },
+      {
+        term: "Confirmation bias",
+        plain: "Hunting for evidence that you are right and skimming past evidence that you are wrong.",
+        why: "It is why the research log records failures and why the Verdict tab has red outcomes you cannot dismiss. Design tests that could embarrass you, then run them.",
+      },
+      {
+        term: "Hindsight bias",
+        plain: "After the fact, the outcome feels like it was obvious all along ('of course it dumped after that wick').",
+        why: "It makes chart-reading feel like skill. The honest test is whether the rule would have fired BEFORE the move, on data you had not seen — which is what the backtest is for.",
+      },
+      {
+        term: "Recency bias",
+        plain: "Weighing the last few weeks far more than the years before them.",
+        why: "Retiring a good strategy after a bad month, or adding size after a hot one, are both this. Judge on the whole sample; that is what the walk-forward re-run is for.",
+      },
+      {
+        term: "Overconfidence",
+        plain: "Believing your estimate is more precise than it is: 'the Sharpe is 1.4' when the honest statement is 'somewhere between 0.2 and 2.6'.",
+        why: "Leads to sizing for the best case. The confidence interval, not the point estimate, should set the size.",
+      },
+      {
+        term: "Gambler's fallacy & hot hand",
+        plain: "Gambler's fallacy: 'five losses in a row, a win is due'. Hot hand: 'five wins in a row, I'm on fire, size up'.",
+        why: "Independent trades have no memory. Both lead to changing size based on the recent streak, which is exactly what fixed-fraction sizing is designed to prevent.",
+      },
+      {
+        term: "Loss aversion & the disposition effect",
+        plain: "A loss hurts about twice as much as an equal gain feels good. Result: you sell winners early (to lock the good feeling) and hold losers (to avoid making the loss real).",
+        why: "It is the single most reliable way to turn a positive-expectancy system into a losing one by hand. It is why exits are rules, not decisions.",
+      },
+      {
+        term: "Anchoring",
+        plain: "Fixating on a reference number — your entry price, the all-time high, 'it was 100k last month'.",
+        why: "The market does not know your entry price. A position is either worth holding at today's price or it is not; where you bought is irrelevant to that question.",
+      },
+      {
+        term: "Outcome bias",
+        plain: "Judging a decision by how it turned out instead of by whether it was right given what you knew.",
+        why: "A reckless trade that won is still reckless; a good trade that lost is still good. Grade the process, or the market will teach you the wrong lessons on purpose.",
+      },
+      {
+        term: "Revenge trading & FOMO",
+        plain: "Revenge: re-entering right after a loss to 'get it back'. FOMO: entering late because everyone else already did.",
+        why: "Both are entries the system did not signal. If the daemon fires the trades and you only watch, neither can happen — that is a feature, not a limitation.",
+        inApp: "Live Terminal · alerts_daemon fires on rules, not moods",
+      },
+      {
+        term: "Narrative fallacy",
+        plain: "The brain turns any sequence of events into a story with a cause. 'BTC dumped BECAUSE of the news' — even when it dumped identically on a quiet day.",
+        why: "Stories feel like understanding but predict nothing. Prefer a number that would have warned you in advance over a story that explains it afterwards.",
+      },
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Step-by-step tutorials for modules in the app. Each step: what to do, what to
+// look at, and what a good / bad reading looks like.
+export const TUTORIALS = [
+  {
+    id: "wf-tutorial",
+    title: "Tutorial · Walk-Forward",
+    link: "#walkforward",
+    intro: "Walk-forward is the gate a strategy must pass before it deserves live money. This walks the actual page top to bottom — the Setup form, the run, then every result tab in the order you should read them. Time budget for a first run on 15m crypto: about 10–20 minutes.",
+    steps: [
+      {
+        title: "Pick the strategy, symbol and timeframe",
+        do: "Setup tab → Strategy dropdown, then the same symbol/timeframe you used on Dashboard V2. Keep the base params the strategy already has — walk-forward tunes on top of them.",
+        look: "The dataset line under the picker: first/last date and bar count.",
+        good: "At least 2 years of bars; the range includes at least one ugly period.",
+        bad: "A few months of data. The window schedule below will show 1–2 windows — that is not a walk-forward, it is a backtest with extra steps.",
+      },
+      {
+        title: "Set IS and OOS bars",
+        do: "IS bars = the training window, OOS bars = the honest test window. The grey text under each converts bars to calendar time. Starting point on 15m: IS 17,280 (~6 months), OOS 2,880 (~1 month). Ratio IS ≈ 4–10× OOS.",
+        look: "The schedule diagram and the window-count hint.",
+        good: "8+ windows, each OOS slice containing dozens of trades for this strategy.",
+        bad: "Fewer than 5 windows (too little evidence) or OOS slices with a handful of trades (each window's score is a coin flip).",
+      },
+      {
+        title: "Choose the metric and trials",
+        do: "Metric = Sharpe (recommended — it punishes the wild params Total Return would pick). Trials / window = 50–100 for a small search space, more only if you search many params.",
+        look: "Nothing yet — but note that runtime scales with windows × trials.",
+        good: "Sharpe, 60 trials, 2–4 searched params.",
+        bad: "Total Return with 500 trials over 8 params: the optimizer WILL find a spike, and the verdict will tell you so.",
+      },
+      {
+        title: "Define the search space",
+        do: "Add only the parameters you have a reason to tune, with low/high bounds wide enough to contain a plateau. Everything else stays at its base value. AI Suggest can propose bounds; check they make sense before accepting.",
+        look: "The base params vs the searched ones.",
+        good: "2–4 knobs, sensible bounds (e.g. VWMA length 10–60, not 2–500).",
+        bad: "Ten knobs. Every extra dimension is room for the optimizer to memorize noise.",
+      },
+      {
+        title: "Set the rigor knobs",
+        do: "Min IS trades = 30 (a config must make 30 in-sample trades to win a window). Selection = plateau (prefers a broad shelf over a lone spike; costs nothing). Embargo/purge = a few bars if trades can straddle the IS/OOS boundary (e.g. the strategy holds for ~10 bars → embargo 10). Leave Seed at its default for now.",
+        look: "The embargo/purge picture on the diagram shows exactly which bars are dropped.",
+        good: "min IS trades 30, plateau, small embargo.",
+        bad: "min IS trades 1 — the winner of each window can be picked on three lucky trades.",
+      },
+      {
+        title: "Workers, then Run",
+        do: "Set Workers to about half your CPU cores, press Run. The progress strip shows the window being optimized.",
+        look: "The elapsed time. A first run tells you what the budget is for later, bigger runs.",
+        good: "Finishes in minutes. Results are reproducible at any worker count (same seed → same picks).",
+        bad: "If it is taking far too long: lower trials first, then shrink the search space — not IS/OOS size, which changes the statistics.",
+      },
+      {
+        title: "Read the Verdict tab FIRST",
+        do: "Ignore the equity curve for now. The Verdict tab runs every gate and gives one headline. Read the two decisive gates before anything else.",
+        look: "'Tuning beat not-tuning' (the control arm: every window re-run with untuned base params) and 'Windows agree on the params' (how far apart each window's picks landed, as a fraction of the search range — 28.9% is what random guessing gives).",
+        good: "Both decisive gates green, then a mostly-green list below them.",
+        bad: "Tuning LOST to not-tuning: the optimizer is costing you money — the strategy may still be fine at base params, but the search is worthless. Windows disagree: the 'best' params are noise; nothing below can rescue that.",
+      },
+      {
+        title: "Overview — the stitched OOS curve",
+        do: "Now look at the equity curve. It is ONLY the out-of-sample slices glued together — what you would have experienced re-tuning as you went.",
+        look: "OOS Sharpe, OOS max drawdown, OOS trades, and the buy-and-hold line next to it.",
+        good: "A curve that rises across most of its length, above buy-and-hold, with 100+ OOS trades.",
+        bad: "One vertical jump carrying the whole curve; or below buy-and-hold — then you would have done better doing nothing.",
+      },
+      {
+        title: "Folds — is it consistent?",
+        do: "One row per window: IS score vs OOS score.",
+        look: "The IS-vs-OOS gap and the share of windows positive OOS (pct_windows_positive_oos).",
+        good: "OOS roughly 50–100% of IS (WFE ≥ 0.5), most windows positive, no single window dominating.",
+        bad: "IS great, OOS flat or negative on most windows: textbook overfitting. Shrink the search space, lengthen IS, or accept the idea is dead.",
+      },
+      {
+        title: "Parameters — do the picks wander?",
+        do: "The chosen value of each searched param, window by window.",
+        look: "Whether the picks cluster in a region or bounce between the bounds.",
+        good: "Picks live in a band (e.g. VWMA length always 20–35). That band is your live setting.",
+        bad: "Picks alternate between the low and high bound: the parameter does not matter, or the surface is pure noise. Either way, don't 'optimize' it.",
+      },
+      {
+        title: "Optuna & Robustness — how strong is the evidence?",
+        do: "Optuna tab: the score surface per window (spike vs plateau by eye). Robustness tab: Deflated Sharpe, WFE, parameter stability, % windows positive.",
+        look: "Deflated Sharpe (Sharpe after paying for the number of trials) and parameter_stability_score.",
+        good: "Deflated Sharpe still > 0 with a comfortable margin; stability high; the plateau selector rarely had to overrule a spike.",
+        bad: "Raw Sharpe 1.5 but deflated ≈ 0 — you found the best of many random tries.",
+      },
+      {
+        title: "Seed Check — does the story survive a different draw?",
+        do: "Run the Seed Check tab (several seeds at once). It is a separate job, so it can run without the main result.",
+        look: "Whether the verdict and the chosen param bands agree across seeds.",
+        good: "Same headline, same bands, every seed.",
+        bad: "Verdict flips between seeds: the search has not converged. The fix is more trials, not more seeds.",
+      },
+      {
+        title: "Regime — where does it earn?",
+        do: "Performance split by the realized volatility of the underlying.",
+        look: "Which vol bucket carries the P&L.",
+        good: "Edge present across buckets, or concentrated in the bucket the hypothesis predicted.",
+        bad: "All the profit in one bucket you cannot identify in advance — you would need to predict the regime to trade it.",
+      },
+      {
+        title: "Decide, then log it",
+        do: "Green verdict + consistent folds + stable params → carry the param BAND (middle of the plateau, not the best point) to the Cost Sweep and Monte Carlo pages, then paper trade. Anything else → write down what failed in your research log and move on.",
+        look: "Your own research log entry: date, settings, verdict, decision.",
+        good: "One line per run, including the failures. That count is your honest multiple-testing number.",
+        bad: "Re-running with tweaked bounds until it goes green. That is the optimizer running on you.",
+      },
+    ],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Ways to smooth the equity curve / raise Sharpe. Ordered from "always helps"
+// to "helps but can fool you". Each has the catch spelled out.
+export const SMOOTHING = [
+  {
+    title: "Diversify across things that don't move together",
+    how: "Run the same strategy on several uncorrelated assets, or several different strategies on one asset, each sized small.",
+    why: "Combining N uncorrelated return streams of equal quality raises Sharpe by about √N. It is the only free lunch in finance.",
+    catch: "Crypto assets are highly correlated with each other (beta to BTC ≈ 1). Check correlation; 'diversified across 30 alts' may be one bet in disguise.",
+    inApp: "#multiasset",
+  },
+  {
+    title: "Target volatility, don't ignore it",
+    how: "Size each position inversely to recent volatility (e.g. ATR or 20-bar realized vol) so every trade risks the same amount.",
+    why: "Keeps risk constant across calm and wild periods. Removes the 'one insane week' that dominates most drawdowns.",
+    catch: "Needs a vol estimate that is causal (only past bars). Lagged vol can size up right as things get wild.",
+  },
+  {
+    title: "Trade less",
+    how: "Move to a higher timeframe, add a minimum-signal-strength filter, or hold longer.",
+    why: "Costs are the surest drag. Cutting trades in half while keeping 70% of gross profit almost always raises net Sharpe.",
+    catch: "Fewer trades = fewer samples = weaker statistics. Do not go below ~100 trades over the test.",
+    inApp: "#costsweep",
+  },
+  {
+    title: "Cut the tail losses, not the small ones",
+    how: "Hard stop per trade (ATR-based), daily loss limit, kill switch on drawdown.",
+    why: "Sharpe is punished by variance; a handful of outsized losses create most of it. Removing them smooths more than removing many small ones.",
+    catch: "Tight stops raise the trade count and the whipsaw rate. Test the stop width like any other parameter — plateau, not spike.",
+  },
+  {
+    title: "Skip the hours you have no edge in",
+    how: "Session filter: only trade windows where the strategy's stats are actually positive.",
+    why: "Many intraday edges exist in one session and are noise in the others. Removing the noise hours removes pure variance.",
+    catch: "Selecting hours after looking at results IS overfitting. Decide the sessions from a reason (liquidity, open, close), then confirm OOS.",
+  },
+  {
+    title: "Regime filter — but prove it",
+    how: "Gate entries on ADX / trend / vol state; mean reversion only in ranges, trend only in trends.",
+    why: "Stops the strategy from trading in the environment it is known to lose in.",
+    catch: "Adds parameters, so it adds overfitting room. It must improve OOS windows consistently, for that strategy, or it stays off.",
+    inApp: "#marketlab",
+  },
+  {
+    title: "Scale in / scale out",
+    how: "Enter in two or three pieces instead of one; exit part at a first target.",
+    why: "Averages your fill over time — reduces the impact of one bad entry, smooths the per-trade P&L distribution.",
+    catch: "More fills = more cost, and live parity only holds at pyramiding = 1. Model it exactly or skip it.",
+  },
+  {
+    title: "Combine strategies with opposite weaknesses",
+    how: "Pair a mean-reversion strategy (loses in trends) with a trend strategy (loses in ranges) on a shared cash pool.",
+    why: "One is usually working while the other bleeds; the sum is smoother than either.",
+    catch: "They can both lose in choppy high-vol regimes. Check the combined drawdown, not just the combined Sharpe.",
+    inApp: "#dashboardv2",
+  },
+  {
+    title: "What NOT to do",
+    how: "Remove the losing months, drop the losing assets, or add a rule that would have dodged the worst trade.",
+    why: "It smooths the past perfectly — and only the past. This is curve-fitting with extra steps.",
+    catch: "If the smoothing came from looking at the losses first, it will not smooth the future. Sharpe is an outcome, not a dial.",
+  },
+];
+
+// ---------------------------------------------------------------------------
+// The starting-quant plan. Each step becomes a checkbox persisted per-browser.
+export const PLAN = [
+  {
+    id: "found",
+    title: "Phase 0 · Foundations",
+    goal: "Speak the language before touching the optimizer.",
+    steps: [
+      { id: "f1", text: "Can explain return, vol, drawdown, Sharpe, Sortino, Calmar in one plain sentence each (Module 1)." },
+      { id: "f2", text: "Can explain alpha vs beta and why beating buy-and-hold matters (Module 2)." },
+      { id: "f3", text: "Can list five ways a backtest lies: overfitting, look-ahead, survivorship, selection, costs (Module 3)." },
+      { id: "f4", text: "Know the difference between fixed-fraction and fixed-lot sizing, and which one the live acceptor uses (Module 5)." },
+    ],
+  },
+  {
+    id: "data",
+    title: "Phase 1 · Data hygiene",
+    goal: "Garbage in, confident garbage out.",
+    steps: [
+      { id: "d1", text: "Downloaded the asset/timeframe you want and checked the date range covers at least 2 years and one bad period." },
+      { id: "d2", text: "Looked at the raw candles for gaps, spikes, and roll seams (CME futures: raw vs back-adjusted)." },
+      { id: "d3", text: "Know which bars the strategy can actually trade live (session hours, exchange downtime)." },
+    ],
+  },
+  {
+    id: "build",
+    title: "Phase 2 · One simple strategy",
+    goal: "A rule you can explain to a friend in two sentences.",
+    steps: [
+      { id: "b1", text: "Wrote the idea down BEFORE testing: what inefficiency, why it should exist, which family it belongs to." },
+      { id: "b2", text: "Implemented it with ≤ 4 parameters. Every extra parameter is overfitting room." },
+      { id: "b3", text: "Ran it once with default params, honest fills, real costs. Noted the result before touching anything." },
+      { id: "b4", text: "Checked trade count ≥ 100 over the test. If not, the statistics below cannot help you." },
+    ],
+  },
+  {
+    id: "gauntlet",
+    title: "Phase 3 · The validation gauntlet",
+    goal: "Earn the right to be traded. Every gate, in order.",
+    steps: [
+      { id: "g1", text: "Parameter plateau, not a spike — good params sit in a flat region of neighbors (parameter_stability_score)." },
+      { id: "g2", text: "Survives pessimistic costs — still profitable at 3× slippage in the Cost Sweep." },
+      { id: "g3", text: "Walk-forward OOS holds — most windows positive OOS, WFE above ~0.5." },
+      { id: "g4", text: "Monte Carlo still profitable — the shuffled-path 5th percentile is survivable." },
+      { id: "g5", text: "Beats buy-and-hold per window, and t-stat > 2 on the trade P&L." },
+      { id: "g6", text: "Consistent across sub-periods — green in the bad year too, not carried by one lucky stretch." },
+      { id: "g7", text: "Counted every idea / asset / timeframe tried so far, and raised the bar accordingly." },
+      { id: "g8", text: "Locked holdout run exactly once, last. Result recorded whatever it says." },
+    ],
+  },
+  {
+    id: "risk",
+    title: "Phase 4 · Sizing & survival",
+    goal: "Decide how much before deciding when.",
+    steps: [
+      { id: "r1", text: "Risk per trade set so 10 straight losses cost < 20% of the account." },
+      { id: "r2", text: "Know the live base_size and what % of the account it represents — compared it to the modeled risk_pct." },
+      { id: "r3", text: "Daily loss limit and a kill switch agreed with yourself in writing, before the first live trade." },
+      { id: "r4", text: "Understood liquidation distance at the chosen leverage; sized as if leverage were 1×." },
+    ],
+  },
+  {
+    id: "live",
+    title: "Phase 5 · Paper, then tiny live",
+    goal: "Prove the pipeline, not the P&L.",
+    steps: [
+      { id: "l1", text: "Ran the strategy in Demo via the Live Terminal for at least 2 weeks; compared each live signal to the backtest bar-by-bar." },
+      { id: "l2", text: "Direction and % return per trade match the backtest (dollars will not — sizing differs)." },
+      { id: "l3", text: "Went live at the smallest size the exchange allows. Goal: zero surprises, not profit." },
+      { id: "l4", text: "Pine Script port (if using TradingView) fires the same actions on the same bars as on_candle." },
+    ],
+  },
+  {
+    id: "loop",
+    title: "Phase 6 · The review loop",
+    goal: "Research is never finished; it is re-checked.",
+    steps: [
+      { id: "o1", text: "Monthly: live vs backtest drift check. If direction/% diverge, stop and find out why before adding size." },
+      { id: "o2", text: "Quarterly: re-run walk-forward on the newest data. An edge that stops appearing OOS gets retired, not re-tuned." },
+      { id: "o3", text: "Kept a research log: every idea tried, every result, including the failures. This is your multiple-testing counter." },
+      { id: "o4", text: "Only ONE change at a time between reviews, so you know what caused what." },
+    ],
+  },
+];

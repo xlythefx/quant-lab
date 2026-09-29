@@ -42,6 +42,137 @@ export const GATE_ORDER = [
 export const DECISIVE = new Set(GATE_ORDER.slice(0, 2));
 
 /**
+ * Every verdict the page can reach, with what triggers it and what to do about it.
+ *
+ * This is a catalog rather than strings inlined at each branch so the Verdict
+ * panel (which shows the steps for YOUR run) and the Walk-Forward Guide (which
+ * lists all of them) cannot drift apart. `computeWFGates` returns `verdictId`;
+ * both renderers look the rest up here.
+ *
+ * `steps` is a function of a small context so a verdict can name the specific
+ * culprit in the panel while the guide, calling it with no context, still reads
+ * as generic advice.
+ */
+export const VERDICTS = [
+  {
+    id: "tuning_veto",
+    tone: "loss",
+    label: "The search found nothing",
+    when: "The control arm failed: the same windows traded with the UNTUNED base params did better than re-optimizing every window.",
+    why: "This is a finding about the optimizer, not necessarily about the strategy. Everything else in the report — stitched curve, WFE, green rate — is measured only on the tuned arm, so it looks identical whether the search found a real optimum or sampled noise. That is why this one vetoes.",
+    steps: () => [
+      "Do not deploy the consensus set. On this data the untouched defaults beat it.",
+      "Shrink the search space. Every extra dimension is another chance to fit noise — 2 or 3 params behaves far better than 6.",
+      "Raise Min IS trades (Rigor row). At a low floor a window can be won by a config picked on a handful of lucky trades, which is exactly how a search ends up worse than not searching.",
+      "Raise IS bars so each window tunes on a bigger sample, or raise Trials so the search actually converges.",
+      "Consider that the base params working better IS the result. A strategy that doesn't need tuning is the most robust kind there is — run the gauntlet on the defaults instead.",
+    ],
+  },
+  {
+    id: "agree_veto",
+    tone: "loss",
+    label: "No agreement, and tuning didn't earn its keep",
+    when: "Both decisive gates failed: the windows' parameter picks are spread as widely as random guessing, AND re-optimizing did not beat leaving the base params alone.",
+    why: "The clearest negative the page can give. Two independent checks agree that the optimization step is not measuring a real effect, so no gate below them can be trusted to mean anything.",
+    steps: () => [
+      "Stop tuning this configuration — nothing in the report is measuring a real effect.",
+      "Check the search space for parameters this strategy ignores. Preflight flags the classic case: risk_pct is inert on futures and contracts is inert on crypto.",
+      "Check the strategy actually fires enough trades per IS window. Look at best_trades in the exported JSON — if the median is under ~30, every pick is noise.",
+      "Try a different timeframe or symbol, or a different idea entirely.",
+      "Count this run as one of the distinct ideas you've tested. Gate 6 (cross-strategy honesty) is manual, and the more you try, the higher a future winner has to clear.",
+    ],
+  },
+  {
+    id: "mixed_signal",
+    tone: "amber",
+    label: "Mixed signal — one param disagrees",
+    when: "Re-optimizing DID beat the untuned params, but the windows never agreed on at least one parameter.",
+    why: "Those two are hard to hold at once, and the usual explanation is boring: the agreement gate reports the WORST parameter, not the average. A knob the strategy is insensitive to has an arbitrary winner every window and sits at the random level by construction — while your other params do the real work the control arm detected. One dead dimension, one red gate.",
+    steps: (ctx = {}) => {
+      const p = ctx.worstParam ? `\`${ctx.worstParam}\`` : "the parameter named in the headline";
+      return [
+        `Open the Parameters tab. On the drift chart ${p} will swing while the others hug zero — that's the picture of an insensitive knob.`,
+        `Decide whether ${p} actually affects this strategy. Hold everything else fixed and sweep just that one; if the score barely moves, it's inert.`,
+        `Re-run with ${p} removed from the search space and fixed at a sensible constant. If the results barely move but the gate goes green, that was the culprit and your real verdict is whatever comes back.`,
+        `If removing it DOES change the out-of-sample result, it wasn't inert — you have a parameter that matters and that your windows cannot agree on. That's a genuine instability, and a much worse finding than a dead knob.`,
+        "Until you've resolved which it is, treat the consensus set as unproven — its median for that param is an average of noise.",
+      ];
+    },
+  },
+  {
+    id: "insufficient",
+    tone: "amber",
+    label: "Not enough to judge",
+    when: "Fewer than 5 of the gates could be measured on this run.",
+    why: "A pass ratio is not evidence when the denominator is tiny. Older results, or runs with no search space, score too few gates for any verdict to mean something.",
+    steps: () => [
+      "Check a search space is actually set. With nothing marked Search, the run is a rolling backtest of fixed params, not a walk-forward — and most gates have nothing to read.",
+      "Re-run on the current build. Several gates are computed during the run and cannot be backfilled onto an old result.",
+      "Use enough data for at least 30 windows. Below that the per-window rates carry too much standard error to read.",
+    ],
+  },
+  {
+    id: "unverified",
+    tone: "amber",
+    label: "Unverified — a decisive gate is unmeasured",
+    when: "One of the two decisive gates could not be measured, most often because the result predates the control arm.",
+    why: "The page will never show green while a gate that can invalidate everything else is blank. Absence of evidence is not a pass.",
+    steps: () => [
+      "Re-run. The control arm is computed during the run (each window traded a second time with the untuned base params) and cannot be added to a stored result afterwards.",
+      "If it stays unmeasured after a re-run, check you have at least two windows with numeric parameter picks — the agreement gate needs something to compare.",
+    ],
+  },
+  {
+    id: "looks_real",
+    tone: "profit",
+    label: "Looks Real",
+    when: "At least 75% of measurable gates passed, with no failures and no warnings on the two decisive gates.",
+    why: "The strongest verdict a single run can produce — which is still not proof. Every number here comes from data you have now looked at.",
+    steps: () => [
+      "Click See Equity Curve on the deploy candidate. The stitched curve re-tunes every window and is not deployable; you need to see what one fixed set does.",
+      "Run the Cost Sweep at pessimistic fees and slippage. If the edge only exists at 1bp, it doesn't exist.",
+      "Run Monte Carlo to check the edge isn't an artifact of trade ordering.",
+      "Then, and only once, run the locked holdout — the most recent 6-12 months you have never touched. Use the Live-Test Holdout or Pre-Deploy Gauntlet preset so the optimizer never sees it.",
+      "Be honest about gate 6: count how many distinct ideas, symbols and timeframes you've tried. Deflated Sharpe only penalizes trials inside this one run.",
+      "If you deploy, size small. Live uses fixed-lot sizing from the acceptor while the backtest models fixed-fraction, so the drawdown numbers here do not describe your real account.",
+    ],
+  },
+  {
+    id: "fragile",
+    tone: "amber",
+    label: "Fragile — has an edge but leans on something",
+    when: "At least half the measurable gates passed, but some failed or the decisive gates warned.",
+    why: "There is something here, but it depends on a condition you should identify before risking money on it.",
+    steps: () => [
+      "Read the Failing and Watch lists in the headline — they name exactly which gates are the problem, and each gate card explains itself in plain words.",
+      "If the plateau gate is the weak one, try Selection = plateau in the Rigor row. It picks the broadest region rather than the highest spike, at no extra cost.",
+      "If embargo and purge were 0, re-run with them set to about one trade's length. Training running right up against testing flatters a result.",
+      "If the weak gate is trade count, raise Min IS trades and accept that some windows will report no eligible config — that's the truth rather than a manufactured winner.",
+      "Size small and keep watching. Fragile is not a no, it's a not-yet.",
+    ],
+  },
+  {
+    id: "overfit",
+    tone: "loss",
+    label: "Likely Overfit / Luck",
+    when: "Fewer than half the measurable gates passed.",
+    why: "The result is far more consistent with curve-fitting or good luck than with a real, repeatable edge.",
+    steps: () => [
+      "Resist re-tuning until it turns green. Every extra attempt is more multiple testing, and the page cannot see how many you've run.",
+      "Make exactly one structural change — a smaller search space, a higher trade floor, or more IS bars — and re-run once.",
+      "If it's still red, kill it. Record it as an idea you tried, which raises the bar for whatever you test next.",
+    ],
+  },
+];
+
+const VERDICT_BY_ID = new Map(VERDICTS.map((v) => [v.id, v]));
+
+/** Look up a verdict's catalog entry. Returns null for unknown ids. */
+export function verdictById(id) {
+  return VERDICT_BY_ID.get(id) || null;
+}
+
+/**
  * What one out-of-sample window actually did: "green" | "red" | "flat".
  *
  * "flat" means the strategy never fired in that window. It is NOT a losing
@@ -414,41 +545,43 @@ export function computeWFGates(result) {
   const MIN_SCORED = 5;
   const decisiveUnknown = gates.filter((g) => DECISIVE.has(g.title) && g.light === "na");
 
-  let tone, headline;
+  // Each branch names its catalog entry (VERDICTS above) so the panel can show
+  // the matching "what to do next" and the guide can list every outcome.
+  let tone, headline, verdictId;
   if (tuningVeto) {
     // Evidence of failure beats absence of evidence — this fires even on a
     // sparse result, because a failed decisive gate is itself a measurement.
-    tone = "loss";
+    tone = "loss"; verdictId = "tuning_veto";
     headline = "🔴 The search found nothing — leaving the base params alone did better than re-optimizing";
   } else if (agreeVeto) {
-    tone = "loss";
+    tone = "loss"; verdictId = "agree_veto";
     headline = "🔴 The windows never agreed on a parameter set, and tuning did not prove it was worth it";
   } else if (agreeContradiction) {
     // Tuning helped, yet one param's picks look random. Usually an insensitive
     // knob rather than a failed search — worth investigating, not condemning.
-    tone = "amber";
+    tone = "amber"; verdictId = "mixed_signal";
     headline = `🟡 Mixed signal — re-optimizing did beat the untuned params, but the windows never agreed on ${worstParam ? `\`${worstParam}\`` : "at least one param"}. Check whether that knob does anything before trusting the consensus set.`;
   } else if (scored.length < MIN_SCORED) {
-    tone = "amber";
+    tone = "amber"; verdictId = "insufficient";
     headline = `🟡 Not enough to judge — only ${fmtInt(scored.length)} of ${fmtInt(gates.length)} gates could be measured on this run`;
   } else if (decisiveUnknown.length) {
     // Never green while the two gates that can invalidate everything else are
     // unmeasured — most often an older result with no control arm.
-    tone = "amber";
+    tone = "amber"; verdictId = "unverified";
     headline = `🟡 Unverified — ${decisiveUnknown.map((g) => `"${g.title}"`).join(" and ")} could not be measured, so the rest can't be trusted yet. Re-run to get a control arm.`;
   } else if (ratio >= 0.75 && fails.length === 0 && decisiveWarns.length === 0) {
-    tone = "profit";
+    tone = "profit"; verdictId = "looks_real";
     headline = "🟢 Looks Real — a deploy candidate worth the locked-holdout test";
   } else if (ratio >= 0.5) {
-    tone = "amber";
+    tone = "amber"; verdictId = "fragile";
     headline = "🟡 Fragile — has an edge but leans on something; size small and keep watching";
   } else {
-    tone = "loss";
+    tone = "loss"; verdictId = "overfit";
     headline = "🔴 Likely Overfit / Luck — most gates failed; kill or rework before trusting it";
   }
 
   return {
-    gates, tone, headline, fails, warns, ratio, stability,
+    gates, tone, headline, verdictId, fails, warns, ratio, stability,
     decisiveFails: gates.filter((g) => DECISIVE.has(g.title) && g.light === "fail").map((g) => g.title),
     vetoed: !!(tuningVeto || agreeVeto),
     worstParam,

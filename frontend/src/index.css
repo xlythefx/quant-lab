@@ -269,3 +269,35 @@ body {
 .preset-toast {
   animation: toast-in-out 2.4s ease forwards;
 }
+
+/* ── Modules page turn ──────────────────────────────────────────────────────
+   Direction-aware: Next slides in from the right, Previous from the left. The
+   header lands first; cards follow in a short stagger driven by --i (index).
+   `backwards` fill so no transform lingers after the animation (see .page-enter). */
+@keyframes mod-turn-next {
+  from { opacity: 0; transform: translateX(28px);  filter: blur(3px); }
+  to   { opacity: 1; transform: translateX(0);     filter: blur(0); }
+}
+@keyframes mod-turn-prev {
+  from { opacity: 0; transform: translateX(-28px); filter: blur(3px); }
+  to   { opacity: 1; transform: translateX(0);     filter: blur(0); }
+}
+@keyframes mod-card-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0)    scale(1); }
+}
+.mod-turn-next { animation: mod-turn-next 0.42s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.mod-turn-prev { animation: mod-turn-prev 0.42s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+.mod-card {
+  animation: mod-card-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(90ms + var(--i, 0) * 38ms);
+}
+/* thin progress line under the header that sweeps on every turn */
+@keyframes mod-sweep { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.mod-sweep {
+  transform-origin: left;
+  animation: mod-sweep 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mod-turn-next, .mod-turn-prev, .mod-card, .mod-sweep { animation: none; }
+}

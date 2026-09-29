@@ -14,8 +14,13 @@ import { fmtUsd, fmtNum } from "../../services/format.js";
  *   pointsByStrategy:  {id: [{time, value}, ...]}   // value = % of starting (100 baseline)
  *   startingCapital:   number (USD) — used for $ tooltip + axis caption
  *   scale:             "linear" | "log"
+ *   onSelectSeries:    (id) => void — OPTIONAL. When given, the chart runs in
+ *                      "focus" mode for crowded overlays: the line nearest the
+ *                      cursor is highlighted (others dim), the tooltip shows
+ *                      only that line, and clicking calls back with its id.
  */
-export default function EquityCurveV2({ strategies, pointsByStrategy, startingCapital = 100000, scale = "linear" }) {
+export default function EquityCurveV2({ strategies, pointsByStrategy, startingCapital = 100000, scale = "linear", onSelectSeries }) {
+  const focus = typeof onSelectSeries === "function";
   const wrapRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 280 });
   const [hover, setHover] = useState(null);
@@ -131,7 +136,9 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
     const x = e.clientX - rect.left;
     if (x < padding.l || x > size.w - padding.r) { setHover(null); return; }
     const t = tMin + ((x - padding.l) / innerW) * (tMax - tMin);
+    const y = e.clientY - rect.top;
     const valuesByStrategy = {};
+    let nearestId = null, nearestDy = Infinity;
     for (const s of strategies) {
       const pts = pointsByStrategy[s.id];
       if (!pts || !pts.length) continue;
@@ -142,10 +149,19 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
         else hi = mid;
       }
       valuesByStrategy[s.id] = pts[lo];
+      // Nearest line to the cursor (vertical pixel distance at this time).
+      if (focus && (!isLog || pts[lo].value > 0)) {
+        const dy = Math.abs(yOf(pts[lo].value) - y);
+        if (dy < nearestDy) { nearestDy = dy; nearestId = s.id; }
+      }
     }
-    setHover({ x, t, valuesByStrategy });
+    setHover({ x, t, valuesByStrategy, nearestId });
   };
   const onMouseLeave = () => setHover(null);
+  const onClick = () => { if (focus && hover?.nearestId) onSelectSeries(hover.nearestId); };
+  // In focus mode only the nearest line is listed in the tooltip.
+  const tooltipSeries = focus ? strategies.filter((s) => s.id === hover?.nearestId) : strategies;
+  const labelOf = (id) => strategies.find((s) => s.id === id)?.label || id;
 
   return (
     <div ref={wrapRef} className="relative w-full h-full">
@@ -159,7 +175,8 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
         </div>
       )}
 
-      <svg width={size.w} height={size.h} onMouseMove={onMouseMove} onMouseLeave={onMouseLeave} className="block">
+      <svg width={size.w} height={size.h} onMouseMove={onMouseMove} onMouseLeave={onMouseLeave} onClick={onClick}
+           className="block" style={focus && hover?.nearestId ? { cursor: "pointer" } : undefined}>
         {yTicks.map((tk, i) => (
           <g key={i}>
             <line
@@ -192,15 +209,20 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
           start
         </text>
 
-        {paths.map((p) => (
-          <path key={p.id} d={p.d} fill="none" stroke={p.color} strokeWidth={1.5} strokeDasharray={p.dash} />
-        ))}
+        {paths.map((p) => {
+          const dim = focus && hover?.nearestId && hover.nearestId !== p.id;
+          const hot = focus && hover?.nearestId === p.id;
+          return (
+            <path key={p.id} d={p.d} fill="none" stroke={p.color} strokeDasharray={p.dash}
+                  strokeWidth={hot ? 2.5 : 1.5} opacity={dim ? 0.2 : 1} />
+          );
+        })}
 
         {hover && hasData && (
           <g pointerEvents="none">
             <line x1={hover.x} x2={hover.x} y1={padding.t} y2={size.h - padding.b}
                   stroke="rgba(229,231,235,0.25)" strokeDasharray="2 3" />
-            {strategies.map((s) => {
+            {tooltipSeries.map((s) => {
               const pt = hover.valuesByStrategy[s.id];
               if (!pt || (isLog && !(pt.value > 0))) return null;
               return <circle key={s.id} cx={xOf(pt.time)} cy={yOf(pt.value)} r={3} fill={s.color} />;
@@ -215,7 +237,7 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
           style={{ left: Math.min(hover.x + 10, size.w - 170), top: padding.t + 4 }}
         >
           <div className="text-muted mb-1">{new Date(hover.t * 1000).toISOString().slice(0, 16).replace("T", " ")}Z</div>
-          {strategies.map((s) => {
+          {tooltipSeries.map((s) => {
             const pt = hover.valuesByStrategy[s.id];
             if (!pt) return null;
             const dollars = (pt.value / 100) * startingCapital;
@@ -223,6 +245,7 @@ export default function EquityCurveV2({ strategies, pointsByStrategy, startingCa
             return (
               <div key={s.id} className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full" style={{ background: s.color }} />
+                {focus && <span className="text-text font-semibold">{labelOf(s.id)}</span>}
                 <span className="text-text">{fmtNum(pt.value)}%</span>
                 <span className={pnl >= 0 ? "text-profit" : "text-loss"}>{fmtUsd(pnl)}</span>
               </div>

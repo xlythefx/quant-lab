@@ -41,6 +41,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
 
         <div className="flex items-center gap-1 ml-4">
           <NavLink href="#dashboardv2" active={view === "dashboardv2"}>Dashboard V2</NavLink>
+          <NavLink href="#multiasset"  active={view === "multiasset"}>Multi-Asset</NavLink>
           <NavDropdown label="Validation" items={VALIDATION_ITEMS} view={view} />
           <NavLink href="#marketlab"   active={view === "marketlab"}>Market Lab</NavLink>
           <NavLink href="#downloads"   active={view === "downloads"}>Downloads</NavLink>
@@ -48,6 +49,7 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
           <NavLink href="#strategies"  active={view === "strategies"}>Strategies</NavLink>
           <NavLink href="#livealerts"  active={view === "livealerts"}>Live Alerts</NavLink>
           <NavLink href="#settings"   active={view === "settings"}>Risk</NavLink>
+          <NavLink href="#modules"    active={view === "modules"}>Modules</NavLink>
         </div>
       </div>
 

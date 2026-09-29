@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import Dashboard from "./pages/Dashboard.jsx";
 import DashboardV2 from "./pages/DashboardV2.jsx";
+import MultiAsset from "./pages/MultiAsset.jsx";
+import Modules from "./pages/Modules.jsx";
 import Downloads from "./pages/Downloads.jsx";
 import Strategies from "./pages/Strategies.jsx";
 import StrategySandbox from "./pages/StrategySandbox.jsx";
@@ -78,6 +80,8 @@ export default function App() {
   if (view === "skills")       return <Skills />;
   if (view === "livealerts")   return <LiveAlerts />;
   if (view === "reportimport") return <ReportImport />;
+  if (view === "multiasset")   return <MultiAsset />;
+  if (view === "modules")      return <Modules />;
 
   if (view === "dashboard") {
     // Dashboard — page-enter fades it in; ripple overlay bursts on mount
