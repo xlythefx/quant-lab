@@ -1,0 +1,183 @@
+// =============================================================================
+// ICT Asia Range Breakout (Sandbox) — TradingView port
+// Mirror of backend/services/strategies/asia_range_breakout_sandbox.py
+//
+// THE RULE (range LOW 1000 / HIGH 2000; default sessions shown in PH = UTC+8)
+//   BOX     08:00-12:00 PH (00:00-04:00 UTC) -> the day's range box, frozen at noon.
+//   ENTRY   12:00-17:00 PH (04:00-09:00 UTC) only. A bar WICKS below 1000 and that
+//           SAME bar CLOSES back above 1000 -> buy next bar's open.
+//           A bar CLOSING at/below 1000 means the range did not hold: no fade today.
+//           One trade per UTC day. LONG ONLY.
+//   TP      the other side of the box (2000), pinned to the ENTRY box forever.
+//   STOP    a bar CLOSES back at/below 1000 -> exit. Armed only from the Nth candle
+//           after entry (stopAfterBars, default 5). Set 1 to arm it immediately.
+//   CUTOFF  20:00 UTC = 04:00 PH next morning -> close at market, whatever the P&L.
+//           04:00 PH is 20:00 UTC on the SAME UTC day as the entry, so the whole
+//           cycle lives inside one UTC day. Max hold 11-16 hours.
+//
+//   NO PRICE STOP BEFORE BAR N, by design. Between entry and bar N nothing closes
+//   the position at any price. On a 25x live account that is a real liquidation
+//   risk the backtest cannot simulate. Size accordingly.
+//
+//   No ATR anywhere: break depth is a fraction of the BOX HEIGHT and the stop is
+//   structural, so there is no lookback and no volatility unit.
+//
+// ---------------------------------------------------------------------------
+// ALERTS — the order COMMENT is the ACTION, on purpose
+// ---------------------------------------------------------------------------
+// This script carries no webhook inputs and no alert_message. The payload is
+// written by hand in TradingView's alert message box, which is why every order's
+// comment is set to the literal action string the acceptor expects:
+//
+//      entry -> "BUY"        every exit -> "EXIT_LONG"
+//
+// (Matches _ACTION_MAP in backend/services/live_alerter.py. This strategy is
+// long-only, so SELL and EXIT_SHORT never occur.)
+//
+// Alert setup:
+//   1. Create an alert on THIS strategy.
+//   2. Condition: "Order fills only".
+//   3. Message:
+//        {
+//          "secret": "binance_bot",
+//          "strategy": "ICT-Asia-SBX",
+//          "leverage": "25",
+//          "action": "{{strategy.order.comment}}",
+//          "symbol": "{{ticker}}"
+//        }
+//   4. Notifications -> Webhook URL -> your Flask acceptor endpoint.
+//
+// Trade-off worth knowing: because the comment must be exactly the action, the
+// TradingView trade list cannot also show WHY an exit fired (take-profit vs the
+// structural stop vs the time cutoff). Anything appended to the comment would be
+// interpolated straight into the JSON and break the payload. The Python side
+// still records the reason, and on the chart the plotted stop line and box make
+// the cause obvious.
+//
+// COSTS: none set here, deliberately — no commission, no slippage. These results
+// are gross. For a like-for-like comparison set fee_pct = 0 and slippage_bps = 0
+// in QuantLab's Risk Settings; the real account still pays exchange fees, so
+// treat both sides as an upper bound, not an expectation.
+//
+// PARITY NOTES (why this matches the QuantLab engine bar-for-bar)
+//   * process_orders_on_close = false -> fills at the NEXT bar's open, which is
+//     QuantLab's honest mode (look_ahead OFF). Do not switch this on.
+//   * pyramiding = 1, one action per bar: this strategy never exits and re-enters
+//     on the same bar.
+//   * The take-profit is pinned to the box the trade ENTERED on and never
+//     retargets. (The ORIGINAL asia_range_breakout.py does retarget overnight.)
+//   * The cutoff is resolved to an absolute timestamp at entry, not compared as a
+//     time-of-day each bar, so it is still correct if you set an hour that falls
+//     before the entry window (it then lands the next day).
+// =============================================================================
+
+//@version=6
+strategy("ICT Asia Range Breakout (Sandbox)",
+     shorttitle               = "ICT Asia RB (SBX)",
+     overlay                  = true,
+     pyramiding               = 1,
+     process_orders_on_close  = false,
+     initial_capital          = 100000,
+     default_qty_type         = strategy.percent_of_equity,
+     default_qty_value        = 3,
+     calc_on_every_tick       = false)
+
+// ---------------------------------------------------------------- inputs ----
+asiaSess  = input.session("0000-0400", "Asia range (UTC)",   group = "Sessions",
+     tooltip = "UTC window whose high/low form the day's range box. Default 0000-0400 UTC = 08:00-12:00 PH.")
+entrySess = input.session("0400-0900", "Entry window (UTC)", group = "Sessions",
+     tooltip = "UTC window where a sweep+reclaim may open a trade. Default 0400-0900 UTC = 12:00-17:00 PH.")
+
+brkDepth  = input.float(0.0, "Break depth (x box height)", minval = 0.0, maxval = 2.0, step = 0.05,
+     group = "Sweep",
+     tooltip = "How far below the box low the WICK must reach, as a fraction of the box height. " +
+               "0 = any poke past the line counts.")
+
+stopBars  = input.int(5, "Stop arms after N candles", minval = 1, maxval = 200,
+     group = "Stop",
+     tooltip = "Grace period. From this many bars after entry, a bar CLOSING back at/below the box low " +
+               "exits the trade. Before it, nothing can close the position at any price. 1 = arm immediately.")
+
+cutoffH   = input.int(20, "Force-exit hour (UTC)", minval = 0, maxval = 23,
+     group = "Stop",
+     tooltip = "Close any open position at market from this UTC hour. 20 = 04:00 PH the next morning.")
+
+// ------------------------------------------------------------------ clocks ----
+inAsia  = not na(time(timeframe.period, asiaSess,  "UTC"))
+inEntry = not na(time(timeframe.period, entrySess, "UTC"))
+
+// ------------------------------------------------------------------- state ----
+// curDay seeds at -1, NOT na: in Pine `x != na` evaluates to na (falsy), so an
+// na seed would silently skip the very first day's reset.
+var int   curDay     = -1
+var float boxHi      = na
+var float boxLo      = na
+var bool  longDead   = false
+var bool  doneToday  = false
+var int   pos        = 0        // 0 flat, 1 long (this script's model)
+var int   barsHeld   = 0
+var float entryBoxHi = na
+var float entryBoxLo = na
+var int   deadline   = 0        // absolute ms timestamp of the force exit
+
+// New UTC day -> reset the box and the invalidation flag.
+dayId = int(time / 86400000)
+if dayId != curDay
+    curDay    := dayId
+    boxHi     := na
+    boxLo     := na
+    longDead  := false
+    doneToday := false
+
+// Extend the Asia box while inside the Asia window.
+if inAsia
+    boxHi := na(boxHi) ? high : math.max(boxHi, high)
+    boxLo := na(boxLo) ? low  : math.min(boxLo, low)
+
+// ------------------------------------------------------------------- logic ----
+// Pine has no `continue`, so `acted` reproduces the Python's "one action per
+// bar": if a position is open, the bar is spent managing it, full stop.
+acted = false
+var float stopLvl = na
+
+if pos != 0
+    barsHeld := barsHeld + 1
+    armed    = barsHeld >= stopBars
+    stopLvl := armed ? entryBoxLo : na
+    // Reason is computed for the exit DECISION only — it must never reach the
+    // order comment, which has to stay exactly "EXIT_LONG" for the webhook JSON.
+    doExit   = close >= entryBoxHi or (armed and close <= entryBoxLo) or time >= deadline
+    if doExit
+        strategy.close("Long", comment = "EXIT_LONG")
+        pos := 0
+    acted := true
+
+if not acted
+    stopLvl := na
+    boxOk   = not na(boxHi) and not na(boxLo) and boxHi > boxLo
+    if not doneToday and not longDead and boxOk and not inAsia and inEntry
+        sweepLo = boxLo - brkDepth * (boxHi - boxLo)
+        if low < sweepLo and close > boxLo
+            strategy.entry("Long", strategy.long, comment = "BUY")
+            pos        := 1
+            barsHeld   := 0
+            entryBoxHi := boxHi
+            entryBoxLo := boxLo
+            // First occurrence of cutoffH:00 UTC strictly after this bar.
+            dayStart   = math.floor(time / 86400000) * 86400000
+            dl         = int(dayStart + cutoffH * 3600000)
+            deadline   := dl > time ? dl : dl + 86400000
+            doneToday  := true
+        else if close <= boxLo
+            // A close back outside means the range did not hold — no fade today.
+            longDead := true
+
+// ------------------------------------------------------------------- plots ----
+boxReady = not na(boxHi) and not na(boxLo) and not inAsia
+plot(boxReady ? boxHi : na, "Range top",    color = color.new(color.green, 0), linewidth = 2, style = plot.style_linebr)
+plot(boxReady ? boxLo : na, "Range bottom", color = color.new(color.red,   0), linewidth = 2, style = plot.style_linebr)
+plot(stopLvl, "Structural stop (armed)", color = color.new(color.red, 15), linewidth = 1, style = plot.style_linebr)
+
+// Shade the two windows so the setup is readable at a glance.
+bgcolor(inAsia  ? color.new(color.blue,   92) : na, title = "Asia window")
+bgcolor(inEntry ? color.new(color.orange, 94) : na, title = "Entry window")
