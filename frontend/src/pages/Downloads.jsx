@@ -88,27 +88,84 @@ const TABS = [
 ];
 
 /**
- * Crypto tab only: Binance spot vs USDT-M perpetuals. Perps are what the live
- * acceptor actually trades. They're stored under their own broker folder AND
- * with a ".P" suffix on the symbol (BTCUSDT.P — TradingView's convention) so a
- * perp file can never be shadowed by its spot twin when research pages load
- * by symbol alone.
+ * Crypto tab only: which exchange, and spot vs USDT-M perpetuals. Every
+ * combination is its own broker folder ("{exchange}" or "{exchange}_perp"),
+ * and the saved symbol carries both choices: a ".P" suffix for perps
+ * (BTCUSDT.P — TradingView's convention) and, off Binance, an exchange prefix
+ * (BYBIT.LTCUSDT.P — TradingView's BYBIT:LTCUSDT.P, with "." because Windows
+ * forbids ":" in file names). Research pages load by symbol alone, so without
+ * them a perp or Bybit/MEXC file would be shadowed by the Binance spot twin.
  */
-const CRYPTO_MARKETS = {
-  spot: {
-    label: "Spot",
-    broker: "binance",
-    source: "Binance Spot via CCXT",
-    note: "Pair-shaped tickers (BASE+QUOTE concatenated, e.g. BTCUSDT). Re-running merges into the existing file.",
+const MEXC_WINDOW =
+  "MEXC only keeps ~30 days of 1m and ~1 year of 5m/15m (1h and up go back years) — an older Start skips ahead to the first bar MEXC still has. Re-download regularly: the saved file keeps every bar even after MEXC drops it.";
+const CRYPTO_EXCHANGES = {
+  binance: {
+    label: "Binance",
+    prefix: "",
+    spot: {
+      source: "Binance Spot via CCXT",
+      note: "Pair-shaped tickers (BASE+QUOTE concatenated, e.g. BTCUSDT). Re-running merges into the existing file.",
+    },
+    perp: {
+      source: "Binance USDT-M Perps via CCXT",
+      note: "Perpetual futures — the market the live acceptor trades. Saved as SYMBOL.P (e.g. BTCUSDT.P) in its own folder, so it sits next to the spot file, never on top of it. History starts Sep 2019 for BTC, ~Sep 2020 for most alts.",
+    },
   },
-  perp: {
-    label: "Perps",
-    broker: "binance_perp",
-    source: "Binance USDT-M Perps via CCXT",
-    note: "Perpetual futures — the market the live acceptor trades. Saved as SYMBOL.P (e.g. BTCUSDT.P) in its own folder, so it sits next to the spot file, never on top of it. History starts Sep 2019 for BTC, ~Sep 2020 for most alts.",
+  bybit: {
+    label: "Bybit",
+    prefix: "BYBIT.",
+    spot: {
+      source: "Bybit Spot via CCXT",
+      note: "Saved as BYBIT.SYMBOL (e.g. BYBIT.LTCUSDT) in its own folder, so it never lands on the Binance file. LTCUSDT history starts Aug 2021.",
+    },
+    perp: {
+      source: "Bybit USDT Perps via CCXT",
+      note: "Saved as BYBIT.SYMBOL.P (e.g. BYBIT.LTCUSDT.P). LTCUSDT history starts Oct 2020, at every timeframe.",
+    },
+  },
+  mexc: {
+    label: "MEXC",
+    prefix: "MEXC.",
+    spot: {
+      source: "MEXC Spot via CCXT",
+      note: `Saved as MEXC.SYMBOL (e.g. MEXC.LTCUSDT). ${MEXC_WINDOW}`,
+    },
+    perp: {
+      source: "MEXC USDT Perps via CCXT",
+      note: `Saved as MEXC.SYMBOL.P (e.g. MEXC.LTCUSDT.P). Volume is converted from MEXC's contracts to coins. ${MEXC_WINDOW}`,
+    },
   },
 };
+const CRYPTO_MARKETS = [["spot", "Spot"], ["perp", "Perps"]];
 const PERP_SUFFIX = ".P";
+
+/** Small radio-style pill group (exchange / market pickers on the Crypto tab). */
+function Segmented({ label, options, value, onChange }) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="inline-flex rounded-md border border-line overflow-hidden text-[11px] font-mono"
+    >
+      {options.map(([id, text]) => (
+        <button
+          key={id}
+          type="button"
+          role="radio"
+          aria-checked={value === id}
+          onClick={() => onChange(id)}
+          className={`px-2.5 py-0.5 transition ${
+            value === id
+              ? "bg-accent-blue/20 text-accent-blue"
+              : "text-muted hover:text-text"
+          }`}
+        >
+          {text}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -164,20 +221,24 @@ export default function Downloads() {
     setSymbol(tab.defaultSymbol);
   }, [tab.id, tab.defaultSymbol]);
 
-  // Crypto tab: Spot vs Perps toggle. The toggle owns the ".P" suffix — the
-  // user types the bare pair and we derive the symbol that actually gets saved.
+  // Crypto tab: exchange + Spot/Perps pickers. They own the exchange prefix and
+  // the ".P" suffix — the user types the bare pair and we derive the symbol
+  // that actually gets saved.
+  const [cryptoExchange, setCryptoExchange] = useState("binance");
   const [cryptoMarket, setCryptoMarket] = useState("spot");
-  const market = tab.id === "crypto" ? CRYPTO_MARKETS[cryptoMarket] : null;
-  const isPerp = market === CRYPTO_MARKETS.perp;
-  const effectiveBroker = market ? market.broker : tab.broker;
+  const exchange = tab.id === "crypto" ? CRYPTO_EXCHANGES[cryptoExchange] : null;
+  const isPerp = !!exchange && cryptoMarket === "perp";
+  const market = exchange ? exchange[cryptoMarket] : null;
+  const effectiveBroker = exchange ? `${cryptoExchange}${isPerp ? "_perp" : ""}` : tab.broker;
   const effectiveSource = market ? market.source : tab.source;
   const effectiveNote = market ? market.note : tab.note;
   const effectiveSymbol = useMemo(() => {
     let s = symbol.trim().toUpperCase();
-    if (tab.id !== "crypto") return s;
+    if (!exchange) return s;
+    s = s.replace(/^(BYBIT|MEXC)\./, "");
     if (s.endsWith(PERP_SUFFIX)) s = s.slice(0, -PERP_SUFFIX.length);
-    return isPerp && s ? s + PERP_SUFFIX : s;
-  }, [symbol, tab.id, isPerp]);
+    return s ? exchange.prefix + s + (isPerp ? PERP_SUFFIX : "") : s;
+  }, [symbol, exchange, isPerp]);
 
   // Download state lives in a module-level store so the in-flight POST + socket
   // events survive navigation. useSyncExternalStore re-renders us on change.
@@ -278,16 +339,33 @@ export default function Downloads() {
   const PAGE_SIZE = 10;
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  // Crypto tab: exchange filter (spot + perp folders together, e.g. mexc + mexc_perp).
+  const [exchangeFilter, setExchangeFilter] = useState("all");
+  const exchangeOf = (d) => (d.broker || "binance").replace(/_perp$/, "");
+  const filterByExchange = tab.id === "crypto" && exchangeFilter !== "all";
 
   // Match on symbol, timeframe or broker so "check this asset exists" works
   // whether you type OPUSDT, 15m, or binance.
   const matchesQuery = (d, q) =>
     `${d.symbol} ${d.timeframe} ${d.broker || "binance"}`.toLowerCase().includes(q);
 
-  const filteredDatasets = useMemo(() => {
+  const queryMatches = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q ? tabDatasets.filter((d) => matchesQuery(d, q)) : tabDatasets;
   }, [tabDatasets, query]);
+
+  const filteredDatasets = useMemo(
+    () => (filterByExchange ? queryMatches.filter((d) => exchangeOf(d) === exchangeFilter) : queryMatches),
+    [queryMatches, filterByExchange, exchangeFilter],
+  );
+
+  const exchangeOptions = useMemo(() => {
+    const n = (id) => tabDatasets.filter((d) => exchangeOf(d) === id).length;
+    return [
+      ["all", `All ${tabDatasets.length}`],
+      ...Object.entries(CRYPTO_EXCHANGES).map(([id, x]) => [id, `${x.label} ${n(id)}`]),
+    ];
+  }, [tabDatasets]);
 
   // Same search run against the OTHER tabs, using each tab's own membership
   // rule — so a symbol cached under a different asset class still gets found
@@ -314,7 +392,7 @@ export default function Downloads() {
     () => filteredDatasets.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [filteredDatasets, safePage],
   );
-  useEffect(() => { setPage(1); }, [tab.id, query]);
+  useEffect(() => { setPage(1); }, [tab.id, query, exchangeFilter]);
 
   // Per-asset-class counts for the tab badges.
   const countsByClass = useMemo(() => {
@@ -418,30 +496,22 @@ export default function Downloads() {
             className="rounded-xl border border-line bg-bg-panel/60 p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end"
           >
             <div className="md:col-span-2">
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-1">
                 <label className="block text-xs uppercase tracking-wider text-muted">Symbol</label>
-                {market && (
-                  <div
-                    role="radiogroup"
-                    aria-label="Binance market"
-                    className="inline-flex rounded-md border border-line overflow-hidden text-[11px] font-mono"
-                  >
-                    {Object.entries(CRYPTO_MARKETS).map(([id, m]) => (
-                      <button
-                        key={id}
-                        type="button"
-                        role="radio"
-                        aria-checked={cryptoMarket === id}
-                        onClick={() => setCryptoMarket(id)}
-                        className={`px-2.5 py-0.5 transition ${
-                          cryptoMarket === id
-                            ? "bg-accent-blue/20 text-accent-blue"
-                            : "text-muted hover:text-text"
-                        }`}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
+                {exchange && (
+                  <div className="flex items-center gap-1.5">
+                    <Segmented
+                      label="Exchange"
+                      options={Object.entries(CRYPTO_EXCHANGES).map(([id, x]) => [id, x.label])}
+                      value={cryptoExchange}
+                      onChange={setCryptoExchange}
+                    />
+                    <Segmented
+                      label="Market"
+                      options={CRYPTO_MARKETS}
+                      value={cryptoMarket}
+                      onChange={setCryptoMarket}
+                    />
                   </div>
                 )}
               </div>
@@ -455,10 +525,10 @@ export default function Downloads() {
               <datalist id={`symbol-suggestions-${tab.id}`}>
                 {tab.suggested.map((s) => <option key={s} value={s} />)}
               </datalist>
-              {isPerp && effectiveSymbol && (
+              {exchange && effectiveBroker !== "binance" && effectiveSymbol && (
                 <div className="mt-1 text-[11px] font-mono text-muted">
                   saves as <span className="text-accent-blue">{effectiveSymbol}</span> · folder{" "}
-                  <span className="text-text">binance_perp</span>
+                  <span className="text-text">{effectiveBroker}</span>
                 </div>
               )}
             </div>
@@ -509,7 +579,7 @@ export default function Downloads() {
                   disabled={!symbol || !start || !end}
                   className="px-5 py-2 rounded-md bg-accent-grad text-white text-sm font-medium disabled:opacity-50"
                 >
-                  Download from {effectiveSource.split(" ")[0]}{isPerp ? " Perps" : ""}
+                  Download from {exchange ? exchange.label : effectiveSource.split(" ")[0]}{isPerp ? " Perps" : ""}
                 </button>
               )}
               <span className="text-xs text-muted">
@@ -689,29 +759,39 @@ export default function Downloads() {
           <div className="flex flex-wrap items-end justify-between gap-3 mb-3">
             <h2 className="text-sm uppercase tracking-wider text-muted">
               Cached {tab.label.toLowerCase()} datasets ({filteredDatasets.length}
-              {query.trim() && filteredDatasets.length !== tabDatasets.length && ` of ${tabDatasets.length}`})
+              {filteredDatasets.length !== tabDatasets.length && ` of ${tabDatasets.length}`})
             </h2>
-            <div className="relative">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search asset — symbol, TF or broker"
-                aria-label="Search cached datasets"
-                className="w-72 max-w-full pl-3 pr-8 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-xs focus:outline-none focus:border-accent-blue"
-              />
-              {query && (
-                <button
-                  onClick={() => setQuery("")}
-                  aria-label="Clear search"
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded text-muted hover:text-text hover:bg-bg-panel transition leading-none"
-                >
-                  ×
-                </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {tab.id === "crypto" && (
+                <Segmented
+                  label="Filter by exchange"
+                  options={exchangeOptions}
+                  value={exchangeFilter}
+                  onChange={setExchangeFilter}
+                />
               )}
+              <div className="relative">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search asset — symbol, TF or broker"
+                  aria-label="Search cached datasets"
+                  className="w-72 max-w-full pl-3 pr-8 py-1.5 rounded-md bg-bg-elev border border-line font-mono text-xs focus:outline-none focus:border-accent-blue"
+                />
+                {query && (
+                  <button
+                    onClick={() => setQuery("")}
+                    aria-label="Clear search"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded text-muted hover:text-text hover:bg-bg-panel transition leading-none"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          {query.trim() && filteredDatasets.length === 0 && (
+          {query.trim() && queryMatches.length === 0 && (
             <div className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/5 px-4 py-2.5 text-xs">
               <span className="font-mono text-amber-400">{query.trim().toUpperCase()}</span>
               <span className="text-muted"> is not cached under {tab.label}.</span>
@@ -738,7 +818,7 @@ export default function Downloads() {
             </div>
           )}
 
-          {query.trim() && filteredDatasets.length > 0 && otherTabHits.length > 0 && (
+          {query.trim() && queryMatches.length > 0 && otherTabHits.length > 0 && (
             <div className="mb-3 text-[11px] text-muted">
               Also matches in{" "}
               {otherTabHits.map((h, i) => (
@@ -771,9 +851,11 @@ export default function Downloads() {
                 {pageRows.length === 0 && (
                   <tr>
                     <td colSpan={8} className="px-4 py-6 text-center text-muted text-xs">
-                      {query.trim()
-                        ? `no ${tab.label.toLowerCase()} datasets match "${query.trim()}"`
-                        : `no ${tab.label.toLowerCase()} datasets yet — use the form above`}
+                      {filterByExchange
+                        ? `no ${CRYPTO_EXCHANGES[exchangeFilter].label} datasets${query.trim() ? ` match "${query.trim()}"` : " yet — use the form above"}`
+                        : query.trim()
+                          ? `no ${tab.label.toLowerCase()} datasets match "${query.trim()}"`
+                          : `no ${tab.label.toLowerCase()} datasets yet — use the form above`}
                     </td>
                   </tr>
                 )}

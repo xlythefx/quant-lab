@@ -6,7 +6,7 @@ import { useMemo, useRef, useState } from "react";
 import { fmtUsd, fmtNum, fmtPct, fmtInt, fmtDateLong } from "../../services/format.js";
 import { aiAnalyzeWalkForward, getPresetsFull, savePresets } from "../../services/api.js";
 import { fmtParamValue } from "../../services/paramFormat.js";
-import { computeWFGates, windowOutcome, verdictById, DECISIVE } from "../../services/wfVerdict.js";
+import { computeWFGates, windowOutcome, verdictById, READ_FIRST } from "../../services/wfVerdict.js";
 import { resolveDefaultParams } from "../dashboardv2/metrics.js";
 import { convertUtcHHmm, tzShort } from "../../services/timezone.js";
 import { useDisplayTz } from "../../services/useDisplayTz.js";
@@ -815,11 +815,10 @@ export function WFVerdictPanel({ result, strategies }) {
 
   // One computation, two renderers — the Overview banner (WFVerdict) reads the
   // exact same object, so the two can never disagree about the same run again.
-  const { gates, tone, headline, verdictId, worstParam, fails, warns, stability, flats } = computeWFGates(result);
+  const { gates, tone, headline, verdictId, fails, warns, stability, flats } = computeWFGates(result);
   // The catalog entry for THIS verdict — what triggers it and what to do next.
-  // Steps take the run's context so "mixed signal" can name the actual param.
   const verdict = verdictById(verdictId);
-  const steps = verdict ? verdict.steps({ worstParam }) : [];
+  const steps = verdict ? verdict.steps({}) : [];
 
   const toneClasses = {
     profit: "border-profit/40 bg-profit/5 text-profit",
@@ -883,17 +882,17 @@ export function WFVerdictPanel({ result, strategies }) {
       <RecommendedParams result={result} stability={stability} />
       <CurrentParams result={result} strategies={strategies} />
 
-      {/* The data-backed gates, most-decisive first */}
+      {/* The data-backed gates, the did-tuning-find-anything pair first */}
       <div className="space-y-2">
         <div className="text-[10px] uppercase tracking-wider text-muted">
-          Read these first — a red here overrides every gate below
+          Read these first — they say whether the tuning found anything real
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {gates.filter((g) => DECISIVE.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
+          {gates.filter((g) => READ_FIRST.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
         </div>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {gates.filter((g) => !DECISIVE.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
+        {gates.filter((g) => !READ_FIRST.has(g.title)).map((g) => <GateCard key={g.title} {...g} />)}
       </div>
 
       {/* When the edge lives — hour-of-day + calendar-month read */}

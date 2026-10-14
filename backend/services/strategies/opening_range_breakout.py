@@ -205,8 +205,11 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
             # First decisive close beyond the box locks the day (one trade/day).
             # Buffer is measured in box heights, so it scales with the day's range.
+            # The LAST entry bar can't open a trade: its fill would land on the next
+            # bar's open, after the session-close flatten already fired (exits run
+            # before entries), so the position would be carried overnight.
             thr = buf * box_h
-            for i in entry_idx:
+            for i in entry_idx[:-1]:
                 broke_up = close_a[i] > box_high + thr
                 broke_dn = close_a[i] < box_low - thr
                 if broke_up and long_on:
@@ -302,9 +305,17 @@ class OpeningRangeBreakoutStrategy(Strategy):
             state["locked"] = None
             state["done_today"] = False
 
-        tod = datetime.fromtimestamp(ts, tz=timezone.utc).time()
+        # Bar length isn't passed in, so learn it from the gap between closed candles
+        # (smallest gap seen, so a missing bar can't inflate it).
+        prev_ts = state.get("prev_ts")
+        if prev_ts is not None and ts > prev_ts:
+            gap = ts - prev_ts
+            state["bar_sec"] = min(gap, state.get("bar_sec") or gap)
+        state["prev_ts"] = ts
+        bar_sec = state.get("bar_sec")
 
-        def _in(sessions_cfg) -> bool:
+        def _in(sessions_cfg, at_ts: int) -> bool:
+            tod = datetime.fromtimestamp(at_ts, tz=timezone.utc).time()
             for cfg in (sessions_cfg or {}).values():
                 if not cfg or not cfg.get("enabled"):
                     continue
@@ -313,8 +324,14 @@ class OpeningRangeBreakoutStrategy(Strategy):
                     return True
             return False
 
-        in_or = _in(p["or_session"])
-        in_entry = _in(p["entry_session"])
+        in_or = _in(p["or_session"], ts)
+        in_entry = _in(p["entry_session"], ts)
+        # Last bar of the entry window = the NEXT bar falls outside it. This is the
+        # bar the backtest flattens on and refuses new entries on. Until bar_sec is
+        # known (first candle after start) we can't tell, and fall back to exiting
+        # on the first bar outside the window.
+        last_entry_bar = (in_entry and bar_sec is not None
+                          and not _in(p["entry_session"], ts + bar_sec))
 
         # Extend the opening-range box while inside the OR window.
         if in_or:
@@ -329,11 +346,13 @@ class OpeningRangeBreakoutStrategy(Strategy):
         pos = state.get("pos", 0)
 
         # ---- Manage an open position first: close beyond the far box edge, or the
-        # session-close flatten once we leave the entry window. ----
+        # session-close flatten on the last entry-window bar (same bar as the
+        # backtest; `not in_entry` is the fallback while bar_sec is unknown). ----
+        session_close = last_entry_bar or not in_entry
         if pos == 1:
             stop_lvl = state.get("stop_level", np.nan)
             stop_hit = np.isfinite(stop_lvl) and c < stop_lvl
-            if stop_hit or not in_entry:
+            if stop_hit or session_close:
                 state["pos"] = 0
                 return Signal(side="long", kind="exit", price=c, time=ts,
                               reason="range_stop" if stop_hit else "session_close")
@@ -341,7 +360,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
         if pos == -1:
             stop_lvl = state.get("stop_level", np.nan)
             stop_hit = np.isfinite(stop_lvl) and c > stop_lvl
-            if stop_hit or not in_entry:
+            if stop_hit or session_close:
                 state["pos"] = 0
                 return Signal(side="short", kind="exit", price=c, time=ts,
                               reason="range_stop" if stop_hit else "session_close")
@@ -354,8 +373,9 @@ class OpeningRangeBreakoutStrategy(Strategy):
         box_low = state.get("box_low")
         if box_high is None or box_low is None or box_high <= box_low:
             return None
-        # Only arm once the OR window is over (we're in the entry window).
-        if in_or or not in_entry:
+        # Only arm once the OR window is over (we're in the entry window), and never
+        # on its last bar — matches the backtest, no trade that can't be held.
+        if in_or or not in_entry or last_entry_bar:
             return None
 
         thr = float(p["break_buffer"]) * (box_high - box_low)

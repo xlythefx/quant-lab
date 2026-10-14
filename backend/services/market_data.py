@@ -36,17 +36,64 @@ log = logging.getLogger(__name__)
 # Current default broker. Future stages introduce capital.com / ig.com etc.
 BROKER_DEFAULT = "binance"
 
-# Binance USDT-M perpetuals live in their own namespace and carry a ".P"
-# suffix on the symbol (BTCUSDT.P — TradingView's convention). The suffix is
-# what keeps a perp dataset from colliding with its spot twin: every research
-# page loads by symbol only, and `find_parquet` prefers the spot folder, so a
-# same-named perp file would silently be shadowed by spot.
-BROKER_PERP = "binance_perp"
+# USDT-M perpetuals live in their own namespace (binance_perp, ...) and carry
+# a ".P" suffix on the symbol (BTCUSDT.P — TradingView's convention). The
+# suffix is what keeps a perp dataset from colliding with its spot twin: every
+# research page loads by symbol only, and `find_parquet` prefers the spot
+# folder, so a same-named perp file would silently be shadowed by spot.
 PERP_SUFFIX = ".P"
+
+# Other CCXT exchanges carry the exchange as a symbol PREFIX: BYBIT.LTCUSDT,
+# MEXC.LTCUSDT.P (TradingView's BYBIT:LTCUSDT.P, with "." because Windows
+# forbids ":" in file names). Same reason as ".P": `find_parquet` tries
+# data/binance/ first, so a bare LTCUSDT from Bybit would be silently shadowed
+# by the Binance file. A prefix (not a suffix) keeps ".P" last, so
+# is_perp_symbol works unchanged. Keep in sync with utils/validators.py.
+VENUE_PREFIXES = ("BYBIT", "MEXC")
+
+# data/{broker}/ folders fed by CCXT -> (venue prefix, perp?).
+CCXT_BROKERS = {
+    "binance":      (None, False),
+    "binance_perp": (None, True),
+    "bybit":        ("BYBIT", False),
+    "bybit_perp":   ("BYBIT", True),
+    "mexc":         ("MEXC", False),
+    "mexc_perp":    ("MEXC", True),
+}
+_BROKER_FOR = {key: broker for broker, key in CCXT_BROKERS.items()}
 
 
 def is_perp_symbol(symbol: str) -> bool:
     return symbol.upper().endswith(PERP_SUFFIX)
+
+
+def split_venue(symbol: str) -> tuple[Optional[str], str]:
+    """'MEXC.LTCUSDT.P' -> ('MEXC', 'LTCUSDT.P'); 'LTCUSDT' -> (None, 'LTCUSDT')."""
+    s = symbol.upper()
+    head, dot, rest = s.partition(".")
+    if dot and head in VENUE_PREFIXES:
+        return head, rest
+    return None, s
+
+
+def ccxt_broker_for(symbol: str) -> str:
+    """Which data/{broker}/ folder a CCXT-sourced symbol belongs in."""
+    venue, _ = split_venue(symbol)
+    return _BROKER_FOR[(venue, is_perp_symbol(symbol))]
+
+
+def ccxt_symbol_for(symbol: str, broker: str) -> str:
+    """The symbol as saved under `broker`: adds the venue prefix / ".P" the
+    broker implies (LTCUSDT + mexc_perp -> MEXC.LTCUSDT.P). Markers already on
+    the symbol are kept, so BTCUSDT.P + binance still means perp."""
+    b_venue, b_perp = CCXT_BROKERS[broker]
+    venue, rest = split_venue(symbol)
+    if venue and venue != b_venue:
+        raise ValueError(f"{symbol} is a {venue} symbol, not {broker}")
+    perp = b_perp or is_perp_symbol(rest)
+    bare = rest[: -len(PERP_SUFFIX)] if is_perp_symbol(rest) else rest
+    prefix = f"{b_venue}." if b_venue else ""
+    return f"{prefix}{bare}{PERP_SUFFIX if perp else ''}"
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -91,34 +138,90 @@ _migrate_flat_layout_to_broker_namespace()
 # `binance` = spot (api.binance.com); `binanceusdm` = USDT-M perps (fapi.binance.com).
 _exchange = ccxt.binance({"enableRateLimit": True, "timeout": 20000})
 _exchange_perp = ccxt.binanceusdm({"enableRateLimit": True, "timeout": 20000})
+# Bybit and MEXC: one client covers spot AND perps — the CCXT market name
+# (LTC/USDT vs LTC/USDT:USDT) picks which.
+_venue_clients = {
+    "BYBIT": ccxt.bybit({"enableRateLimit": True, "timeout": 20000}),
+    "MEXC": ccxt.mexc({"enableRateLimit": True, "timeout": 20000}),
+}
 
 
 def _client_for(symbol: str):
+    venue, _ = split_venue(symbol)
+    if venue:
+        return _venue_clients[venue]
     return _exchange_perp if is_perp_symbol(symbol) else _exchange
-
-
-def _broker_for_binance_symbol(symbol: str) -> str:
-    """Which data/{broker}/ folder a Binance-sourced symbol belongs in."""
-    return BROKER_PERP if is_perp_symbol(symbol) else BROKER_DEFAULT
 
 
 _QUOTES = ("USDT", "USDC", "BUSD", "BTC", "ETH", "FDUSD", "TUSD", "EUR", "TRY", "BNB")
 
-# Timeframes Binance/CCXT can fetch natively. Anything else (e.g. the bespoke
-# 6/10/12/23/46m used by the imported strategies) is fetched as 1m and resampled.
-_CCXT_TFS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"}
-
-# pandas resample rules for the non-native timeframes (lowercase 'min'/'h', 2.2+).
+# pandas resample rules for the bespoke timeframes (lowercase 'min'/'h', 2.2+).
+# Any other non-native timeframe (MEXC has no 3m/2h) falls back to "{N}min".
 _TF_PANDAS_RULE = {
     "6m": "6min", "10m": "10min", "12m": "12min", "23m": "23min", "46m": "46min",
 }
 
 
+def _fetch_tf_for(client, timeframe: str) -> str:
+    """The timeframe to fetch: `timeframe` itself if the exchange has it, else
+    the largest one it has that divides it evenly (resampled up afterwards).
+    Binance has no 6/10/12/23/46m; MEXC has no 3m or 2h — and 2h built from
+    MEXC's 1h keeps years of history, where 1m would keep only ~30 days."""
+    if timeframe in client.timeframes:
+        return timeframe
+    secs = TIMEFRAME_SECONDS[timeframe]
+    fits = [tf for tf in client.timeframes
+            if tf in TIMEFRAME_SECONDS and secs % TIMEFRAME_SECONDS[tf] == 0]
+    return max(fits, key=TIMEFRAME_SECONDS.get)
+
+
+def _require_market(client, pair: str, symbol: str) -> None:
+    """Fail fast on a pair the exchange doesn't list. Inside the page loop a
+    BadSymbol is an ExchangeError and would be retried forever."""
+    client.load_markets()
+    if pair not in client.markets:
+        raise ValueError(f"{client.name} has no market {pair} (asked for {symbol})")
+
+
+def _fetch_page(client, pair: str, timeframe: str, since: Optional[int] = None,
+                limit: int = 1000) -> list:
+    """client.fetch_ohlcv with volume in coins. CCXT passes perp volume through
+    in the exchange's own unit: MEXC counts contracts of 0.01 LTC, so its raw
+    number is 100x the coins traded. Binance and Bybit perps are 1 coin per
+    contract, and spot has no contract size — both no-ops."""
+    rows = client.fetch_ohlcv(pair, timeframe=timeframe, since=since, limit=limit)
+    size = client.market(pair).get("contractSize") or 1.0
+    if size != 1.0:
+        rows = [[*r[:5], r[5] * size if r[5] is not None else None] for r in rows]
+    return rows
+
+
+def _seek_first_bar(client, pair: str, timeframe: str, since: int, end_ms: int) -> Optional[int]:
+    """Earliest bar time >= `since`, or None if there's none up to `end_ms`.
+
+    MEXC keeps only a rolling window of short timeframes (~30 days of 1m,
+    ~1 year of 5m/15m) and answers an older `since` with an EMPTY page instead
+    of its first bar — which the download loop would read as "nothing here".
+    Binary search for where its data begins (~15 small requests)."""
+    step = TIMEFRAME_SECONDS[timeframe] * 1000 * 100  # one 100-bar probe page
+    hi = max(since, end_ms - step)
+    if not _fetch_page(client, pair, timeframe, since=hi, limit=100):
+        return None
+    lo = since  # known empty
+    while hi - lo > step:
+        mid = (lo + hi) // 2
+        if _fetch_page(client, pair, timeframe, since=mid, limit=100):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
+
 def _resample_ohlcv_ms(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
-    """Resample a 1-minute OHLCV frame (columns: ts_ms, open, high, low, close,
+    """Resample a finer OHLCV frame (columns: ts_ms, open, high, low, close,
     volume) up to `timeframe`. Returns [time (int seconds), open, high, low,
     close, volume] — the standard parquet contract."""
-    rule = _TF_PANDAS_RULE[timeframe]
+    rule = _TF_PANDAS_RULE.get(timeframe) or f"{TIMEFRAME_SECONDS[timeframe] // 60}min"
     d = df.copy()
     d.index = pd.to_datetime(d["ts_ms"], unit="ms", utc=True)
     agg = (
@@ -135,8 +238,9 @@ def _resample_ohlcv_ms(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
 def _to_ccxt_symbol(symbol: str) -> str:
     """BTCUSDT -> BTC/USDT (spot); BTCUSDT.P -> BTC/USDT:USDT (USDT-M perp).
     Splits on the longest known quote suffix. CCXT names a linear perp
-    "BASE/QUOTE:SETTLE" — plain "BTC/USDT" is NOT a market on binanceusdm."""
-    s = symbol.upper()
+    "BASE/QUOTE:SETTLE" — plain "BTC/USDT" is NOT a market on binanceusdm.
+    A venue prefix is dropped: MEXC.LTCUSDT.P -> LTC/USDT:USDT."""
+    _, s = split_venue(symbol)
     perp = is_perp_symbol(s)
     if perp:
         s = s[: -len(PERP_SUFFIX)]
@@ -186,7 +290,7 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 500) -> List[Dict]:
     """Recent N candles via CCXT REST. Used for initial chart paint."""
     pair = _to_ccxt_symbol(symbol)
     try:
-        rows = _client_for(symbol).fetch_ohlcv(pair, timeframe=timeframe, limit=limit)
+        rows = _fetch_page(_client_for(symbol), pair, timeframe, limit=limit)
     except (ccxt.NetworkError, ccxt.ExchangeError) as e:
         log.error("fetch_ohlcv failed for %s %s: %s", symbol, timeframe, e)
         raise
@@ -232,13 +336,14 @@ def ensure_parquet(symbol: str, timeframe: str, force: bool = False) -> Dict:
     Ensure a Parquet file with ~BACKTEST_LOOKBACK_DAYS of history exists.
     Returns metadata: {cached, rows, path}.
     """
-    path = parquet_path(symbol, timeframe, _broker_for_binance_symbol(symbol))
+    path = parquet_path(symbol, timeframe, ccxt_broker_for(symbol))
     if not force and _is_fresh(path):
         df = pd.read_parquet(path)
         return {"cached": True, "rows": len(df), "path": path}
 
     pair = _to_ccxt_symbol(symbol)
     client = _client_for(symbol)
+    _require_market(client, pair, symbol)
     tf_seconds = TIMEFRAME_SECONDS[timeframe]
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - BACKTEST_LOOKBACK_DAYS * 86400 * 1000
@@ -250,9 +355,7 @@ def ensure_parquet(symbol: str, timeframe: str, force: bool = False) -> Dict:
 
     while since < end_ms:
         try:
-            rows = client.fetch_ohlcv(
-                pair, timeframe=timeframe, since=since, limit=page_limit
-            )
+            rows = _fetch_page(client, pair, timeframe, since=since, limit=page_limit)
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
             log.error("Pagination failed at since=%s: %s", since, e)
             time.sleep(2)
@@ -305,10 +408,11 @@ def download_range(
 
     pair = _to_ccxt_symbol(symbol)
     client = _client_for(symbol)
-    broker = _broker_for_binance_symbol(symbol)
-    # Binance can't fetch odd intervals (6/10/12/23/46m) — pull 1m and resample.
-    native = timeframe in _CCXT_TFS
-    fetch_tf = timeframe if native else "1m"
+    broker = ccxt_broker_for(symbol)
+    _require_market(client, pair, symbol)
+    # Odd intervals the exchange lacks are pulled finer and resampled.
+    fetch_tf = _fetch_tf_for(client, timeframe)
+    native = fetch_tf == timeframe
     tf_seconds = TIMEFRAME_SECONDS[fetch_tf]
     page_limit = 1000
 
@@ -321,14 +425,22 @@ def download_range(
             log.info("download_range cancelled at since=%s", since)
             break
         try:
-            rows = client.fetch_ohlcv(pair, timeframe=fetch_tf, since=since, limit=page_limit)
+            rows = _fetch_page(client, pair, fetch_tf, since=since, limit=page_limit)
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
             log.warning("page failed since=%s: %s — retrying", since, e)
             time.sleep(2)
             continue
 
         if not rows:
-            break
+            if new_rows:
+                break  # ran past the newest bar
+            # Nothing yet: `since` may predate a rolling-window exchange's history.
+            first = _seek_first_bar(client, pair, fetch_tf, since, end_ms)
+            if first is None or first <= since:
+                break
+            log.info("%s has no bars before %s — skipping ahead", client.name, first)
+            since = first
+            continue
 
         # Trim rows that exceed end_ms.
         rows = [r for r in rows if r[0] <= end_ms]
@@ -363,14 +475,14 @@ def download_range(
                 "first_time": int(existing["time"].min()) if len(existing) else None,
                 "last_time": int(existing["time"].max()) if len(existing) else None,
             }
-        raise RuntimeError("Binance returned no candles for that range")
+        raise RuntimeError(f"{client.name} returned no candles for that range")
 
     if native:
         new_df["time"] = (new_df["ts_ms"] // 1000).astype("int64")
         new_df = new_df[["time", "open", "high", "low", "close", "volume"]]
     else:
         # Trim to the requested window before resampling so partial edge bars
-        # don't leak in, then aggregate 1m -> target timeframe.
+        # don't leak in, then aggregate fetch_tf -> target timeframe.
         new_df = new_df[new_df["ts_ms"] <= end_ms]
         new_df = _resample_ohlcv_ms(new_df, timeframe)
 
@@ -383,7 +495,9 @@ def download_range(
     else:
         merged = new_df
 
-    merged = merged.drop_duplicates(subset=["time"]).sort_values("time").reset_index(drop=True)
+    # keep="last": freshly fetched bars win, so a bar that was still forming at
+    # the previous download's end gets replaced by its finished version.
+    merged = merged.drop_duplicates(subset=["time"], keep="last").sort_values("time").reset_index(drop=True)
     merged.to_parquet(path, index=False)
     _invalidate_datasets_cache()
 

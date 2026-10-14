@@ -118,15 +118,15 @@ time ─────────────────────────
             <h4 className="text-text font-semibold mb-1">The verdict — how it&apos;s decided</h4>
             <p className="text-muted leading-relaxed">
               The Verdict tab runs {GATE_ORDER.length} gates over the result and boils them down to one
-              headline. The first two are <span className="text-text">decisive</span> — they can veto
-              everything else, because if the search found nothing, a green plateau or a green OOS rate is
-              describing noise:
+              headline. Read the first two first — they say whether the tuning found anything real:
             </p>
             <ul className="list-disc pl-5 mt-2 space-y-1 text-muted leading-relaxed">
               <li>
                 <span className="text-text">Tuning beat not-tuning</span> — the control arm. Every window is run a
-                second time with the untuned base params. If leaving them alone did better, the optimizer is
-                costing you money and nothing below can rescue it.
+                second time with your fixed base params. If those did better, this gate goes amber, never red: if
+                the base params came from an earlier walk-forward recommendation on the same data, they have already
+                seen these windows and beating them is expected. If they are the untouched built-in defaults, take
+                the warning seriously.
               </li>
               <li>
                 <span className="text-text">Windows agree on the params</span> — how far apart the windows&apos;
@@ -135,11 +135,10 @@ time ─────────────────────────
               </li>
             </ul>
             <p className="text-muted leading-relaxed mt-2">
-              The other {GATE_ORDER.length - 2} — trade floor, plateau, OOS consistency, trade count, significance,
-              buy-and-hold, deflated Sharpe, concentration, decay — each vote. The headline is then chosen in
-              strict priority order: a failed decisive gate wins outright, then the mixed case, then &ldquo;too
-              little measured&rdquo;, and only after all of that does the pass ratio decide between green, amber
-              and red.
+              All {GATE_ORDER.length} gates vote — none can veto. A pass counts 1, a warning ½, a fail 0, averaged
+              over the gates that could be measured. Fewer than 5 measured means &ldquo;not enough to judge&rdquo;;
+              otherwise 75%+ with no fails is green, 50%+ is amber, and anything lower is red. Any single fail
+              still keeps a run off green.
             </p>
           </section>
 

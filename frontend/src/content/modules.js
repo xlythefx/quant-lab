@@ -963,10 +963,10 @@ export const TUTORIALS = [
       },
       {
         title: "Read the Verdict tab FIRST",
-        do: "Ignore the equity curve for now. The Verdict tab runs every gate and gives one headline. Read the two decisive gates before anything else.",
-        look: "'Tuning beat not-tuning' (the control arm: every window re-run with untuned base params) and 'Windows agree on the params' (how far apart each window's picks landed, as a fraction of the search range — 28.9% is what random guessing gives).",
-        good: "Both decisive gates green, then a mostly-green list below them.",
-        bad: "Tuning LOST to not-tuning: the optimizer is costing you money — the strategy may still be fine at base params, but the search is worthless. Windows disagree: the 'best' params are noise; nothing below can rescue that.",
+        do: "Ignore the equity curve for now. The Verdict tab runs every gate and gives one headline. Read the two 'read these first' gates before anything else — they say whether the tuning found anything real.",
+        look: "'Tuning beat not-tuning' (the control arm: every window re-run with your fixed base params) and 'Windows agree on the params' (how far apart each window's picks landed, as a fraction of the search range — 28.9% is what random guessing gives).",
+        good: "Both read-first gates green, then a mostly-green list below them.",
+        bad: "Tuning LOST to your base params: if those params are an earlier walk-forward's recommendation, that's expected (they've seen this data) and the gate only warns; if they're untouched defaults, the search isn't finding anything. Windows disagree: for at least one param the 'best' value is noise — check whether that param does anything.",
       },
       {
         title: "Overview — the stitched OOS curve",

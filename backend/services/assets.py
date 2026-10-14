@@ -140,8 +140,9 @@ def _split_crypto_pair(symbol: str) -> tuple[str, str]:
     """BTCUSDT → ('BTC', 'USDT'). Splits on the longest matching quote suffix.
     Falls back to (symbol[:-4], symbol[-4:]) if no known quote matches."""
     s = symbol.upper()
-    if s.endswith(".P"):  # Binance perp suffix (BTCUSDT.P) — not part of the pair
+    if s.endswith(".P"):  # perp suffix (BTCUSDT.P) — not part of the pair
         s = s[:-2]
+    s = s.rpartition(".")[2]  # exchange prefix (MEXC.LTCUSDT) — nor is this
     for q in sorted(_CRYPTO_QUOTES, key=len, reverse=True):
         if s.endswith(q) and len(s) > len(q):
             return s[: -len(q)], q

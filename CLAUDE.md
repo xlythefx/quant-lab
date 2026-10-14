@@ -203,7 +203,12 @@ closes the long in one order, where QuantLab would emit EXIT_LONG then SELL.
 - `market_data.load_parquet(symbol, timeframe, broker=None)` returns a DataFrame with columns
   `[time (int seconds), open, high, low, close, volume]`. Raises `FileNotFoundError` if not
   cached — `ensure_parquet(symbol, timeframe)` downloads ~2yr (Binance/CCXT) first.
-- Cached crypto symbols: `BTCUSDT`, `FETUSDT` at `1m/5m/15m/1h`. CME futures (ES/NQ/CL/GC) via
+- Cached crypto symbols: `BTCUSDT`, `FETUSDT` at `1m/5m/15m/1h`.
+- Crypto exchanges (all CCXT, Downloads → Crypto): Binance `LTCUSDT` / `LTCUSDT.P`, Bybit
+  `BYBIT.LTCUSDT[.P]`, MEXC `MEXC.LTCUSDT[.P]`, each in `data/{exchange}[_perp]/`. The
+  prefix/suffix is load-bearing — `find_parquet` loads by symbol and tries `data/binance/`
+  first, so a bare name would be shadowed. MEXC's API keeps only ~30 days of 1m and ~1 year
+  of 5m/15m: re-download regularly so the saved file keeps growing past that window. CME futures (ES/NQ/CL/GC) via
   Databento need `DATABENTO_API_KEY` in `backend/.env`.
 
 ## Regime detection
