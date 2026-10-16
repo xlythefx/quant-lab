@@ -30,18 +30,12 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
   const [problems, setProblems] = useState([]);   // server-side validation messages
   const [urlPresets, setUrlPresets] = useState([]);
   const [secretPresets, setSecretPresets] = useState([]);
-  const [preview, setPreview] = useState(null);      // {payloads, secret_masked} | null
-  const [previewErr, setPreviewErr] = useState(null);
-  const [previewAction, setPreviewAction] = useState("BUY");
 
   useEffect(() => {
     if (!open) return;
     setErr(null);
     setProblems([]);
     setConfirming(false);
-    setPreview(null);
-    setPreviewErr(null);
-    setPreviewAction("BUY");
     if (isEdit) {
       setDraft({
         name: editing.name || "",
@@ -132,21 +126,11 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
     return null;
   };
 
-  // Fetch the REAL payload the backend will POST when we open the confirm screen.
   const goConfirm = () => {
     const v = validate();
     if (v) { setErr(v); return; }
     setErr(null);
-    setPreview(null);
-    setPreviewErr(null);
     setConfirming(true);
-    previewPayload({
-      strategy_alias: draft.strategy_alias,
-      leverage: Number(draft.leverage) || 1,
-      symbol: draft.symbol,
-    })
-      .then(setPreview)
-      .catch((e) => setPreviewErr(e?.response?.data?.error || e.message || "preview failed"));
   };
 
   const arm = async () => {
@@ -191,7 +175,16 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
 
   const title = isEdit ? "Edit Deployment" : "Deploy Strategy";
   const primaryLabel = isEdit ? "SAVE…" : "DEPLOY…";
-  const previewJson = preview?.payloads?.[previewAction];
+  // Same live preview on the form and on the confirm screen.
+  const payloadPreview = draft && (
+    <PayloadPreview
+      alias={draft.strategy_alias}
+      leverage={draft.leverage}
+      symbol={draft.symbol}
+      template={editing?.payload_template}
+      url={draft.webhook_url || (isEdit ? (editing.webhook_hint || "unchanged") : "")}
+    />
+  );
 
   return (
     <div className="lt-modal-overlay" onMouseDown={onClose}>
@@ -326,6 +319,8 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
                 </label>
               </div>
 
+              {payloadPreview}
+
               {strat && (
                 <div style={{ marginTop: 14, borderTop: "1px solid var(--lt-border)", paddingTop: 10 }}>
                   <ParamForm
@@ -372,28 +367,7 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
                 <span className="lt-muted">STATE</span><span>{draft.enabled ? "RUNNING immediately" : "PAUSED (arm later)"}</span>
               </div>
 
-              {/* EXACT JSON body, straight from the backend build_payload() */}
-              <div style={{ marginTop: 12, borderTop: "1px solid var(--lt-border)", paddingTop: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                  <span className="lt-field-label" style={{ marginRight: "auto" }}>
-                    Webhook payload (exact JSON — secret masked)
-                  </span>
-                  {PREVIEW_ACTIONS.map((a) => (
-                    <button key={a} className={`lt-btn small ${a === previewAction ? "cyan" : ""}`}
-                            onClick={() => setPreviewAction(a)}>{a}</button>
-                  ))}
-                </div>
-                {previewErr ? (
-                  <div className="lt-warn-banner" style={{ position: "static" }}>⚠ {previewErr}</div>
-                ) : previewJson ? (
-                  <pre className="lt-mono" style={{ margin: 0, padding: "8px 10px", fontSize: 11, background: "var(--lt-chrome)",
-                        border: "1px solid var(--lt-border)", borderRadius: 4, overflowX: "auto", whiteSpace: "pre" }}>
-{JSON.stringify(previewJson, null, 2)}
-                  </pre>
-                ) : (
-                  <div className="lt-muted lt-mono" style={{ fontSize: 11 }}>building preview…</div>
-                )}
-              </div>
+              {payloadPreview}
 
               {draft.account === "live" && (
                 <div className="lt-warn-banner" style={{ position: "static", marginTop: 12 }}>
@@ -414,6 +388,57 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Live webhook preview: the EXACT JSON body for each action, built by the backend's
+ * real build_payload() (so it can't drift from what actually fires), refreshed a
+ * moment after the alias / leverage / symbol change. The secret is always masked.
+ */
+function PayloadPreview({ alias, leverage, symbol, template, url }) {
+  const [action, setAction] = useState("BUY");
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    const t = setTimeout(() => {
+      previewPayload({ strategy_alias: alias, leverage: Number(leverage) || 1, symbol, payload_template: template })
+        .then((d) => { if (alive) { setData(d); setError(null); } })
+        .catch((e) => { if (alive) setError(e?.response?.data?.error || e.message || "preview failed"); });
+    }, 300);
+    return () => { alive = false; clearTimeout(t); };
+  }, [alias, leverage, symbol, template]);
+
+  const json = data?.payloads?.[action];
+  return (
+    <div style={{ marginTop: 12, borderTop: "1px solid var(--lt-border)", paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+        <span className="lt-field-label" style={{ marginRight: "auto" }}>
+          Webhook payload (exact JSON — secret masked)
+        </span>
+        {PREVIEW_ACTIONS.map((a) => (
+          <button key={a} type="button" className={`lt-btn small ${a === action ? "cyan" : ""}`}
+                  onClick={() => setAction(a)}>{a}</button>
+        ))}
+      </div>
+      {url && (
+        <div className="lt-mono lt-muted" style={{ fontSize: 10, marginBottom: 4, wordBreak: "break-all" }}>
+          POST → {url}
+        </div>
+      )}
+      {error ? (
+        <div className="lt-warn-banner" style={{ position: "static" }}>⚠ {error}</div>
+      ) : json ? (
+        <pre className="lt-mono" style={{ margin: 0, padding: "8px 10px", fontSize: 11, background: "var(--lt-chrome)",
+              border: "1px solid var(--lt-border)", borderRadius: 4, overflowX: "auto", whiteSpace: "pre" }}>
+{JSON.stringify(json, null, 2)}
+        </pre>
+      ) : (
+        <div className="lt-muted lt-mono" style={{ fontSize: 11 }}>building preview…</div>
+      )}
     </div>
   );
 }
