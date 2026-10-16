@@ -527,13 +527,16 @@ class DonchianBreakoutStrategy(Strategy):
         out["donch_low"]  = f.chan_low
         return out
 
+    def warmup_bars(self) -> int:
+        # Warm up enough sessions for the 100-day SMA + a few weeks for vf2.
+        return (int(self.p["sma_daily_length"]) + 6) * 24
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         if not bool(candle.get("isClosed", False)):
             return None
         p = self.p
-        # Warm up enough sessions for the 100-day SMA + a few weeks for vf2.
-        warmup = (int(p["sma_daily_length"]) + 6) * 24
+        warmup = self.warmup_bars()
 
         buf = state.setdefault("buf", [])
         buf.append({

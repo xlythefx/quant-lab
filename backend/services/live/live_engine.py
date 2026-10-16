@@ -73,13 +73,16 @@ def _notional_estimate(rule: dict) -> float:
         cap = float(risk_config.get().get("starting_capital", 100_000.0))
     except Exception:
         cap = 100_000.0
-    params = rule.get("params") or {}
+    # risk_pct is a PERCENT in every strategy schema (3.0 = 3%), same as the
+    # backtest. Rule params are sparse overrides, so read the merged value.
     try:
-        risk_pct = float(params.get("risk_pct", 0.10) or 0.10)
-    except (TypeError, ValueError):
-        risk_pct = 0.10
+        from services.strategy_registry import get_strategy_class
+        strat = get_strategy_class(rule.get("strategy_id") or "")(rule.get("params") or {})
+        risk_pct = float(strat.p.get("risk_pct", 3.0) or 3.0)
+    except Exception:
+        risk_pct = 3.0
     lev = max(1, int(rule.get("leverage") or 1))
-    return cap * risk_pct * lev
+    return cap * (risk_pct / 100.0) * lev
 
 
 # ---- evaluation + signals -------------------------------------------------------

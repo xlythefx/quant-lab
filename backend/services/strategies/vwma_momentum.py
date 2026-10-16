@@ -193,12 +193,16 @@ class VwmaMomentumStrategy(Strategy):
         out["bar_exit_short"] = exit_short_cond.fillna(False).astype(bool)
         return out
 
+    def warmup_bars(self) -> int:
+        p = self.p
+        return max(int(p["vwma_length"]), int(p["rsi_length"]), int(p["vol_length"])) * 4
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         if not bool(candle.get("isClosed", False)):
             return None
         p = self.p
-        warmup = max(int(p["vwma_length"]), int(p["rsi_length"]), int(p["vol_length"])) * 4
+        warmup = self.warmup_bars()
         buf = state.setdefault("buf", [])
         buf.append({
             "time": int(candle["time"]),

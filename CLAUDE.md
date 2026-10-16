@@ -98,8 +98,17 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
   live_analytics, wamp_positions, orderbook_hub, live_feed) + `routes/live_terminal_routes.py`
   (`/api/live/*`).
 - **Safety:** global DISARM ALL blocks every webhook POST; deploy modal confirms before
-  arming (Demo default; Live shows a red warning); test signals default to dry-run;
-  a (rule, bar, action) fires at most once; `pyramiding` locked to 1 live (parity).
+  arming (Live default — the receiving accounts are demo; Live shows a red warning); test
+  signals default to dry-run (both test endpoints); a (rule, bar, action) fires at most once.
+- **Live mode hardening (Oct 16, 2026):** `alerts_daemon` is the ONLY webhook sender (the
+  old browser LiveRunner only draws signals). Live never replays history — no real feed ⇒
+  refused (`live_symbols.is_live_eligible`: TRADING Binance spot pairs from exchangeInfo).
+  Runners warm up from Binance REST, force flat on a fresh start, persist state per rule in
+  `data/live_state/` (restart keeps the open position), and on catch-up send stale EXITS
+  but drop stale ENTRIES ("missed (stale)" in the activity log). Deployments are validated
+  server-side (`services/live/rule_validation.py`); status is honest (RUNNING / STARTING /
+  STALE / ERROR / PAUSED). Webhook retries happen only when the request never connected
+  (or 502/503) — never on timeouts. Tests: `cd backend; python -m pytest tests`.
 - **Positions / Risk / Reconciliation** read the WAMP `sinegu_db` READ-ONLY
   (`WAMP_DB_*` in backend/.env, defaults localhost/root/''/sinegu_db) and fall back to
   labeled SIMULATED when WAMP is down. Alerts are stored in QuantLab only.

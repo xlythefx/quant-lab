@@ -484,16 +484,20 @@ class LunarStrategy(Strategy):
         out["phase"]            = phase
         return out
 
+    def warmup_bars(self) -> int:
+        # Phase lags + ATR are now SESSION-based; warm up enough whole sessions
+        # (~24 bars each) to cover the far lag and let Wilder ATR converge
+        # (3x the ATR window) so live matches the vectorized backtest closely.
+        p = self.p
+        warmup_sessions = max(int(p["phase_lag_far"]) + 3, int(p["atr_period"]) * 3)
+        return warmup_sessions * 24
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         if not bool(candle.get("isClosed", False)):
             return None
         p      = self.p
-        # Phase lags + ATR are now SESSION-based; warm up enough whole sessions
-        # (~24 bars each) to cover the far lag and let Wilder ATR converge
-        # (3x the ATR window) so live matches the vectorized backtest closely.
-        warmup_sessions = max(int(p["phase_lag_far"]) + 3, int(p["atr_period"]) * 3)
-        warmup = warmup_sessions * 24
+        warmup = self.warmup_bars()
 
         buf = state.setdefault("buf", [])
         buf.append({

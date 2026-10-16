@@ -460,6 +460,24 @@ class VwmaReversionStrategy(Strategy):
         rd = RegimeDetector(p["regime_adx_period"], p["regime_adx_threshold"])
         return rd.last_adx(df) < p["regime_adx_threshold"]
 
+    def warmup_bars(self) -> int:
+        p = self.p
+        warmup = max(p["vwma_length"], p["rsi_length"], p["atr_length"]) * 4
+        # The 5-regime labeler needs enough trailing history for its volatility
+        # lookback, or the live label won't match the backtest label.
+        if p.get("use_regime") and _regime_method(p) == "five":
+            rp_live = _regime_params({
+                "adx_period": p["regime_adx_period"],
+                "adx_trend_thresh": p["regime_adx_threshold"],
+            })
+            warmup = max(warmup, int(rp_live["vol_lookback"]) + int(rp_live["vol_window"]))
+        return int(warmup)
+
+    def reset_position(self, state: dict) -> None:
+        # Same fields on_candle's _flat() clears (count would otherwise cap adds).
+        state["pos"] = 0; state["count"] = 0
+        state["base_entry"] = np.nan; state["base_atr"] = np.nan
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """
@@ -484,15 +502,7 @@ class VwmaReversionStrategy(Strategy):
             return None  # only act on closed bars
 
         p = self.p
-        warmup = max(p["vwma_length"], p["rsi_length"], p["atr_length"]) * 4
-        # The 5-regime labeler needs enough trailing history for its volatility
-        # lookback, or the live label won't match the backtest label.
-        if p.get("use_regime") and _regime_method(p) == "five":
-            rp_live = _regime_params({
-                "adx_period": p["regime_adx_period"],
-                "adx_trend_thresh": p["regime_adx_threshold"],
-            })
-            warmup = max(warmup, int(rp_live["vol_lookback"]) + int(rp_live["vol_window"]))
+        warmup = self.warmup_bars()
         buf = state.setdefault("buf", [])
         buf.append({
             "time": int(candle["time"]),

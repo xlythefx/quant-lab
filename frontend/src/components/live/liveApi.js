@@ -9,7 +9,9 @@ import { api } from "../../services/api.js";
 // ---- phase 03: market snapshots -------------------------------------------
 export async function getLiveInstruments() {
   const { data } = await api.get("/api/live/instruments");
-  return data; // {instruments:[{symbol, venue, cls, label, priceDecimals}], timeframes:[..]}
+  // {instruments:[{symbol, venue, cls, label, priceDecimals}], timeframes:[..],
+  //  deploy_symbols:[every live-eligible Binance USDT spot pair]}
+  return data;
 }
 
 export async function getLiveCandles({ symbol, timeframe, limit = 300 }) {

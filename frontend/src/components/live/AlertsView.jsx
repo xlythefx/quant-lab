@@ -389,6 +389,7 @@ export default function AlertsView({ account = "demo" }) {
                     signal: "lt-cyan", webhook_ok: "lt-green", webhook_fail: "lt-red",
                     webhook_blocked: "lt-amber", killswitch: "lt-red", killed: "lt-red",
                     armed: "lt-green", paused: "lt-muted", deployed: "lt-green", test_signal: "lt-amber",
+                    missed: "lt-amber",
                   }[a.kind] || "lt-muted";
                   return (
                     <tr key={a.id}>

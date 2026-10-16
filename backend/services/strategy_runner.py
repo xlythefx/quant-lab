@@ -50,8 +50,11 @@ def _emit_equity(strategy_id: str, sid: str, ts: int, equity: float,
     event_bus.emit("equity_update", payload, to=sid)
 
 
-def _emit_signal(strategy_id: str, sid: str, sig: Signal, *,
-                 symbol: str | None = None, mode: str | None = None):
+def _emit_signal(strategy_id: str, sid: str, sig: Signal):
+    """Chart/marker event for the browser only. This runner NEVER sends
+    webhooks — the headless alerts_daemon is the one and only sender, so a
+    browser tab in live mode can't double-fire (or bypass the idempotency
+    guard and kill switch bookkeeping)."""
     event_bus.emit("signal_update", {
         "strategy_id": strategy_id,
         "time": int(sig.time),
@@ -60,11 +63,6 @@ def _emit_signal(strategy_id: str, sid: str, sig: Signal, *,
         "price": float(sig.price),
         "reason": sig.reason,
     }, to=sid)
-    if mode == "live" and symbol:
-        # Local import — avoids a hard dependency cycle and keeps backtest
-        # imports clean if the alerter ever pulls in something heavier.
-        from services import live_alerter
-        live_alerter.dispatch(strategy_id, symbol, sig)
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +337,7 @@ class LiveRunner:
         risk_pct = float(self.strategy.p.get("risk_pct", 3.0)) / 100.0
 
         for sig in sigs:
-            _emit_signal(self.strategy_id, self.sid, sig, symbol=self.symbol, mode="live")
+            _emit_signal(self.strategy_id, self.sid, sig)
             ts = int(sig.time)
 
             if sig.kind == "entry":

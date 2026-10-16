@@ -593,8 +593,10 @@ export async function saveLiveAlerts(rules) {
   return data.rules;
 }
 
-export async function testLiveAlert({ rule_name, action = "BUY" }) {
-  const { data } = await api.post("/api/live-alerts/test", { rule_name, action });
+// dry_run defaults to TRUE (builds + logs the payload, never POSTs). Pass
+// dry_run: false explicitly for a real send.
+export async function testLiveAlert({ rule_name, action = "BUY", dry_run = true }) {
+  const { data } = await api.post("/api/live-alerts/test", { rule_name, action, dry_run });
   return data; // {ok, url?, payload?: {secret redacted}, error?}
 }
 

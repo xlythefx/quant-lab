@@ -18,6 +18,8 @@ from flask import Blueprint, jsonify, request
 
 from services import market_data, event_bus, live_alerts_config, live_alerter, alerts_daemon, assets
 from services.live import live_engine, live_store
+from services.live.live_symbols import deployable_usdt_symbols
+from services.live.rule_validation import LIVE_TIMEFRAMES, validate_rule
 from utils.validators import validate_symbol, validate_timeframe, validate_limit, ValidationError
 
 log = logging.getLogger(__name__)
@@ -53,13 +55,15 @@ def _build_instruments() -> list[dict]:
 INSTRUMENTS = _build_instruments()
 _INSTRUMENT_SYMBOLS = {i["symbol"] for i in INSTRUMENTS}
 
-# Timeframes offered by the terminal's chart (subset of config.TIMEFRAMES).
-LIVE_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
-
 
 @live_bp.get("/instruments")
 def instruments():
-    return jsonify({"instruments": INSTRUMENTS, "timeframes": LIVE_TIMEFRAMES})
+    # `instruments` = the curated chart/markets list (small: the Markets table
+    # polls a ticker per row). `deploy_symbols` = every USDT pair that can
+    # actually run live (TRADING Binance spot, from exchangeInfo) — what the
+    # Deploy modal offers.
+    return jsonify({"instruments": INSTRUMENTS, "timeframes": LIVE_TIMEFRAMES,
+                    "deploy_symbols": deployable_usdt_symbols()})
 
 
 @live_bp.get("/candles")
@@ -147,6 +151,8 @@ def _redact_secret(secret: str) -> str:
 def _deployment_view(rule: dict, rt: dict) -> dict:
     name = rule["name"]
     totals = rt["totals"].get(name, {})
+    st = alerts_daemon.deployment_status(rule)
+    h = st["health"] or {}
     return {
         "name": name,
         "strategy_id": rule["strategy_id"],
@@ -157,7 +163,16 @@ def _deployment_view(rule: dict, rt: dict) -> dict:
         "account": rule.get("account") or "demo",
         "leverage": rule.get("leverage", 1),
         "params": rule.get("params") or {},
-        "status": "RUNNING" if rule.get("enabled") else "PAUSED",
+        "enabled": bool(rule.get("enabled")),
+        # Honest status (see alerts_daemon.deployment_status): RUNNING only when
+        # the feed is connected and bars are actually arriving.
+        "status": st["status"],
+        "status_detail": st["detail"],
+        "feed_connected": bool(h.get("feed_connected")),
+        "last_closed_bar_time": h.get("last_closed_bar_time"),
+        "last_signal": h.get("last_signal"),
+        "last_error": h.get("last_error"),
+        "started_at": h.get("started_at"),
         "webhook_hint": _mask_url(rule.get("webhook_url") or ""),
         "secret_hint": _redact_secret(rule.get("secret") or ""),
         "pnl": totals.get("pnl_usd", 0.0),
@@ -181,6 +196,11 @@ def deployments_list():
 _DEPLOY_REQUIRED = ("name", "strategy_id", "symbol", "timeframe", "webhook_url", "secret", "strategy_alias")
 
 
+def _rejected(problems: list[str]):
+    """400 listing every problem, so the Deploy modal can show them all."""
+    return jsonify({"error": "deployment rejected: " + "; ".join(problems), "problems": problems}), 400
+
+
 @live_bp.post("/deployments")
 def deployments_create():
     body = request.get_json(silent=True) or {}
@@ -193,7 +213,7 @@ def deployments_create():
     if any(r["name"] == name for r in rules):
         return jsonify({"error": f"a deployment named '{name}' already exists"}), 400
 
-    params = dict(body.get("params") or {})
+    params = body.get("params") or {}
     # Increments (pyramiding > 1) are ALLOWED. The strategy self-limits to its schema
     # max and emits one entry per trigger; QuantLab throws one webhook each and the
     # Flask receiver sizes/counts/caps execution. Default stays 1 via the schema, and
@@ -217,16 +237,20 @@ def deployments_create():
         # browser. save_rules() resolves this by name, then drops the field.
         "secret_source": str(body.get("secret_source") or "").strip(),
     }
+    problems = validate_rule(rule)
+    if problems:
+        return _rejected(problems)
     saved = live_alerts_config.save_rules(rules + [rule])
+    created = next((r for r in saved if r["name"] == name), None)
+    if created is None:
+        return jsonify({"error": "rule failed validation (check webhook URL is http/https and all fields set)"}), 400
+    alerts_daemon.forget_state(name)   # a brand-new deployment always starts fresh (flat)
     alerts_daemon.refresh()
     live_store.add_activity("deployed", rule_name=name, symbol=rule["symbol"],
                             detail=f"{rule['strategy_id']} {rule['timeframe']} account={rule['account']} "
                                    f"status={'RUNNING' if rule['enabled'] else 'PAUSED'}")
     event_bus.emit("deployments_changed", {"name": name, "op": "created"})
     rt = live_engine.runtime_state()
-    created = next((r for r in saved if r["name"] == name), None)
-    if created is None:
-        return jsonify({"error": "rule failed validation (check webhook URL is http/https and all fields set)"}), 400
     return jsonify({"deployment": _deployment_view(created, rt)})
 
 
@@ -261,7 +285,15 @@ def deployments_patch(name):
             return jsonify({"error": f"a deployment named '{new_name}' already exists"}), 400
         rule["name"] = new_name
 
+    # Validate what will RUN. Pausing never needs validation — it must always work.
+    if rule.get("enabled"):
+        problems = validate_rule(rule)
+        if problems:
+            return _rejected(problems)
+
     rules[idx] = rule
+    if renamed:
+        alerts_daemon.rename_state(name, new_name)   # keep any open position across the rename
     live_alerts_config.save_rules(rules)
     alerts_daemon.refresh()
     if renamed:
@@ -285,6 +317,7 @@ def deployments_delete(name):
         return jsonify({"error": f"no deployment named '{name}'"}), 404
     live_alerts_config.save_rules(kept)
     alerts_daemon.refresh()
+    alerts_daemon.forget_state(name)
     live_store.add_activity("killed", rule_name=name)
     event_bus.emit("deployments_changed", {"name": name, "op": "deleted"})
     return jsonify({"ok": True})

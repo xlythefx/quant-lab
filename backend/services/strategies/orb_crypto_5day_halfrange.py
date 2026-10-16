@@ -385,6 +385,11 @@ class OrbCrypto5DayHalfRangeStrategy(Strategy):
             out[col] = nan
         return out
 
+    def warmup_bars(self) -> int:
+        # Needs `lookback_days` completed UTC days, but the bar size isn't known
+        # here — ask for the most history a live runner will fetch.
+        return 1000
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """Live mirror. State keys:

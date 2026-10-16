@@ -240,6 +240,17 @@ class VwmaMomentumTrendStrategy(Strategy):
         return out
 
     # ---- on_candle (live) ---------------------------------------------
+    def _need(self) -> int:
+        """Longest indicator lookback in use (on_candle keeps 4x this many bars)."""
+        p = self.p
+        return max(int(p["vwma_length"]), int(p["atr_length"]),
+                   int(p["trend_ema_length"]) if bool(p["use_trend_filter"]) else 0,
+                   int(p["rsi_length"]) if bool(p["use_rsi_filter"]) else 0,
+                   int(p["vol_length"]) if bool(p["use_volume_filter"]) else 0)
+
+    def warmup_bars(self) -> int:
+        return self._need() * 4
+
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """Live mirror. NOTE: volatility-targeted SIZING is a backtest hook
         (risk_scale); live position size is set by the webhook receiver, so the
@@ -248,10 +259,7 @@ class VwmaMomentumTrendStrategy(Strategy):
         if not bool(candle.get("isClosed", False)):
             return None
         p = self.p
-        need = max(int(p["vwma_length"]), int(p["atr_length"]),
-                   int(p["trend_ema_length"]) if bool(p["use_trend_filter"]) else 0,
-                   int(p["rsi_length"]) if bool(p["use_rsi_filter"]) else 0,
-                   int(p["vol_length"]) if bool(p["use_volume_filter"]) else 0)
+        need = self._need()
         warmup = need * 4
         buf = state.setdefault("buf", [])
         buf.append({

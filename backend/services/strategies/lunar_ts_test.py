@@ -411,6 +411,13 @@ class LunarTSTestStrategy(Strategy):
         out["phase"]           = phase
         return out
 
+    def warmup_bars(self) -> int:
+        # Enough bars to cover the far lag and let Wilder session-ATR converge
+        # (~24 bars/session * 3x window).
+        p = self.p
+        lag_max = max(int(p["phase_lag_1"]), int(p["phase_lag_2"]), int(p["phase_lag_3"]))
+        return max(lag_max + 2, int(p["atr_period"]) * 3 * 24)
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         if not bool(candle.get("isClosed", False)):
@@ -419,9 +426,7 @@ class LunarTSTestStrategy(Strategy):
 
         l1 = int(p["phase_lag_1"]); l2 = int(p["phase_lag_2"]); l3 = int(p["phase_lag_3"])
         lag_max = max(l1, l2, l3)
-        # Warm up enough bars to cover the far lag and let Wilder session-ATR
-        # converge (~24 bars/session * 3x window).
-        warmup = max(lag_max + 2, int(p["atr_period"]) * 3 * 24)
+        warmup = self.warmup_bars()
 
         buf = state.setdefault("buf", [])
         buf.append({

@@ -170,7 +170,8 @@ export default function LiveAlerts() {
 
   const fire = async (r, action) => {
     try {
-      const res = await testLiveAlert({ rule_name: r.name, action });
+      // This page's test-fire is a deliberate REAL POST (connectivity check).
+      const res = await testLiveAlert({ rule_name: r.name, action, dry_run: false });
       if (!res?.ok) setErr(`test fire failed (${action}): ${res?.error || "unknown"}`);
     } catch (e) {
       setErr(e?.response?.data?.error || e.message);

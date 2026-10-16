@@ -25,3 +25,5 @@ yfinance>=0.2.40
 databento>=0.34          # CME futures historical/live data (GLBX.MDP3)
 sqlalchemy>=2.0
 psutil>=5.9              # CPU/utilization sampling for the walk-forward run monitor
+pytz>=2024.1             # TradeStation CSV live feed (services/ts_csv_stream.py)
+mysql-connector-python>=8.0   # read-only WAMP positions (services/live/wamp_positions.py)

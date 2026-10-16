@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import ParamForm from "./ParamForm.jsx";
 import { createDeployment, patchDeployment, previewPayload } from "./liveApi.js";
-import { getLiveAlerts, listDatasets } from "../../services/api.js";
+import { getLiveAlerts } from "../../services/api.js";
 
 const TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"];
 const PREVIEW_ACTIONS = ["BUY", "SELL", "EXIT_LONG", "EXIT_SHORT"];
@@ -10,21 +10,26 @@ const PREVIEW_ACTIONS = ["BUY", "SELL", "EXIT_LONG", "EXIT_SHORT"];
  * Deploy / Edit modal: strategy × symbol × timeframe × preset × params × account
  * × webhook. Arming ALWAYS goes through confirm-before-arm showing the EXACT JSON
  * payload that will fire (fetched from the backend's real build_payload — no
- * drift). Demo account is the default (safety rule #1).
+ * drift). LIVE is the default account (this setup runs purely live — the
+ * receiving broker accounts are demo accounts); the red LIVE warning stays.
+ *
+ * Instruments = every USDT pair that can really run live (TRADING Binance spot,
+ * `deploySymbols` from /api/live/instruments). The server re-validates the whole
+ * deployment and any problems it lists are shown here.
  *
  * `editing` (a deployment view) switches to edit mode: prefilled, PATCHes on save,
  * and can rename / change symbol. Webhook + secret are left blank and only sent
  * when you actually retype them (blank = keep the existing one).
  */
-export default function DeployModal({ open, onClose, onDeployed, strategies = [], instruments = [], prefill = null, editing = null }) {
+export default function DeployModal({ open, onClose, onDeployed, strategies = [], instruments = [], deploySymbols = [], prefill = null, editing = null }) {
   const isEdit = !!editing;
   const [draft, setDraft] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
+  const [problems, setProblems] = useState([]);   // server-side validation messages
   const [urlPresets, setUrlPresets] = useState([]);
   const [secretPresets, setSecretPresets] = useState([]);
-  const [datasets, setDatasets] = useState([]);
   const [preview, setPreview] = useState(null);      // {payloads, secret_masked} | null
   const [previewErr, setPreviewErr] = useState(null);
   const [previewAction, setPreviewAction] = useState("BUY");
@@ -32,6 +37,7 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
   useEffect(() => {
     if (!open) return;
     setErr(null);
+    setProblems([]);
     setConfirming(false);
     setPreview(null);
     setPreviewErr(null);
@@ -49,7 +55,7 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
         secret: "",                            // blank = keep existing (masked)
         strategy_alias: editing.strategy_alias || "",
         leverage: editing.leverage ?? 10,
-        enabled: editing.status === "RUNNING",
+        enabled: editing.enabled ?? editing.status !== "PAUSED",
       });
     } else {
       setDraft({
@@ -59,7 +65,7 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
         timeframe: prefill?.timeframe || "1h",
         preset: "",
         params: prefill?.params ? { ...prefill.params } : {},
-        account: "demo",
+        account: "live",
         webhook_url: "",
         secret: "",
         strategy_alias: "",
@@ -78,9 +84,6 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
         setSecretPresets(rs.filter((r) => r.secret).map((r) => ({ name: r.name, hint: r.secret })));
       })
       .catch(() => {});
-    // Assets = what you've actually DOWNLOADED (same list as Downloads / Overnight),
-    // so you can only deploy on data you can also backtest.
-    listDatasets().then((d) => setDatasets(d || [])).catch(() => setDatasets([]));
   }, [open, prefill, editing, instruments, isEdit]);
 
   const strat = useMemo(
@@ -89,20 +92,13 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
   );
   const presets = strat?.presets || {};
 
-  // Downloaded symbols for the chosen timeframe (dedup, sorted). The currently
-  // selected symbol is always kept as an option so an edit never loses it, and
-  // if nothing is downloaded yet we fall back to the curated instruments list.
-  const assetOptions = useMemo(() => {
-    const tf = draft?.timeframe;
-    const set = new Set();
-    for (const d of datasets) {
-      if (tf && d.timeframe !== tf) continue;
-      if (d.symbol) set.add(d.symbol);
-    }
-    if (!set.size) for (const i of instruments) set.add(i.symbol);
-    if (draft?.symbol) set.add(draft.symbol);
-    return [...set].sort();
-  }, [datasets, draft?.timeframe, draft?.symbol, instruments]);
+  // Live-eligible symbols (Binance USDT spot pairs). Falls back to the curated
+  // chart instruments if the list hasn't loaded.
+  const symbolOptions = useMemo(() => {
+    const list = deploySymbols.length ? deploySymbols : instruments.map((i) => i.symbol);
+    return [...new Set(list)].sort();
+  }, [deploySymbols, instruments]);
+  const symbolKnown = !draft?.symbol || symbolOptions.includes(draft.symbol);
 
   if (!open || !draft) return null;
 
@@ -154,7 +150,7 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
   };
 
   const arm = async () => {
-    setBusy(true); setErr(null);
+    setBusy(true); setErr(null); setProblems([]);
     try {
       if (isEdit) {
         const patch = {
@@ -180,7 +176,13 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
       onDeployed?.();
       onClose();
     } catch (e) {
-      setErr(e?.response?.data?.error || e.message || (isEdit ? "save failed" : "deploy failed"));
+      const list = e?.response?.data?.problems;
+      if (Array.isArray(list) && list.length) {
+        setProblems(list);
+        setErr(isEdit ? "the server rejected these changes:" : "the server rejected this deployment:");
+      } else {
+        setErr(e?.response?.data?.error || e.message || (isEdit ? "save failed" : "deploy failed"));
+      }
       setConfirming(false);
     } finally {
       setBusy(false);
@@ -202,7 +204,16 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
         {!confirming ? (
           <>
             <div className="lt-modal-body">
-              {err && <div className="lt-warn-banner" style={{ position: "static", marginBottom: 10 }}>⚠ {err}</div>}
+              {err && (
+                <div className="lt-warn-banner" style={{ position: "static", marginBottom: 10 }}>
+                  ⚠ {err}
+                  {problems.length > 0 && (
+                    <ul style={{ margin: "6px 0 0 16px", padding: 0 }}>
+                      {problems.map((p) => <li key={p}>{p}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px 14px" }}>
                 <label style={{ gridColumn: "1 / -1" }}>
                   <span className="lt-field-label">Deployment name (unique)</span>
@@ -221,10 +232,21 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
                 </label>
 
                 <label>
-                  <span className="lt-field-label">Instrument · downloaded {draft.timeframe} data</span>
-                  <select className="lt-select" value={draft.symbol} onChange={(e) => upd({ symbol: e.target.value })}>
-                    {assetOptions.map((sym) => <option key={sym} value={sym}>{sym}</option>)}
-                  </select>
+                  <span className="lt-field-label">
+                    Instrument · Binance spot USDT pairs{symbolOptions.length ? ` (${symbolOptions.length})` : ""}
+                  </span>
+                  <input className="lt-input" list="lt-deploy-symbols" value={draft.symbol}
+                         placeholder="type to search, e.g. SOLUSDT"
+                         style={symbolKnown ? {} : { borderColor: "var(--lt-amber)" }}
+                         onChange={(e) => upd({ symbol: e.target.value.toUpperCase().trim() })} />
+                  <datalist id="lt-deploy-symbols">
+                    {symbolOptions.map((sym) => <option key={sym} value={sym} />)}
+                  </datalist>
+                  {!symbolKnown && (
+                    <span className="lt-mono lt-amber" style={{ fontSize: 9 }}>
+                      not a Binance USDT spot pair — it can't run live
+                    </span>
+                  )}
                 </label>
 
                 <label>

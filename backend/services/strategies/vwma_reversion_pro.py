@@ -312,6 +312,16 @@ class VwmaReversionProStrategy(Strategy):
         return out
 
     # ---- on_candle (live) ---------------------------------------------
+    def warmup_bars(self) -> int:
+        p = self.p
+        warmup = max(int(p["vwma_length"]), int(p["rsi_length"]), int(p["atr_length"]),
+                     int(p["volume_ma_length"]), int(p["mr_lookback"])) * 4
+        if p.get("use_regime") and p.get("use_five_regime"):
+            rp_live = _regime_params({"adx_period": p["regime_adx_period"],
+                                      "adx_trend_thresh": p["regime_adx_threshold"]})
+            warmup = max(warmup, int(rp_live["vol_lookback"]) + int(rp_live["vol_window"]))
+        return int(warmup)
+
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """Single-position live path. Time stop + volume gate + MR-confirm + ATR
         stop are honored; SCALE-OUT and ATR-sizing are backtest/engine features
@@ -320,12 +330,7 @@ class VwmaReversionProStrategy(Strategy):
         if not bool(candle.get("isClosed", False)):
             return None
         p = self.p
-        warmup = max(int(p["vwma_length"]), int(p["rsi_length"]), int(p["atr_length"]),
-                     int(p["volume_ma_length"]), int(p["mr_lookback"])) * 4
-        if p.get("use_regime") and p.get("use_five_regime"):
-            rp_live = _regime_params({"adx_period": p["regime_adx_period"],
-                                      "adx_trend_thresh": p["regime_adx_threshold"]})
-            warmup = max(warmup, int(rp_live["vol_lookback"]) + int(rp_live["vol_window"]))
+        warmup = self.warmup_bars()
         buf = state.setdefault("buf", [])
         buf.append({"time": int(candle["time"]), "open": float(candle["open"]),
                     "high": float(candle["high"]), "low": float(candle["low"]),

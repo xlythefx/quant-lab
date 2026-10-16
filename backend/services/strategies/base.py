@@ -171,6 +171,26 @@ class Strategy(ABC):
                 out[spec.name] = spec.default
         return out
 
+    # ---- live warm-up hooks --------------------------------------------
+    def warmup_bars(self) -> int:
+        """How many closed bars on_candle() needs before it can signal.
+
+        Live runners fetch this much recent history (at least 500, at most 1000 —
+        Binance's one-request limit) and replay it through on_candle() before
+        going live, so indicators are warm on the first real bar. Strategies with
+        a longer lookback override this with the same formula on_candle uses."""
+        return 500
+
+    def reset_position(self, state: dict) -> None:
+        """Forget any open position, keeping indicator buffers.
+
+        Used after the live warm-up: replaying history may leave the strategy
+        believing it is inside a historical trade that was never sent to the
+        broker. Default = the shared convention `pos` (0 = flat; entry fields are
+        only read while pos != 0). Strategies that keep extra per-trade counters
+        (tranche counts, ladders) override this."""
+        state["pos"] = 0
+
     # ---- abstract interfaces ------------------------------------------
     @abstractmethod
     def on_candle(self, candle: dict, state: dict) -> Union[Signal, list[Signal], None]:

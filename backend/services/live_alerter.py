@@ -1,9 +1,9 @@
 """
 Fires TradingView-style webhook alerts when a live strategy emits a signal.
 
-Called from strategy_runner._emit_signal() ONLY when mode == "live". Looks up
-ALL rules for a (strategy_id, symbol) pair in live_alerts.json — one thread
-per rule — so you can target multiple VPS endpoints from a single signal.
+ONE SENDER: only the headless alerts_daemon calls dispatch_for_rule() (one
+rule per runner, behind the idempotency guard). The old browser LiveRunner
+no longer sends anything. test_dispatch() is the user-initiated test button.
 
 Each POST carries the JSON payload the Binance acceptor expects:
   {
@@ -31,7 +31,13 @@ from services.strategies.base import Signal
 
 log = logging.getLogger(__name__)
 
-_TIMEOUT_SECONDS = 5.0
+_TIMEOUT_SECONDS = 10.0
+_MAX_ATTEMPTS = 3
+# Retry ONLY when the order provably never reached the receiver. 502/503 mean a
+# proxy in front of it answered "upstream unavailable". Everything else —
+# read timeouts, 504, any other status — may already have placed the order, so
+# a retry could double it.
+_RETRY_STATUSES = (502, 503)
 _ACTION_MAP = {
     ("long",  "entry"): "BUY",
     ("long",  "exit"):  "EXIT_LONG",
@@ -123,74 +129,53 @@ def _kill_switch_engaged() -> bool:
         return False
 
 
+def _never_reached_server(exc: Exception) -> bool:
+    """True only when the connection itself was never established (DNS failure,
+    connection refused, connect timeout) — so the receiver cannot have acted."""
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+
+
 def _post(url: str, payload: dict, *, strategy_id: str, symbol: str,
           action: str, rule_name: str, price: Optional[float] = None,
           account: str = "demo", test: bool = False):
     last_err: str | None = None
-    for attempt in range(3):
+    status: Optional[int] = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        retry = False
         try:
             r = httpx.post(url, json=payload, timeout=_TIMEOUT_SECONDS)
+            status = r.status_code
             if 200 <= r.status_code < 300:
-                log.info("live_alert [%s] %s %s → %s (status=%d secret=%s)",
-                         rule_name, strategy_id, action, url, r.status_code,
+                log.info("live_alert [%s] %s %s → %s attempt %d OK (status=%d secret=%s)",
+                         rule_name, strategy_id, action, url, attempt, r.status_code,
                          _redact(payload.get("secret", "")))
                 _emit_dispatched(strategy_id, symbol, action, ok=True,
                                  status_code=r.status_code, url=url, rule_name=rule_name,
                                  price=price, account=account, test=test)
                 return
             last_err = f"HTTP {r.status_code}: {r.text[:2000]}" if r.text else f"HTTP {r.status_code}"
+            retry = r.status_code in _RETRY_STATUSES
         except Exception as e:
-            last_err = str(e)
-            log.warning("live_alert [%s] attempt %d failed: %s", rule_name, attempt + 1, e)
-        if attempt < 2:
-            time.sleep(2 ** attempt)   # 1s, 2s backoff before retry
+            last_err = f"{type(e).__name__}: {e}"
+            retry = _never_reached_server(e)
+        will_retry = retry and attempt < _MAX_ATTEMPTS
+        if will_retry:
+            why = "retrying — the request never reached the receiver"
+        elif retry:
+            why = "giving up"
+        else:
+            why = "NOT retrying — the receiver may already have acted on it"
+        log.warning("live_alert [%s] %s %s attempt %d failed: %s — %s",
+                    rule_name, strategy_id, action, attempt, last_err, why)
+        if not will_retry:
+            break
+        time.sleep(attempt)   # 1s, then 2s
 
-    log.warning("live_alert FAIL [%s] %s %s → %s: %s (all retries exhausted)",
+    log.warning("live_alert FAIL [%s] %s %s → %s: %s",
                 rule_name, strategy_id, action, url, last_err)
-    _emit_dispatched(strategy_id, symbol, action, ok=False,
+    _emit_dispatched(strategy_id, symbol, action, ok=False, status_code=status,
                      error=last_err, url=url, rule_name=rule_name,
                      price=price, account=account, test=test)
-
-
-def dispatch(strategy_id: str, symbol: str, sig: Signal) -> None:
-    action = action_for(sig)
-    if action is None:
-        log.warning("live_alert skipped: no action mapping for side=%s kind=%s (strategy=%s symbol=%s)",
-                    sig.side, sig.kind, strategy_id, symbol)
-        return
-
-    rules = live_alerts_config.find_rules(strategy_id, symbol)
-    enabled = [r for r in rules if r.get("enabled")]
-    if not enabled:
-        return
-
-    if _kill_switch_engaged():
-        for rule in enabled:
-            log.warning("live_alert BLOCKED by kill switch [%s] %s %s", rule["name"], strategy_id, action)
-            _emit_dispatched(strategy_id, symbol, action, ok=False,
-                             error="blocked by kill switch (disarmed)", url=rule["webhook_url"],
-                             rule_name=rule["name"], price=sig.price,
-                             account=str(rule.get("account") or "demo"), blocked=True)
-        return
-
-    for rule in enabled:
-        if rule.get("broker") == "tradestation" and not rule.get("payload_template"):
-            log.warning(
-                "live_alert [%s]: rule targets a TradeStation/futures symbol (%s) "
-                "but has no payload_template — the default Binance payload shape "
-                "will likely be rejected by your ES broker endpoint. "
-                "Add a payload_template in the Live Alerts config.",
-                rule["name"], symbol,
-            )
-        payload = build_payload(rule, action, symbol)
-        threading.Thread(
-            target=_post,
-            args=(rule["webhook_url"], payload),
-            kwargs={"strategy_id": strategy_id, "symbol": symbol,
-                    "action": action, "rule_name": rule["name"],
-                    "price": sig.price, "account": str(rule.get("account") or "demo")},
-            daemon=True,
-        ).start()
 
 
 def dispatch_for_rule(rule: dict, symbol: str, sig: Signal) -> None:
@@ -230,7 +215,7 @@ def dispatch_for_rule(rule: dict, symbol: str, sig: Signal) -> None:
 _VALID_ACTIONS = frozenset(_ACTION_MAP.values())
 
 
-def test_dispatch(rule_name: str, action: str = "BUY", dry_run: bool = False) -> dict:
+def test_dispatch(rule_name: str, action: str = "BUY", dry_run: bool = True) -> dict:
     """Synthetic fire for connectivity testing a specific named rule.
 
     dry_run=True builds + logs the payload and emits the events (so the

@@ -128,6 +128,15 @@ def list_strategies() -> list[dict]:
     return out
 
 
+def is_archived(strategy_id: str) -> bool:
+    """Same rule as list_strategies(): the sidecar flag wins, else META.archived."""
+    cls = get_strategy_class(strategy_id)
+    ov = _load_overrides().get(strategy_id) or {}
+    if "archived" in ov:
+        return bool(ov["archived"])
+    return bool(cls.META.archived)
+
+
 def get_strategy_class(strategy_id: str) -> Type[Strategy]:
     _scan()
     cls = _REGISTRY.get(strategy_id)

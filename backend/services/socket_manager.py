@@ -14,10 +14,15 @@ from typing import Dict, Tuple
 from services.binance_stream import BinanceKlineStream
 from services.backtest_stream import BacktestStream
 from services.stream_base import CandleStream
-from services.market_data import is_binance_symbol
+from services.live.live_symbols import is_live_eligible, is_binance_spot
 from services.ts_csv_stream import TsCsvStream, _csv_path
 
 log = logging.getLogger(__name__)
+
+
+class LiveFeedUnavailable(RuntimeError):
+    """No real live feed exists for this symbol. Raised instead of silently
+    replaying history — replayed bars in live mode would fire REAL webhooks."""
 
 StreamKey = Tuple[str, str, str, str]  # (mode, symbol, timeframe, broker)
 
@@ -49,6 +54,15 @@ class SocketManager:
                 # Propagate load failures to the browser room so it doesn't hang.
                 self._sio.emit("stream_error", candle, room=room_name(*key))
                 return
+            if candle.get("__event"):
+                # Stream control notice (e.g. "reconnected") — for internal
+                # listeners only, never painted as a candle.
+                for fn in list(self._listeners.get(key, ())):
+                    try:
+                        fn(candle)
+                    except Exception as e:
+                        log.exception("listener for %s raised: %s", key, e)
+                return
             # Fan-out to everyone in this room.
             self._sio.emit("candle_update", candle, room=room_name(*key))
             # Fan-out to internal listeners (strategy runners, etc.)
@@ -58,29 +72,26 @@ class SocketManager:
                 except Exception as e:
                     log.exception("listener for %s raised: %s", key, e)
 
-        if mode == "live" and is_binance_symbol(symbol):
-            return BinanceKlineStream(symbol, tf, emit)
-        if mode == "live" and not is_binance_symbol(symbol):
-            # Any non-Binance symbol (ES, NQ, CL, …) → try TradeStation CSV tail
-            p = _csv_path(symbol, tf)
-            if p.exists():
-                log.info("TsCsvStream [%s/%s]: watching %s", symbol, tf, p)
-                return TsCsvStream(symbol, tf, emit, p)
-            log.warning(
-                "TsCsvStream [%s/%s]: CSV not found at %s — "
-                "falling back to backtest stream. "
-                "Ensure TradeStation is writing to that path.",
-                symbol, tf, p,
-            )
+        if mode == "live":
+            # LIVE NEVER REPLAYS: a real feed or a refusal, nothing in between.
+            ok, reason = is_live_eligible(symbol, tf)
+            if not ok:
+                raise LiveFeedUnavailable(
+                    f"no live feed for {symbol} {tf}: {reason} (live mode never replays history)")
+            if is_binance_spot(symbol):
+                return BinanceKlineStream(symbol, tf, emit)
+            p = _csv_path(symbol, tf)   # eligible + not Binance => the TradeStation CSV exists
+            log.info("TsCsvStream [%s/%s]: watching %s", symbol, tf, p)
+            return TsCsvStream(symbol, tf, emit, p)
         return BacktestStream(symbol, tf, emit, speed=speed,
                               start_time=start_time, end_time=end_time, loop=loop,
                               broker=broker)
 
     # ---- internal listener API (for strategy runners) -----------------
     def add_listener(self, mode: str, symbol: str, tf: str, fn, broker: str | None = None) -> None:
+        """Raises LiveFeedUnavailable when mode == "live" has no real feed."""
         key = (mode, symbol, tf, broker or "")
         with self._lock:
-            self._listeners.setdefault(key, []).append(fn)
             # Make sure the stream is alive even if no browser is listening yet.
             stream = self._streams.get(key)
             if stream is None or not stream.is_running():
@@ -88,6 +99,12 @@ class SocketManager:
                 self._streams[key] = stream
                 stream.start()
                 log.info("Started stream %s (listener-driven)", room_name(*key))
+            self._listeners.setdefault(key, []).append(fn)
+
+    def stream_for(self, mode: str, symbol: str, tf: str, broker: str | None = None):
+        """The running stream for a key (or None) — used for feed health."""
+        with self._lock:
+            return self._streams.get((mode, symbol, tf, broker or ""))
 
     def remove_listener(self, mode: str, symbol: str, tf: str, fn, broker: str | None = None) -> None:
         key = (mode, symbol, tf, broker or "")
@@ -112,29 +129,38 @@ class SocketManager:
     # ---- subscribe / unsubscribe --------------------------------------
     def subscribe(self, sid: str, mode: str, symbol: str, tf: str, speed: int = 60,
                   start_time: int | None = None, end_time: int | None = None,
-                  loop: bool = True, broker: str | None = None):
+                  loop: bool = True, broker: str | None = None) -> bool:
+        """Returns False (and emits stream_error to the sid) when live mode has
+        no real feed for the symbol."""
         key = (mode, symbol, tf, broker or "")
         room = room_name(*key)
 
         with self._lock:
+            stream = self._streams.get(key)
+            if stream is None or not stream.is_running():
+                try:
+                    stream = self._make_stream(mode, symbol, tf, speed,
+                                               start_time=start_time, end_time=end_time,
+                                               loop=loop, broker=broker)
+                except LiveFeedUnavailable as e:
+                    log.warning("subscribe refused: %s", e)
+                    self._sio.emit("stream_error", {"__stream_error": True, "message": str(e),
+                                                    "mode": mode, "symbol": symbol, "timeframe": tf},
+                                   to=sid)
+                    return False
+                self._streams[key] = stream
+                stream.start()
+                log.info("Started stream %s (subscribers=1)", room)
             members = self._room_members.setdefault(key, set())
             already = sid in members
             members.add(sid)
             self._sid_rooms.setdefault(sid, set()).add(key)
-
-            stream = self._streams.get(key)
-            if stream is None or not stream.is_running():
-                stream = self._make_stream(mode, symbol, tf, speed,
-                                           start_time=start_time, end_time=end_time,
-                                           loop=loop, broker=broker)
-                self._streams[key] = stream
-                stream.start()
-                log.info("Started stream %s (subscribers=1)", room)
-            elif not already:
+            if not already and len(members) > 1:
                 log.info("Joined existing stream %s (subscribers=%d)", room, len(members))
 
         # join_room must run in the SocketIO server context.
         self._sio.server.enter_room(sid, room)
+        return True
 
     def unsubscribe(self, sid: str, mode: str, symbol: str, tf: str, broker: str | None = None):
         key = (mode, symbol, tf, broker or "")

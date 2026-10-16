@@ -5,7 +5,7 @@ import { useEnterStagger } from "./animations.js";
 import { useInstruments } from "./hooks.js";
 import { patchDeployment, deleteDeployment, testDeploymentSignal } from "./liveApi.js";
 import { getStrategies } from "../../services/api.js";
-import { fmtUsd, fmtInt } from "../../services/format.js";
+import { fmtUsd, fmtInt, fmtNum, fmtDateLong } from "../../services/format.js";
 
 const ACCENTS = ["var(--lt-cyan)", "var(--lt-green)", "var(--lt-amber)", "var(--lt-red)", "var(--lt-purple)"];
 const ACTIONS = ["BUY", "EXIT_LONG", "SELL", "EXIT_SHORT"];
@@ -16,6 +16,17 @@ function fmtClock(epochSec) {
   return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
 }
 
+/** "Oct 16, 2026 · 14:00 UTC" — date per the app's display rule + the bar's clock. */
+function fmtBarTime(epochSec) {
+  if (!epochSec) return "—";
+  return `${fmtDateLong(epochSec)} · ${fmtClock(epochSec)}`;
+}
+
+// Honest deployment status from the backend (alerts_daemon.deployment_status).
+const STATUS_CLASS = {
+  RUNNING: "lt-green", STARTING: "lt-cyan", STALE: "lt-amber", ERROR: "lt-red", PAUSED: "lt-muted",
+};
+
 /**
  * STRATEGIES workspace: roster of real QuantLab strategies (registry) +
  * Deployments over the live alerter, with deploy / pause / resume / kill,
@@ -25,7 +36,7 @@ function fmtClock(epochSec) {
 export default function StrategiesWorkspace({ deployments, killswitch, refresh, prefill, onPrefillConsumed }) {
   const ref = useRef(null);
   useEnterStagger("strategies", ref);
-  const { instruments } = useInstruments();
+  const { instruments, deploy_symbols: deploySymbols } = useInstruments();
   const [strategies, setStrategies] = useState([]);
   const [deployOpen, setDeployOpen] = useState(false);
   const [deployPrefill, setDeployPrefill] = useState(null);
@@ -140,13 +151,19 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
           <table className="lt-table">
             <thead>
               <tr>
-                <th>NAME</th><th>STRATEGY</th><th>INSTRUMENT</th><th>ACCT</th><th>STATUS</th>
+                <th>NAME</th><th>STRATEGY</th><th>INSTRUMENT</th><th>ACCT</th><th>STATUS</th><th>LAST BAR</th>
                 <th className="num">P&L (EST)</th><th className="num">N</th><th>LAST EVAL</th><th>WEBHOOK</th><th className="num">ACTIONS</th>
               </tr>
             </thead>
             <tbody>
               {deployments.map((d) => {
-                const running = d.status === "RUNNING";
+                const enabled = d.enabled ?? d.status !== "PAUSED";
+                const blocked = killswitch && enabled;
+                const statusTip = [
+                  d.status_detail,
+                  d.feed_connected === false && enabled ? "live feed: disconnected" : null,
+                  d.last_error ? `last error (${fmtBarTime(d.last_error.time)}): ${d.last_error.message}` : null,
+                ].filter(Boolean).join("\n") || "live feed connected, bars arriving";
                 const ev = d.last_eval;
                 const disp = d.last_dispatch;
                 const evalTxt = ev
@@ -158,7 +175,7 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
                       {d.name}
                       {d.open_position && (
                         <span className={d.open_position.side === "long" ? "lt-green" : "lt-red"} style={{ marginLeft: 6, fontSize: 8.5 }}>
-                          ● {d.open_position.side.toUpperCase()} @{Number(d.open_position.entry).toFixed(2)}
+                          ● {d.open_position.side.toUpperCase()} @{fmtNum(Number(d.open_position.entry))}
                         </span>
                       )}
                     </td>
@@ -169,10 +186,19 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
                         {(d.account || "demo").toUpperCase()}
                       </span>
                     </td>
-                    <td>
-                      <span className={running ? "lt-green" : "lt-muted"} style={{ fontWeight: 700 }}>
-                        {killswitch && running ? "BLOCKED" : d.status}
+                    <td title={statusTip} style={{ maxWidth: 220 }}>
+                      <span className={blocked ? "lt-amber" : (STATUS_CLASS[d.status] || "lt-muted")} style={{ fontWeight: 700 }}>
+                        ● {blocked ? "BLOCKED" : d.status}
                       </span>
+                      {!blocked && d.status !== "RUNNING" && d.status !== "PAUSED" && d.status_detail && (
+                        <div className={d.status === "ERROR" ? "lt-red" : "lt-muted"}
+                             style={{ fontSize: 8.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {d.status_detail}
+                        </div>
+                      )}
+                    </td>
+                    <td className="lt-muted" title="Most recent CLOSED bar this deployment processed">
+                      {fmtBarTime(d.last_closed_bar_time)}
                     </td>
                     <td className={`num ${d.pnl >= 0 ? "lt-green" : "lt-red"}`}>{d.pnl >= 0 ? "+" : ""}{fmtUsd(d.pnl)}</td>
                     <td className="num lt-muted">{fmtInt(d.n)}</td>
@@ -188,8 +214,8 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
                     </td>
                     <td className="num" style={{ position: "relative" }}>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-                        <button className="lt-btn small" disabled={busy} onClick={() => setStatus(d, running ? "PAUSED" : "RUNNING")}>
-                          {running ? "PAUSE" : "RESUME"}
+                        <button className="lt-btn small" disabled={busy} onClick={() => setStatus(d, enabled ? "PAUSED" : "RUNNING")}>
+                          {enabled ? "PAUSE" : "RESUME"}
                         </button>
                         <button className="lt-btn small" disabled={busy} onClick={() => { setDeployPrefill(null); setEditDeployment(d); setDeployOpen(true); }}>
                           EDIT
@@ -230,6 +256,7 @@ export default function StrategiesWorkspace({ deployments, killswitch, refresh, 
         onDeployed={refresh}
         strategies={strategies}
         instruments={instruments}
+        deploySymbols={deploySymbols || []}
         prefill={deployPrefill}
         editing={editDeployment}
       />

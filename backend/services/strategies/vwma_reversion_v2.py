@@ -315,6 +315,15 @@ class VwmaReversionV2Strategy(Strategy):
         out["next_add"] = next_add
         return out
 
+    def warmup_bars(self) -> int:
+        p = self.p
+        return max(int(p["vwma_length"]), int(p["rsi_length"]), int(p["atr_length"])) * 4
+
+    def reset_position(self, state: dict) -> None:
+        # Same fields on_candle's _flatten() clears (rungs would otherwise cap entries).
+        state.update({"pos": 0, "rungs": 0, "sum_entry": 0.0, "n_filled": 0,
+                      "sum_atr": 0.0, "n_atr": 0, "pending_rung": None})
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         """Live ladder — mirrors vectorized() bar for bar.
@@ -332,7 +341,7 @@ class VwmaReversionV2Strategy(Strategy):
             return None  # only act on closed bars
 
         p = self.p
-        warmup = max(int(p["vwma_length"]), int(p["rsi_length"]), int(p["atr_length"])) * 4
+        warmup = self.warmup_bars()
 
         buf = state.setdefault("buf", [])
         buf.append({

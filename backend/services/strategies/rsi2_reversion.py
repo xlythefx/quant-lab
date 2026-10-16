@@ -260,6 +260,9 @@ class Rsi2ReversionStrategy(Strategy):
         out["sma"]             = sma_overlay
         return out
 
+    def warmup_bars(self) -> int:
+        return (int(self.p["sma_period"]) + 5) * 24  # sessions worth of bars (~24 bars/session)
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         if not bool(candle.get("isClosed", False)):
@@ -267,7 +270,7 @@ class Rsi2ReversionStrategy(Strategy):
         p = self.p
         sma_p = int(p["sma_period"])
         rsi_p = int(p["rsi_period"])
-        warmup = (sma_p + 5) * 24  # sessions worth of bars (~24 bars/session)
+        warmup = self.warmup_bars()
 
         buf = state.setdefault("buf", [])
         buf.append({

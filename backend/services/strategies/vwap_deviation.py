@@ -327,6 +327,10 @@ class VwapDeviationStrategy(Strategy):
         out["ema_trend"] = ema
         return out
 
+    def reset_position(self, state: dict) -> None:
+        # A stale tranche count would otherwise block every new entry.
+        state["pos"] = 0; state["count"] = 0
+
     # ---- on_candle (live) ---------------------------------------------
     def on_candle(self, candle: dict, state: dict):
         """Live path with TradingView-style pyramiding. Returns a LIST of signals:

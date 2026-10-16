@@ -44,10 +44,10 @@ PAYLOAD_TOKENS = ("action", "symbol", "secret", "strategy", "leverage")
 
 
 def _auto_broker(symbol: str) -> str:
-    """Detect whether a symbol is Binance or TradeStation based on the asset list."""
+    """Binance if it's a tradable Binance spot pair, else TradeStation."""
     try:
-        from services.market_data import is_binance_symbol
-        return "binance" if is_binance_symbol(symbol) else "tradestation"
+        from services.live.live_symbols import is_binance_spot
+        return "binance" if is_binance_spot(symbol) else "tradestation"
     except Exception:
         return "binance"
 

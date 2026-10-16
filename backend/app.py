@@ -148,9 +148,10 @@ def create_app():
             socketio.emit("error", {"event": "subscribe", "message": str(e)}, to=request.sid)
             return
 
-        manager.subscribe(request.sid, mode, symbol, tf, speed=speed,
-                          start_time=start_time, end_time=end_time, loop=loop,
-                          broker=broker)
+        if not manager.subscribe(request.sid, mode, symbol, tf, speed=speed,
+                                 start_time=start_time, end_time=end_time, loop=loop,
+                                 broker=broker):
+            return   # live feed refused — stream_error already sent to this client
         socketio.emit(
             "subscribed",
             {"mode": mode, "symbol": symbol, "timeframe": tf, "speed": speed,

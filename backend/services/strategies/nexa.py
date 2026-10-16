@@ -241,12 +241,16 @@ class NexaStrategy(Strategy):
         return out
 
     # ---- on_candle (live) ---------------------------------------------
+    def warmup_bars(self) -> int:
+        p = self.p
+        return max(int(p["span_b_length"]), int(p["vwma_length"]), int(p["vol_length"]),
+                   int(p["macd_slow"]) + int(p["macd_signal"]), int(p["rsi_length"])) * 4
+
     def on_candle(self, candle: dict, state: dict) -> Optional[Signal]:
         if not bool(candle.get("isClosed", False)):
             return None
         p = self.p
-        warmup = max(int(p["span_b_length"]), int(p["vwma_length"]), int(p["vol_length"]),
-                     int(p["macd_slow"]) + int(p["macd_signal"]), int(p["rsi_length"])) * 4
+        warmup = self.warmup_bars()
 
         buf = state.setdefault("buf", [])
         buf.append({
