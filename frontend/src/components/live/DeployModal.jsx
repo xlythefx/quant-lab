@@ -183,6 +183,9 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
       symbol={draft.symbol}
       template={editing?.payload_template}
       url={draft.webhook_url || (isEdit ? (editing.webhook_hint || "unchanged") : "")}
+      name={isEdit ? editing.name : ""}
+      secret={draft.secret}
+      secretSource={draft.secret_source}
     />
   );
 
@@ -395,9 +398,10 @@ export default function DeployModal({ open, onClose, onDeployed, strategies = []
 /**
  * Live webhook preview: the EXACT JSON body for each action, built by the backend's
  * real build_payload() (so it can't drift from what actually fires), refreshed a
- * moment after the alias / leverage / symbol change. The secret is always masked.
+ * moment after the alias / leverage / symbol / secret change. Shows the REAL
+ * secret — QuantLab is private behind basic auth (owner's call).
  */
-function PayloadPreview({ alias, leverage, symbol, template, url }) {
+function PayloadPreview({ alias, leverage, symbol, template, url, name, secret, secretSource }) {
   const [action, setAction] = useState("BUY");
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -405,19 +409,22 @@ function PayloadPreview({ alias, leverage, symbol, template, url }) {
   useEffect(() => {
     let alive = true;
     const t = setTimeout(() => {
-      previewPayload({ strategy_alias: alias, leverage: Number(leverage) || 1, symbol, payload_template: template })
+      previewPayload({
+        strategy_alias: alias, leverage: Number(leverage) || 1, symbol, payload_template: template,
+        name, secret, secret_source: secretSource,
+      })
         .then((d) => { if (alive) { setData(d); setError(null); } })
         .catch((e) => { if (alive) setError(e?.response?.data?.error || e.message || "preview failed"); });
     }, 300);
     return () => { alive = false; clearTimeout(t); };
-  }, [alias, leverage, symbol, template]);
+  }, [alias, leverage, symbol, template, name, secret, secretSource]);
 
   const json = data?.payloads?.[action];
   return (
     <div style={{ marginTop: 12, borderTop: "1px solid var(--lt-border)", paddingTop: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
         <span className="lt-field-label" style={{ marginRight: "auto" }}>
-          Webhook payload (exact JSON — secret masked)
+          Webhook payload (exact JSON)
         </span>
         {PREVIEW_ACTIONS.map((a) => (
           <button key={a} type="button" className={`lt-btn small ${a === action ? "cyan" : ""}`}

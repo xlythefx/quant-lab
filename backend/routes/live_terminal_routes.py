@@ -324,26 +324,41 @@ def deployments_delete(name):
 
 
 _PREVIEW_ACTIONS = ("BUY", "SELL", "EXIT_LONG", "EXIT_SHORT")
-_PREVIEW_SECRET = "••••••"   # placeholder so the secret's SHAPE shows, never a real token
+_PREVIEW_NO_SECRET = "<no secret set>"
+
+
+def _preview_secret(body: dict) -> str:
+    """The REAL secret this payload will carry. QuantLab is a private, basic-auth-
+    gated tool, so the preview shows it in full (owner's call, Oct 16, 2026):
+    a freshly typed secret wins, then the reused donor rule's, then the stored one."""
+    typed = str(body.get("secret") or "").strip()
+    if typed and not live_alerts_config._looks_masked_secret(typed):
+        return typed
+    by_name = {r["name"]: r for r in live_alerts_config.load_rules()}
+    for key in (body.get("secret_source"), body.get("name")):
+        rule = by_name.get(str(key or "").strip())
+        if rule and rule.get("secret"):
+            return rule["secret"]
+    return _PREVIEW_NO_SECRET
 
 
 @live_bp.post("/payload-preview")
 def payload_preview():
     """The EXACT JSON body this deployment will POST, for cross-checking before
     arming. Runs the real live_alerter.build_payload() (default shape OR a custom
-    payload_template) so the preview can't drift from what actually fires. The
-    secret is a masked placeholder — the real token is never involved here."""
+    payload_template) so the preview can't drift from what actually fires —
+    including the real secret (see _preview_secret)."""
     body = request.get_json(silent=True) or {}
     fake_rule = {
         "name": str(body.get("name") or "preview"),
-        "secret": _PREVIEW_SECRET,
+        "secret": _preview_secret(body),
         "strategy_alias": str(body.get("strategy_alias") or "").strip(),
         "leverage": body.get("leverage", 1),
         "payload_template": body.get("payload_template") or None,
     }
     symbol = str(body.get("symbol") or "BTCUSDT").strip().upper()
     payloads = {a: live_alerter.build_payload(fake_rule, a, symbol) for a in _PREVIEW_ACTIONS}
-    return jsonify({"symbol": symbol, "secret_masked": _PREVIEW_SECRET, "payloads": payloads})
+    return jsonify({"symbol": symbol, "payloads": payloads})
 
 
 @live_bp.post("/deployments/<path:name>/test-signal")

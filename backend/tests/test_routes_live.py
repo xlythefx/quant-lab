@@ -119,3 +119,22 @@ def test_instruments_lists_deployable_usdt_pairs(client):
     data = client.get("/api/live/instruments").get_json()
     assert data["deploy_symbols"] == ["AVAXUSDT", "BTCUSDT", "ETHUSDT", "LTCUSDT", "SOLUSDT"]
     assert data["instruments"]                                    # chart list unchanged
+
+
+# ---- payload preview shows the REAL secret (owner's call) ------------------------
+
+def test_payload_preview_uses_stored_secret_for_an_existing_rule(client):
+    live_alerts_config.save_rules([make_rule(secret="real-token-123")])
+    r = client.post("/api/live/payload-preview", json={"name": "test-rule", "symbol": "LTCUSDT"})
+    assert r.status_code == 200
+    assert r.get_json()["payloads"]["BUY"]["secret"] == "real-token-123"
+
+
+def test_payload_preview_prefers_a_typed_secret_then_a_reused_one(client):
+    live_alerts_config.save_rules([make_rule(secret="donor-token")])
+    typed = client.post("/api/live/payload-preview", json={"name": "test-rule", "secret": "typed-token"})
+    assert typed.get_json()["payloads"]["SELL"]["secret"] == "typed-token"
+    reused = client.post("/api/live/payload-preview", json={"secret": "***", "secret_source": "test-rule"})
+    assert reused.get_json()["payloads"]["SELL"]["secret"] == "donor-token"
+    none = client.post("/api/live/payload-preview", json={"name": "nope"})
+    assert none.get_json()["payloads"]["BUY"]["secret"] == "<no secret set>"
