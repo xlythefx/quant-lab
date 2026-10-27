@@ -20,7 +20,9 @@ import pandas as pd
 
 from services import market_data, quant_metrics, risk_config, assets
 from services.strategy_registry import get_strategy_class
-from services.strategies.regime import _regime_labels, _regime_params, RegimeDetector
+from services.strategies.regime import (
+    _regime_labels, _regime_params, RegimeDetector, _regime_features, _labels_from_features,
+)
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +83,7 @@ def _rle_segments(labels, time_a) -> list[dict]:
     return segments
 
 
-def _regime_segments(sig_df: pd.DataFrame, params: dict) -> dict:
+def _regime_segments(sig_df: pd.DataFrame, params: dict, with_inputs: bool = False) -> dict:
     """Build the Dashboard chart's regime-band overlays, one set per lens.
 
     Uses the SAME causal labelers and ADX params the strategy gates on, so the
@@ -92,7 +94,14 @@ def _regime_segments(sig_df: pd.DataFrame, params: dict) -> dict:
       "five":    [...segments...],   # 5-mood classifier (Trend↑/↓, High-Vol, Quiet, Choppy)
       "adx":     [...segments...],   # binary ADX filter (Ranging vs Trending)
       "default": "five" | "adx",     # which lens to show first (matches use_five_regime)
+      "inputs":  {...},              # with_inputs only — see below
     }, or {} for an empty frame.
+
+    `with_inputs=True` (the lazy chart-data endpoint) also returns, per bar and
+    aligned 1:1 with the candles, the three numbers every label is decided from:
+    {adx[], slope[] (% per bar), vol_pct[] (0-100, None while warming up), meta}.
+    They come from the same _regime_features call as the bands, so the chart's
+    "why this label?" readout is exactly what the strategy gated on.
     """
     if sig_df is None or sig_df.empty:
         return {}
@@ -103,11 +112,12 @@ def _regime_segments(sig_df: pd.DataFrame, params: dict) -> dict:
 
     # 5-mood lens (shared causal labeler).
     rp = _regime_params({"adx_period": period, "adx_trend_thresh": threshold})
-    five = _rle_segments(_regime_labels(sig_df, rp), time_a)
+    adx_a, slope_a, volp_a = _regime_features(sig_df, rp)
+    five = _rle_segments(_labels_from_features(adx_a, slope_a, volp_a, rp), time_a)
 
-    # Binary ADX lens: detect() is True when ranging (ADX below threshold).
-    rd = RegimeDetector(rp["adx_period"], rp["adx_trend_thresh"])
-    ranging = rd.detect(sig_df).to_numpy()
+    # Binary ADX lens: ranging when ADX is below the threshold — the same rule as
+    # RegimeDetector.detect() (NaN warm-up ADX is already 0 here, i.e. ranging).
+    ranging = adx_a < rp["adx_trend_thresh"]
     adx_labels = np.where(ranging, "Ranging", "Trending")
     adx = _rle_segments(adx_labels, time_a)
 
@@ -117,11 +127,21 @@ def _regime_segments(sig_df: pd.DataFrame, params: dict) -> dict:
     _method = params.get("regime_method")
     if _method not in ("adx", "five", "hmm"):
         _method = "five" if params.get("use_five_regime") else "adx"
-    return {
+    out = {
         "five": five,
         "adx": adx,
         "default": _method,
     }
+    if with_inputs:
+        r = lambda a, k, scale=1.0: [round(float(x) * scale, k) if np.isfinite(x) else None for x in a]
+        out["inputs"] = {
+            "adx": r(adx_a, 2),
+            "slope": r(slope_a, 5, 100.0),
+            "vol_pct": r(volp_a, 1, 100.0),
+            "meta": {k: rp[k] for k in ("adx_period", "adx_trend_thresh", "trend_window",
+                                        "vol_window", "vol_lookback", "vol_hi_pct", "vol_lo_pct")},
+        }
+    return out
 
 
 def _hhmm_to_min(s: str) -> int:
@@ -834,6 +854,57 @@ def _side_block(trades) -> dict:
 # Analytics block — quant-research-grade insights
 # ---------------------------------------------------------------------------
 
+_FIVE_ORDER = ["Trending Up", "Trending Down", "Choppy-Range", "Quiet", "High-Volatility"]
+
+
+def _trades_by_regime(trades, sig_df, params) -> dict:
+    """Trades grouped by the regime at entry, per lens, plus an all-trades baseline.
+
+    "At entry" = the last CLOSED bar before the fill — exactly the bar a regime
+    filter would have gated on. Uses the same causal labeler and ADX params as
+    the chart bands. `se_pct` is the standard error of a group's average, so the
+    UI can say when a difference from the baseline is just noise. Returns {} when
+    there are no trades or no OHLC (e.g. the portfolio aggregate)."""
+    if not trades or sig_df is None or "close" not in sig_df.columns or len(sig_df) < 2:
+        return {}
+    params = params or {}
+    rp = _regime_params({"adx_period": params.get("regime_adx_period"),
+                         "adx_trend_thresh": params.get("regime_adx_threshold")})
+    adx_a, slope_a, volp_a = _regime_features(sig_df, rp)
+    five = _labels_from_features(adx_a, slope_a, volp_a, rp)
+    adx_lab = np.where(adx_a < rp["adx_trend_thresh"], "Ranging", "Trending")
+    time_a = sig_df["time"].to_numpy(dtype=np.int64)
+    idx = np.searchsorted(time_a, [int(t["entry_time"]) for t in trades]) - 1
+    ok = [(t, int(i)) for t, i in zip(trades, idx) if i >= 0]
+
+    def summary(rows, label=None):
+        pct = np.array([float(t["pnl_pct"]) for t in rows])
+        n = len(pct)
+        return {
+            **({"regime": label} if label else {}),
+            "trades": n,
+            "win_rate": float(np.mean([t["pnl_dollars"] > 0 for t in rows])),
+            "avg_pnl_pct": float(pct.mean()),
+            "se_pct": float(pct.std(ddof=1) / np.sqrt(n)) if n > 1 else None,
+            "pnl_dollars": float(sum(t["pnl_dollars"] for t in rows)),
+        }
+
+    def group(labels, order):
+        out = []
+        for lab in order:
+            rows = [t for t, i in ok if labels[i] == lab]
+            if rows:
+                out.append(summary(rows, lab))
+        return out
+
+    return {
+        "all": summary([t for t, _ in ok]) if ok else None,
+        "five": group(five, _FIVE_ORDER),
+        "adx": group(adx_lab, ["Ranging", "Trending"]),
+        "meta": {"adx_period": rp["adx_period"], "adx_trend_thresh": rp["adx_trend_thresh"]},
+    }
+
+
 def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
                        wf_trials=None, sessions_cfg_override=None) -> dict:
     """Heavy stuff for the Analytics page tabs."""
@@ -896,12 +967,21 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
     # capital actually at risk THAT month. Dividing by starting_capital instead
     # inflates every month by (equity / starting_capital) once the curve
     # compounds — a 93x account turns a normal +22% month into "+2,052%".
+    # The month label is only recomputed when a bar leaves the current month's
+    # [m_lo, m_hi) window — formatting a date on every bar was ~400k strftime
+    # calls on a 15m curve, the single biggest cost in this function.
     month_open_eq: dict = {}
     prev_eq = float(starting_capital)
+    m_lo = m_hi = None
     for pt in (equity_curve or []):
-        ym = datetime.fromtimestamp(pt["time"], tz=timezone.utc).strftime("%Y-%m")
-        if ym not in month_open_eq:
-            month_open_eq[ym] = prev_eq
+        t = pt["time"]
+        if m_lo is None or not (m_lo <= t < m_hi):
+            dt = datetime.fromtimestamp(t, tz=timezone.utc)
+            ym = f"{dt.year:04d}-{dt.month:02d}"
+            m_lo = datetime(dt.year, dt.month, 1, tzinfo=timezone.utc).timestamp()
+            m_hi = datetime(dt.year + dt.month // 12, dt.month % 12 + 1, 1, tzinfo=timezone.utc).timestamp()
+            if ym not in month_open_eq:
+                month_open_eq[ym] = prev_eq
         prev_eq = float(pt.get("equity", prev_eq))
 
     monthly_returns = sorted(
@@ -1027,6 +1107,7 @@ def _compute_analytics(trades, equity_curve, sig_df, strategy, starting_capital,
         "slippage_dollars": total_slippage,
         "trading_days": int(trading_days),
         "advanced": advanced,
+        "by_regime": _trades_by_regime(trades, sig_df, getattr(strategy, "p", None)),
     }
 
 

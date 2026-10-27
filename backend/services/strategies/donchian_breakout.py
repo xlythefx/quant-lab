@@ -356,7 +356,8 @@ class DonchianBreakoutStrategy(Strategy):
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Only used if the instrument isn't contract-sized — % of equity per trade."),
 
-        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction"),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction",
+                  description="Which directions may trade: tick Long and/or Short."),
 
         ParamSpec("look_ahead", ParamType.BOOL, False, group="Execution",
                   description="⚠ LOOK-AHEAD (fictitious, NOT tradeable; default OFF): fills entries at the bar's "
@@ -374,6 +375,19 @@ class DonchianBreakoutStrategy(Strategy):
                      "Exits on a trailing/ATR stop, an end-of-day flatten, a breakeven lock, or a dollar "
                      "stop/target. Ported from the @CL TS QTLab engine."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Crude-oil futures (CL) breakout on 1-hour bars, always flat by day's end. "
+            "The Donchian channel is the highest high and lowest low of the last 36 bars.\n\n"
+            "- Buys (long) when: price touches the channel top, the 100-day average of daily closes "
+            "is rising, today's close isn't in the top 20% of today's range, and last week wasn't a "
+            "strong one-way week.\n"
+            "- Sells short when: price touches the channel bottom and last week wasn't a strong "
+            "one-way week.\n"
+            "- Closes the trade when: profit reaches $2,400 per contract, or at 17:00 New York time.\n"
+            "- Stop loss: $1,200 per contract (entry + 10 ticks after $1,200 open profit), plus a "
+            "trailing stop based on recent bars and the ATR (average bar size).\n\n"
+            "Good to know: at most one trade a day; entries about 03:00-17:00 New York time (not UTC)."
+        ),
     )
 
     # Per-symbol point_value / tick_size for the catalog futures. Defaults above

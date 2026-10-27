@@ -67,6 +67,9 @@ class StrategyMeta:
     # and only surface under the "Archived" filter. Keeps superseded variants
     # around without cluttering the active set.
     archived: bool = False
+    # Plain-English "how it works" for the Strategies page: short paragraphs split by
+    # blank lines; lines starting with "- " render as bullets. Empty = not written yet.
+    guide: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +79,7 @@ class StrategyMeta:
             "schema": [s.to_dict() for s in self.schema],
             "kind": self.kind,
             "archived": self.archived,
+            "guide": self.guide,
         }
 
 

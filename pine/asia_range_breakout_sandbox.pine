@@ -14,6 +14,8 @@
 //   CUTOFF  20:00 UTC = 04:00 PH next morning -> close at market, whatever the P&L.
 //           04:00 PH is 20:00 UTC on the SAME UTC day as the entry, so the whole
 //           cycle lives inside one UTC day. Max hold 11-16 hours.
+//   WEEKEND Saturday/Sunday (UTC day) off by default: no box, no entries. Friday's
+//           trade is already flat by the 20:00 UTC cutoff.
 //
 //   NO PRICE STOP BEFORE BAR N, by design. Between entry and bar N nothing closes
 //   the position at any price. On a 25x live account that is a real liquidation
@@ -87,6 +89,9 @@ asiaSess  = input.session("0000-0400", "Asia range (UTC)",   group = "Sessions",
      tooltip = "UTC window whose high/low form the day's range box. Default 0000-0400 UTC = 08:00-12:00 PH.")
 entrySess = input.session("0400-0900", "Entry window (UTC)", group = "Sessions",
      tooltip = "UTC window where a sweep+reclaim may open a trade. Default 0400-0900 UTC = 12:00-17:00 PH.")
+skipWkd   = input.bool(true, "Skip weekends (Sat/Sun UTC)", group = "Sessions",
+     tooltip = "No box and no new trades on Saturday/Sunday (UTC day). The setup relies on London/NY " +
+               "liquidity, which is absent at the weekend.")
 
 brkDepth  = input.float(0.0, "Break depth (x box height)", minval = 0.0, maxval = 2.0, step = 0.05,
      group = "Sweep",
@@ -105,6 +110,8 @@ cutoffH   = input.int(20, "Force-exit hour (UTC)", minval = 0, maxval = 23,
 // ------------------------------------------------------------------ clocks ----
 inAsia  = not na(time(timeframe.period, asiaSess,  "UTC"))
 inEntry = not na(time(timeframe.period, entrySess, "UTC"))
+dow     = dayofweek(time, "UTC")
+wkdOff  = skipWkd and (dow == dayofweek.saturday or dow == dayofweek.sunday)
 
 // ------------------------------------------------------------------- state ----
 // curDay seeds at -1, NOT na: in Pine `x != na` evaluates to na (falsy), so an
@@ -129,8 +136,9 @@ if dayId != curDay
     longDead  := false
     doneToday := false
 
-// Extend the Asia box while inside the Asia window.
-if inAsia
+// Extend the Asia box while inside the Asia window (never on a skipped weekend
+// day -- no box means no entry, exactly like the Python).
+if inAsia and not wkdOff
     boxHi := na(boxHi) ? high : math.max(boxHi, high)
     boxLo := na(boxLo) ? low  : math.min(boxLo, low)
 

@@ -4,6 +4,7 @@ import UnderwaterChart from "./UnderwaterChart.jsx";
 import MonthlyReturnsHeatmap from "./MonthlyReturnsHeatmap.jsx";
 import RiskReturnPanel from "./RiskReturnPanel.jsx";
 import InterpretationCard from "./InterpretationCard.jsx";
+import RegimeBreakdown from "./RegimeBreakdown.jsx";
 import { fmtNum, fmtPct, fmtRatio } from "../../services/format.js";
 import { annualizedVol, bestWorstMonth } from "./metrics.js";
 
@@ -30,7 +31,9 @@ export function deriveSliceMetrics(slice, sc) {
     maxDD: st.max_drawdown_pct_peak,
     sortino: ra.sortino,
     winRate: typeof st.win_rate === "number" ? st.win_rate * 100 : null,
-    vol: annualizedVol(slice.equity),
+    // Multi-Asset ships a thinned curve, so the server measures vol on the
+    // full one; everywhere else the curve is full and the browser computes it.
+    vol: typeof st.ann_vol_pct === "number" ? st.ann_vol_pct : annualizedVol(slice.equity),
     calmar: ra.calmar,
     profitFactor: st.profit_factor,
     exposure: slice.analytics?.exposure_pct,
@@ -73,7 +76,7 @@ function EquityVariantToggles({ ctl }) {
   );
 }
 
-export default function PerformanceTab({ derived, sc, chart, variantCtl, scale, setScale, underwater, monthGrid, interpText, hasAdvanced }) {
+export default function PerformanceTab({ derived, sc, chart, variantCtl, scale, setScale, underwater, monthGrid, interpText, hasAdvanced, byRegime }) {
   const d = derived || {};
   return (
     <div className="space-y-5">
@@ -121,6 +124,13 @@ export default function PerformanceTab({ derived, sc, chart, variantCtl, scale, 
           <UnderwaterChart points={underwater} />
         </div>
       </Section>
+
+      {/* trades by regime at entry (only when the result carries it) */}
+      {byRegime?.all && (
+        <Section title="Trades by Regime" hint="did the market regime at entry change the result?">
+          <RegimeBreakdown data={byRegime} />
+        </Section>
+      )}
 
       {/* monthly heatmap */}
       <Section title="Monthly Returns" hint="% of starting capital, by calendar month">

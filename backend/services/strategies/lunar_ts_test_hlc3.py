@@ -55,4 +55,18 @@ class LunarTSTestHLC3Strategy(_lunar_ts.LunarTSTestStrategy):
                      "atr_rising_mult=0.953; all other logic identical."),
         schema=_HLC3_SCHEMA,
         kind="hlc",
+        guide=(
+            "Main ES (S&P 500 futures) moon strategy. A 'phase' number comes from the New "
+            "York date plus two days: near 1 at full moon, near 0 at new moon (29.53-day "
+            "cycle). Trades open only on a session's first hourly bar.\n\n"
+            "- Buys (long) when: the phase 35 bars ago tops both 1 and 65 bars ago (full moon "
+            "just passed).\n"
+            "- Sells short when: the reverse (new moon just passed) and the last full "
+            "session's range beat 95.3% of the one before.\n"
+            "- Closes the trade when: the opposite turn appears at a session start, the $3,250 "
+            "target is hit, or after 345 bars.\n"
+            "- Stop loss: $1,750; once $1,750 up, it moves to 2.5 points past entry.\n\n"
+            "Good to know: the TradeStation port with an HLC3 (average of high, low, close) "
+            "short filter. Keep Look-ahead off: it fakes results."
+        ),
     )

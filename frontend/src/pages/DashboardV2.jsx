@@ -701,6 +701,7 @@ export default function DashboardV2() {
                 monthGrid={monthGrid}
                 interpText={interpretation(slice, derived)}
                 hasAdvanced={!!slice.analytics?.advanced}
+                byRegime={slice.analytics?.by_regime}
               />
             )}
 

@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import Dashboard from "./pages/Dashboard.jsx";
 import DashboardV2 from "./pages/DashboardV2.jsx";
 import MultiAsset from "./pages/MultiAsset.jsx";
 import Modules from "./pages/Modules.jsx";
@@ -83,14 +82,10 @@ export default function App() {
   if (view === "multiasset")   return <MultiAsset />;
   if (view === "modules")      return <Modules />;
 
+  // Dashboard v1 was removed — old "#dashboard" bookmarks land on V2.
   if (view === "dashboard") {
-    // Dashboard — page-enter fades it in; ripple overlay bursts on mount
-    return (
-      <div key="dashboard" className="page-enter" style={{ height: "100%", minHeight: "100vh" }}>
-        <div className="page-ripple-overlay" aria-hidden="true" />
-        <Dashboard />
-      </div>
-    );
+    window.location.hash = "#dashboardv2";
+    return null;
   }
 
   if (view === "dashboardv2") {

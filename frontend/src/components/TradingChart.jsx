@@ -5,6 +5,7 @@ import { subscribeCandles, socket } from "../services/socket.js";
 import { usePersistentState } from "../services/usePersistentState.js";
 import { REGIME_COLORS, ADX_REGIME_COLORS, buildRegimeColors } from "./marketlab/charts.jsx";
 import { collapseMarkers } from "../services/chartMarkers.js";
+import { fmtNum, fmtInt, fmtPct } from "../services/format.js";
 
 // Regime lenses shown on the chart. 5-Mood and ADX ship with the backtest;
 // HMM is fetched lazily (Market Lab endpoint) the first time it's selected.
@@ -96,6 +97,13 @@ export default function TradingChart({
   // markers are set; read by the crosshair handler to show "N exits" on hover.
   const exitCountsRef = useRef(new Map());
   const tooltipRef = useRef(null);         // floating "N exits (xW / yL)" tooltip div
+  // "Why this label?" — the ADX strip under the candles and the hover readout.
+  // regimeInputs = {adx[], slope[], vol_pct[], meta} aligned 1:1 with candles.
+  const adxSeriesRef = useRef(null);
+  const adxThrLineRef = useRef(null);
+  const regimeInputsRef = useRef(null);
+  const regimeLensRef = useRef("five");
+  const readoutRef = useRef(null);
 
   const [last, setLast] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -113,6 +121,9 @@ export default function TradingChart({
   const [hmmState, setHmmState] = useState(null);
   // Volume profile overlay. Default OFF — flip on to see where volume piled up by price.
   const [showVolProfile, setShowVolProfile] = usePersistentState("ql.chart.showVolProfile", false);
+  // Bumped once the chart instance exists, so effects that add series to it
+  // (the ADX strip) re-run even if their data arrived before the chart did.
+  const [chartTick, setChartTick] = useState(0);
 
   const isStatic = !!staticData;
 
@@ -166,6 +177,43 @@ export default function TradingChart({
         }
       }
     }
+  };
+
+  // "Why this label?" readout for the hovered candle: the label comes from the
+  // band segments (what the backend decided), the numbers from the same
+  // _regime_features call — so the explanation is exactly what was gated on.
+  const _renderRegimeReadout = (param) => {
+    const el = readoutRef.current;
+    if (!el) return;
+    const inputs = regimeInputsRef.current;
+    const candles = vpCandlesRef.current;
+    const lens = regimeLensRef.current;
+    const i = (showRegimesRef.current && inputs && candles && lens !== "hmm" && param?.time != null)
+      ? _indexAtTime(candles, param.time) : -1;
+    const label = i >= 0 ? _labelAtTime(activeRegimeSegsRef.current, param.time) : null;
+    if (i < 0 || !label) { el.style.display = "none"; return; }
+    const m = inputs.meta || {};
+    const thr = m.adx_trend_thresh;
+    const adx = inputs.adx[i], slope = inputs.slope[i], volp = inputs.vol_pct[i];
+    const cmp = adx >= thr ? "≥" : "<";
+    let text;
+    if (lens === "adx") {
+      text = `${label} · ADX ${fmtNum(adx)} ${cmp} ${fmtNum(thr)}\n`
+        + (label === "Trending" ? "an ADX regime filter would BLOCK entries here" : "an ADX regime filter would allow entries here");
+    } else {
+      const hi = Math.round((m.vol_hi_pct ?? 0.8) * 100), lo = Math.round((m.vol_lo_pct ?? 0.2) * 100);
+      const why = {
+        "Trending Up":     `strong move (ADX ≥ ${fmtNum(thr)}) and price sloping up`,
+        "Trending Down":   `strong move (ADX ≥ ${fmtNum(thr)}) and price sloping down`,
+        "High-Volatility": `no strong move; volatility in the top ${100 - hi}% of the last ${fmtInt(m.vol_lookback)} candles`,
+        "Quiet":           `no strong move; volatility in the bottom ${lo}% of the last ${fmtInt(m.vol_lookback)} candles`,
+        "Choppy-Range":    "no strong move; volatility in the normal middle range",
+      }[label] || "";
+      text = `${label}\nADX ${fmtNum(adx)} ${cmp} ${fmtNum(thr)} · slope ${fmtPct(slope)}/candle · `
+        + `volatility ${volp == null ? "warming up" : `${fmtInt(volp)}th percentile`}\n${why}`;
+    }
+    el.textContent = text;
+    el.style.display = "block";
   };
 
   // Build regime bands: one translucent div per run-length-encoded segment, colored
@@ -361,8 +409,56 @@ export default function TradingChart({
     activeRegimeSegsRef.current = segs;
     activeRegimeColorsRef.current = colors;
     showRegimesRef.current = showRegimes;
+    regimeLensRef.current = regimeLens;
+    regimeInputsRef.current = regimeSegments?.inputs || null;
     _renderRegimeBands();
   }, [regimeLens, regimeSegments, hmmState, showRegimes]);
+
+  // ADX strip: the number both the ADX and 5-Regime lenses are decided from,
+  // drawn in its own band between the candles and the volume, with the
+  // threshold as a dashed line. Orange = at/above the threshold (trending ->
+  // a regime filter blocks entries), cyan = below (ranging -> allowed).
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const inputs = regimeSegments?.inputs;
+    const candles = staticData?.candles;
+    const want = showRegimes && regimeLens !== "hmm" && inputs && candles?.length
+      && inputs.adx?.length === candles.length;
+    if (!want) {
+      if (adxSeriesRef.current) {
+        try { chart.removeSeries(adxSeriesRef.current); } catch {}
+        adxSeriesRef.current = null;
+        adxThrLineRef.current = null;
+        chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.2, bottom: 0.1 } });
+      }
+      return;
+    }
+    if (!adxSeriesRef.current) {
+      adxSeriesRef.current = chart.addLineSeries({
+        priceScaleId: "adx",
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        priceFormat: { type: "price", precision: 1, minMove: 0.1 },
+      });
+      // Candles top 68%, ADX strip 70-84%, volume bottom 15%.
+      chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.06, bottom: 0.32 } });
+      chart.priceScale("adx").applyOptions({ scaleMargins: { top: 0.70, bottom: 0.16 } });
+    }
+    const series = adxSeriesRef.current;
+    const thr = inputs.meta?.adx_trend_thresh ?? 25;
+    series.setData(candles.map((c, i) => {
+      const v = inputs.adx[i];
+      return v == null ? { time: c.time } : { time: c.time, value: v, color: v >= thr ? "#f97316" : "#22d3ee" };
+    }));
+    if (adxThrLineRef.current) { try { series.removePriceLine(adxThrLineRef.current); } catch {} }
+    adxThrLineRef.current = series.createPriceLine({
+      price: thr, color: "rgba(249,115,22,0.75)", lineWidth: 1, lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true, title: `ADX threshold ${fmtNum(thr)}`,
+    });
+  }, [regimeSegments, staticData, showRegimes, regimeLens, chartTick]);
 
   // Mirror candles + toggle into refs (for the scroll handlers), then redraw the
   // volume profile. Recomputes whenever the data or the toggle changes.
@@ -429,6 +525,7 @@ export default function TradingChart({
     chartRef.current = chart;
     seriesRef.current = series;
     volumeRef.current = volume;
+    setChartTick((t) => t + 1);
 
     const ts = chart.timeScale();
     const handleVisibleRange = () => {
@@ -446,6 +543,7 @@ export default function TradingChart({
     // Hover tooltip for folded exit stacks: when the crosshair is over a bar whose
     // exits were collapsed into one square, show how many closed there.
     const handleCrosshair = (param) => {
+      _renderRegimeReadout(param);
       const tip = tooltipRef.current;
       if (!tip) return;
       const info = param?.time != null ? exitCountsRef.current.get(param.time) : null;
@@ -467,6 +565,8 @@ export default function TradingChart({
       seriesRef.current = null;
       volumeRef.current = null;
       indicatorSeriesRef.current = {};
+      adxSeriesRef.current = null;
+      adxThrLineRef.current = null;
     };
     // Only rebuild on static<->streaming switch. Symbol/timeframe changes
     // are absorbed via setData so the chart instance survives.
@@ -739,6 +839,26 @@ export default function TradingChart({
     return Object.entries(REGIME_COLORS);
   })();
 
+  // Scale + flicker notes for the legend: how far back the label looks, and how
+  // long a label typically lasts — so a few-hours "mood" isn't mistaken for a
+  // market regime.
+  const regimeNotes = (() => {
+    const meta = regimeSegments?.inputs?.meta;
+    const tfMin = _tfMinutes(timeframe);
+    const segs = regimeLens === "adx" ? regimeSegments?.adx : regimeSegments?.five;
+    const out = {};
+    if (meta && tfMin) {
+      out.lookback = `ADX(${meta.adx_period}) on ${timeframe} ≈ the last ${_fmtSpan(meta.adx_period * tfMin)}`;
+    }
+    if (segs?.length > 1 && tfMin) {
+      const bars = segs.map((x) => x.bars).sort((a, b) => a - b);
+      const days = (segs[segs.length - 1].end_time - segs[0].start_time) / 86400;
+      out.flicker = `A label lasts ~${_fmtSpan(bars[Math.floor(bars.length / 2)] * tfMin)} (median)`
+        + (days >= 1 ? ` · ${fmtNum((segs.length - 1) / days)} changes/day` : "");
+    }
+    return out.lookback || out.flicker ? out : null;
+  })();
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="absolute inset-0" />
@@ -755,6 +875,11 @@ export default function TradingChart({
         className="absolute z-20 pointer-events-none px-2 py-1 rounded-md border border-line bg-bg-elev/95 text-[11px] font-mono text-text whitespace-nowrap shadow-lg"
       />
 
+      <div
+        ref={readoutRef}
+        style={{ display: "none" }}
+        className="absolute top-12 left-3 z-10 pointer-events-none max-w-[520px] px-2.5 py-1.5 rounded-md border border-line bg-bg-elev/90 text-[11px] font-mono text-text whitespace-pre-line leading-snug"
+      />
       <div className="absolute top-3 left-3 flex items-center gap-3 z-10 pointer-events-none">
         <span
           className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-md ${
@@ -820,7 +945,7 @@ export default function TradingChart({
 
       {/* Regime lens selector + color legend (only while the bands are showing). */}
       {showRegimes && hasRegimeData && (
-        <div className="absolute top-12 right-3 z-10 w-44 rounded-md border border-line bg-bg-elev/85 backdrop-blur px-2.5 py-2 text-[10px]">
+        <div className="absolute top-12 right-3 z-10 w-56 rounded-md border border-line bg-bg-elev/85 backdrop-blur px-2.5 py-2 text-[10px]">
           <div className="flex items-center gap-1 mb-2">
             {REGIME_LENSES.map((L) => (
               <button
@@ -849,6 +974,13 @@ export default function TradingChart({
                   <span className="text-text/80 truncate" title={label}>{label}</span>
                 </div>
               ))}
+              {regimeLens !== "hmm" && regimeNotes && (
+                <div className="mt-1.5 pt-1.5 border-t border-line text-muted leading-snug space-y-0.5">
+                  {regimeNotes.lookback && <div>{regimeNotes.lookback}</div>}
+                  {regimeNotes.flicker && <div>{regimeNotes.flicker}</div>}
+                  <div className="text-muted/70">Hover a candle to see why it got its label. The strip under the candles is ADX vs its threshold.</div>
+                </div>
+              )}
               {regimeLens === "hmm" && hmmState?.capped && (
                 <div className="text-muted/70 mt-1 leading-snug">
                   Recent {hmmState.analyzedBars?.toLocaleString?.() || hmmState.analyzedBars} bars only (HMM speed cap).
@@ -882,4 +1014,42 @@ export default function TradingChart({
       )}
     </div>
   );
+}
+
+// ---- regime readout helpers ---------------------------------------------------
+// Index of the candle at `t` (candles sorted by time), or -1.
+function _indexAtTime(candles, t) {
+  let lo = 0, hi = candles.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const v = candles[mid].time;
+    if (v === t) return mid;
+    if (v < t) lo = mid + 1; else hi = mid - 1;
+  }
+  return -1;
+}
+
+// Label of the run-length segment covering `t`, or null.
+function _labelAtTime(segs, t) {
+  if (!segs?.length) return null;
+  let lo = 0, hi = segs.length - 1, hit = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (segs[mid].start_time <= t) { hit = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return hit >= 0 && t <= segs[hit].end_time ? segs[hit].regime : null;
+}
+
+function _tfMinutes(tf) {
+  const m = /^(\d+)([mhdw])$/.exec(tf || "");
+  if (!m) return null;
+  return Number(m[1]) * { m: 1, h: 60, d: 1440, w: 10080 }[m[2]];
+}
+
+// Minutes -> "45 min" / "5h" / "12.50h" / "3.00 days".
+function _fmtSpan(min) {
+  if (min < 60) return `${fmtInt(min)} min`;
+  const h = min / 60;
+  if (h < 48) return `${Number.isInteger(h) ? fmtInt(h) : fmtNum(h)}h`;
+  return `${fmtNum(h / 24)} days`;
 }

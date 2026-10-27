@@ -127,7 +127,9 @@ class OrbCrypto5DayHalfRangeStrategy(Strategy):
                   description="Close any open trade at the last bar of the UTC day. The "
                               "original never held overnight. Off = ride to stop/target."),
         # ---- Direction ----
-        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction"),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction",
+                  description="Which directions may trade: tick Long (upper trigger line) and/or "
+                              "Short (lower trigger line)."),
         # ---- Sizing ----
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Crypto/spot sizing: notional = equity x risk_pct / entry price."),
@@ -146,6 +148,20 @@ class OrbCrypto5DayHalfRangeStrategy(Strategy):
                      "UTC day; exits on a fixed %% stop, a 2x %% target (1:2), or the day-end "
                      "flat. The original's breakeven ratchet is REMOVED."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Each UTC day it draws two lines: today's open plus and minus half of yesterday's "
+            "high-to-low range. It trades the first line price touches, but only after a quiet "
+            "stretch.\n\n"
+            "- Buys (long) when: price touches the upper line, the market is 'compressed' (open 5 "
+            "days ago and yesterday's close are under half the 5-day range apart), and yesterday "
+            "was not an inside day (inside the day before's range).\n"
+            "- Sells short when: price touches the lower line, the market is compressed, and "
+            "yesterday made a lower high and lower low.\n"
+            "- Closes the trade when: up 2%, or at the UTC day's last bar.\n"
+            "- Stop loss: 1% from entry; a bar hitting both counts as a loss.\n\n"
+            "Good to know: one trade per UTC day. Not a classic opening-range breakout. Port of a "
+            "Nasdaq futures strategy, breakeven stop removed."
+        ),
     )
 
     OVERLAYS = [

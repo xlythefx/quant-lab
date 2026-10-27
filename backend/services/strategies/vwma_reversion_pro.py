@@ -54,17 +54,28 @@ def _rolling_lag1_autocorr(close: pd.Series, lookback: int) -> pd.Series:
 class VwmaReversionProStrategy(Strategy):
     PARAM_SCHEMA = [
         # --- Core VWMA reversion (same as the base strategy) ----------------
-        ParamSpec("vwma_length",  ParamType.INT,   30,  min=5,  max=200, step=1, group="VWMA"),
-        ParamSpec("z_threshold",  ParamType.FLOAT, 1.5, min=0.5, max=4.0, step=0.1, group="VWMA"),
-        ParamSpec("rsi_length",   ParamType.INT,   25,  min=5,  max=50,  step=1, group="RSI"),
-        ParamSpec("rsi_long_max", ParamType.INT,   35,  min=25, max=40,  step=1, group="RSI"),
-        ParamSpec("rsi_short_min",ParamType.INT,   65,  min=60, max=75,  step=1, group="RSI"),
+        ParamSpec("vwma_length",  ParamType.INT,   30,  min=5,  max=200, step=1, group="VWMA",
+                  description="Bars in the VWMA (volume-weighted average price) that price should snap "
+                              "back to; also the window for measuring the z-score spread."),
+        ParamSpec("z_threshold",  ParamType.FLOAT, 1.5, min=0.5, max=4.0, step=0.1, group="VWMA",
+                  description="How far price must stretch from the VWMA, in standard deviations (z-score), "
+                              "before a trade opens. Also sets the far band scale-out aims for."),
+        ParamSpec("rsi_length",   ParamType.INT,   25,  min=5,  max=50,  step=1, group="RSI",
+                  description="Bars used to calculate RSI (a 0–100 gauge of recent up moves vs down moves)."),
+        ParamSpec("rsi_long_max", ParamType.INT,   35,  min=25, max=40,  step=1, group="RSI",
+                  description="A long needs RSI below this value (oversold)."),
+        ParamSpec("rsi_short_min",ParamType.INT,   65,  min=60, max=75,  step=1, group="RSI",
+                  description="A short needs RSI above this value (overbought)."),
 
         # --- ATR stop (loss) -----------------------------------------------
         ParamSpec("atr_stop",   ParamType.BOOL,  True, group="Stop",
                   description="ATR-based hard stop. Off = exit only on mean-revert / time stop / scale-out."),
-        ParamSpec("atr_length", ParamType.INT,   10,  min=5,  max=50, step=1,   group="Stop"),
-        ParamSpec("atr_mult",   ParamType.FLOAT, 6.0, min=1,  max=20, step=0.5, group="Stop"),
+        ParamSpec("atr_length", ParamType.INT,   10,  min=5,  max=50, step=1,   group="Stop",
+                  description="Bars used to measure ATR (the average high-to-low range of a bar) for the "
+                              "stop distance and for ATR sizing."),
+        ParamSpec("atr_mult",   ParamType.FLOAT, 6.0, min=1,  max=20, step=0.5, group="Stop",
+                  description="Stop distance from the entry price, in multiples of ATR (6 = six average "
+                              "bar ranges)."),
 
         # --- 1. TIME STOP ---------------------------------------------------
         ParamSpec("use_time_stop", ParamType.BOOL, False, group="Time Stop",
@@ -121,11 +132,15 @@ class VwmaReversionProStrategy(Strategy):
                   },
                   group="Sessions",
                   description="UTC session windows where new entries are allowed."),
-        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction"),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction",
+                  description="Which directions may trade: tick Long and/or Short."),
         ParamSpec("use_regime", ParamType.BOOL, False, group="Regime",
                   description="Block entries when ADX signals a trending market. Exits still fire."),
-        ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime"),
-        ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime"),
+        ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime",
+                  description="Bars used to calculate ADX (a 0–100 trend-strength gauge) for the regime filter."),
+        ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime",
+                  description="ADX level that counts as trending. The ADX filter blocks new entries at or "
+                              "above it; the 5-regime classifier uses it to label trends."),
         ParamSpec("use_five_regime", ParamType.BOOL, False, group="Regime",
                   description="Use the 5-regime classifier instead of the binary ADX filter."),
         ParamSpec("allowed_regimes", ParamType.REGIMES,
@@ -146,6 +161,19 @@ class VwmaReversionProStrategy(Strategy):
                      "ATR-scaled sizing, scale-out, and a tweakable mean-reversion confirmation filter. "
                      "All modules toggle independently; all-off = plain VWMA reversion."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "VWMA Reversion's stretch-and-snap-back idea (price far from its 30-bar VWMA, a volume-weighted "
+            "average, tends to return), plus five optional add-ons. One position at a time.\n\n"
+            "- Buys (long) when: z-score (distance from the VWMA, in units of its usual spread) below -1.5 "
+            "and 25-bar RSI (a 0–100 buying-vs-selling gauge) under 35, inside the UTC session windows.\n"
+            "- Sells short when: z-score above +1.5 and RSI above 65.\n"
+            "- Closes the trade when: price closes back at or past the VWMA.\n"
+            "- Stop loss: ON by default (unlike the base strategy): a close 6 × ATR (average bar range) "
+            "beyond entry.\n\n"
+            "Good to know: add-ons, all off: time stop, volume-spike gate, ATR sizing (smaller when "
+            "volatile), scale-out (bank part at the VWMA, let the rest run to the far band), mean-reversion "
+            "check. Scale-out and ATR sizing are backtest-only."
+        ),
     )
 
     OVERLAYS = [

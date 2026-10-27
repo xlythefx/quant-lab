@@ -26,4 +26,17 @@ class LunarHLC3Strategy(_lunar.LunarStrategy):
         schema=_lunar.LunarStrategy.PARAM_SCHEMA,
         kind="hlc",
         archived=True,
+        guide=(
+            "Bets that ES (S&P 500 futures) follows the moon. A 'phase' number comes from the "
+            "New York calendar date alone: near 1 at full moon, near 0 at new moon (29.53-day "
+            "cycle). Trades open only on a session's first hourly bar.\n\n"
+            "- Buys (long) when: the daily phase peaked 3 sessions ago (full moon just passed).\n"
+            "- Sells short when: the phase bottomed 3 sessions ago (new moon just passed) and "
+            "the ATR (average daily price range) grew in the last finished session.\n"
+            "- Closes the trade when: the opposite turn appears at a session start, the $3,250 "
+            "target is hit, or after 345 bars.\n"
+            "- Stop loss: $1,750; once $1,750 up, it moves to just past entry.\n\n"
+            "Good to know: archived. Like 'Lunar', but the ATR uses HLC3 (average of high, low, "
+            "close) instead of the close."
+        ),
     )

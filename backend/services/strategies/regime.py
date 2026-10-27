@@ -154,8 +154,13 @@ def _smooth_labels(labels: np.ndarray, min_len: int) -> np.ndarray:
     return labels
 
 
-def _regime_labels(df: pd.DataFrame, rp: dict) -> np.ndarray:
-    """Causal per-bar regime label array (one of REGIME_LABELS)."""
+def _regime_features(df: pd.DataFrame, rp: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The three causal inputs every label is decided from, per bar:
+    (ADX, rolling linreg slope of close in fraction/bar, volatility percentile
+    0..1 within the trailing lookback — NaN while warming up).
+
+    One function for both the labeler and the chart's "why this label?" readout,
+    so what you see explained is exactly what the strategy gated on."""
     close = df["close"].astype(float)
     n = len(df)
     c = close.to_numpy()
@@ -167,32 +172,47 @@ def _regime_labels(df: pd.DataFrame, rp: dict) -> np.ndarray:
     x = np.arange(tw, dtype=float)
     x_dev = x - x.mean()
     x_ss = float(np.dot(x_dev, x_dev))
+    # beta_i = x_dev · (window - window mean) / x_ss for the window ending at i.
+    # x_dev sums to zero, so the mean term drops out and every window is one
+    # sliding dot product — np.correlate does all of them at once (this was a
+    # per-bar Python loop; same numbers, ~100x faster).
     slope_pct = np.zeros(n)
-    for i in range(tw - 1, n):
-        win = c[i - tw + 1 : i + 1]
-        beta = float(np.dot(x_dev, win - win.mean())) / x_ss if x_ss > 0 else 0.0
-        slope_pct[i] = (beta / win[-1]) if win[-1] > 0 else 0.0
+    if n >= tw and x_ss > 0:
+        beta = np.correlate(c, x_dev, mode="valid") / x_ss
+        last = c[tw - 1:]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            slope_pct[tw - 1:] = np.where(last > 0, beta / last, 0.0)
+        # A perfectly flat/symmetric window has slope 0, but floating point
+        # leaves ~1e-18 of either sign — which would flip Trending Up/Down on
+        # rounding noise (seen on illiquid coins with few price levels). Treat
+        # anything that small as exactly zero: no direction.
+        slope_pct[np.abs(slope_pct) < 1e-12] = 0.0
 
     # Volatility, ranked within a TRAILING lookback (causal + range-independent).
     rv = close.pct_change().rolling(rp["vol_window"]).std()
     lb = max(2, int(rp["vol_lookback"]))
     vol_pct = rv.rolling(lb, min_periods=min(lb, 20)).rank(pct=True).to_numpy()
+    return adx, slope_pct, vol_pct
 
-    labels = np.empty(n, dtype=object)
+
+def _regime_labels(df: pd.DataFrame, rp: dict) -> np.ndarray:
+    """Causal per-bar regime label array (one of REGIME_LABELS)."""
+    return _labels_from_features(*_regime_features(df, rp), rp)
+
+
+def _labels_from_features(adx, slope_pct, vol_pct, rp: dict) -> np.ndarray:
     at = rp["adx_trend_thresh"]
-    for i in range(n):
-        a, sl = adx[i], slope_pct[i]
-        vp = vol_pct[i] if np.isfinite(vol_pct[i]) else 0.5
-        if a >= at and sl > 0:
-            labels[i] = "Trending Up"
-        elif a >= at and sl < 0:
-            labels[i] = "Trending Down"
-        elif vp >= rp["vol_hi_pct"]:
-            labels[i] = "High-Volatility"
-        elif vp <= rp["vol_lo_pct"] and a < at:
-            labels[i] = "Quiet"
-        else:
-            labels[i] = "Choppy-Range"
+    vp = np.where(np.isfinite(vol_pct), vol_pct, 0.5)   # warm-up → middle
+    trending = adx >= at
+    # First matching rule wins, in this order (np.select = an if/elif chain).
+    labels = np.select(
+        [trending & (slope_pct > 0),
+         trending & (slope_pct < 0),
+         vp >= rp["vol_hi_pct"],
+         (vp <= rp["vol_lo_pct"]) & ~trending],
+        ["Trending Up", "Trending Down", "High-Volatility", "Quiet"],
+        default="Choppy-Range",
+    ).astype(object)
 
     sb = int(rp.get("smooth_bars") or 0)
     if sb > 1:

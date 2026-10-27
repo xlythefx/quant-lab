@@ -223,7 +223,8 @@ class LunarStrategy(Strategy):
 
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
-                  group="Direction"),
+                  group="Direction",
+                  description="Which directions may trade: tick Long and/or Short."),
 
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Only used if Contract sizing is OFF — position as % of equity."),
@@ -247,6 +248,18 @@ class LunarStrategy(Strategy):
                      "breakeven, maxbars on every bar."),
         schema=PARAM_SCHEMA,
         archived=True,
+        guide=(
+            "Bets that ES (S&P 500 futures) follows the moon. A 'phase' number comes from the "
+            "New York calendar date alone: near 1 at full moon, near 0 at new moon (29.53-day "
+            "cycle). Trades open only on a session's first hourly bar.\n\n"
+            "- Buys (long) when: the daily phase peaked 3 sessions ago (full moon just passed).\n"
+            "- Sells short when: the phase bottomed 3 sessions ago (new moon just passed) and "
+            "the ATR (average daily price range) grew in the last finished session.\n"
+            "- Closes the trade when: the opposite turn appears at a session start, the $3,250 "
+            "target is hit, or after 345 bars (~3 weeks).\n"
+            "- Stop loss: $1,750; once the trade is $1,750 up, it moves to just past entry.\n\n"
+            "Good to know: archived. Lags count sessions (trading days), not bars."
+        ),
     )
 
     OVERLAYS = [

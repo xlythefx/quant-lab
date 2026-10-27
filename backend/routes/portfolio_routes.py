@@ -26,10 +26,12 @@ Net: 649 MB -> under 10 MB.
 """
 import logging
 import math
+import time
+from concurrent.futures import CancelledError
 
 from flask import Blueprint, jsonify, request
 
-from services import portfolio_runner
+from services import multi_asset, portfolio_runner, risk_config
 from services.portfolio_runner import StrategySpec
 from utils.validators import validate_symbol, validate_timeframe, ValidationError
 
@@ -221,6 +223,47 @@ def run_backtest_portfolio():
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         log.exception("backtest/portfolio failed")
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify(_slim_for_wire(result))
+
+
+@portfolio_bp.post("/backtest/multi-asset")
+def run_backtest_multi_asset():
+    """One asset of a Multi-Asset basket, run on a worker process.
+
+    Same body as /backtest/portfolio with exactly ONE strategy, plus `run_id`
+    (the run's start time in ms — see services/multi_asset.py). The page sends
+    several of these at once, so a basket uses several cores.
+
+    Response: the usual slimmed wire shape, but only `per_strategy` is filled,
+    its equity curve is thinned for drawing, and its stats carry
+    `ann_vol_pct` measured on the full curve.
+    """
+    body = request.get_json(silent=True) or {}
+    try:
+        specs, start_time, end_time = _parse_specs(body)
+        if len(specs) != 1:
+            raise ValidationError("multi-asset runs exactly one strategy per request")
+        run_id = int(body.get("run_id") or time.time() * 1000)
+    except ValidationError as e:
+        return jsonify({"error": str(e)}), 400
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": f"invalid request: {e}"}), 400
+
+    try:
+        # Risk settings are snapshotted HERE, in the parent: a worker process
+        # caches its own copy, which could be stale.
+        result = multi_asset.run_asset(run_id, specs[0], start_time, end_time,
+                                       risk_config.get())
+    except (multi_asset.SupersededError, CancelledError):
+        return jsonify({"error": "superseded by a newer run"}), 409
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log.exception("backtest/multi-asset failed")
         return jsonify({"error": str(e)}), 500
 
     return jsonify(_slim_for_wire(result))

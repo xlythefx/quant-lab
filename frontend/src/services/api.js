@@ -40,14 +40,28 @@ export async function listDatasets() {
   return data.datasets;
 }
 
-export async function downloadDataset({ symbol, timeframe, start, end, sid, jobId, broker = "binance" }) {
-  // start/end are 'YYYY-MM-DD' strings.
+export async function downloadDataset({ symbols, timeframes, start, end, sid, jobId, broker = "binance", overwrite = false }) {
+  // start/end are 'YYYY-MM-DD' strings; every symbol x timeframe pair downloads
+  // one after another in a single background job.
+  // overwrite (crypto): replace saved files with a fresh copy instead of filling gaps.
   // Returns immediately with {ok, job_id, ...}; actual progress + terminal
   // state arrive via socket events (download_progress / download_complete /
   // download_cancelled / download_error). broker selects which adapter
   // handles the fetch (binance | dukascopy).
   const { data } = await api.post("/api/datasets/download", {
-    symbol, timeframe, start, end, sid, job_id: jobId, broker,
+    symbols, timeframes, start, end, sid, job_id: jobId, broker, overwrite,
+  });
+  return data;
+}
+
+/** Auto-detect (crypto only): per symbol and timeframe, the exchange's
+ * first/newest bar, what's already saved, and what a download would fetch +
+ * a time estimate. start/end ('YYYY-MM-DD') are optional — omitted means the
+ * whole history. A symbol that fails comes back as {symbol, error}. */
+export async function probeDataset({ symbols, broker, timeframes, start, end }) {
+  const { data } = await api.get("/api/datasets/probe", {
+    params: { symbols: symbols.join(","), broker, timeframes: timeframes.join(","), start, end },
+    timeout: 300_000, // big batches, and MEXC's first-bar search is ~15 requests per timeframe
   });
   return data;
 }
@@ -165,6 +179,20 @@ export async function runPortfolioBacktest({ strategies, start_time, end_time, s
   // the equity compare) WITHOUT changing the saved Risk Settings.
   const { data } = await api.post("/api/backtest/portfolio", {
     strategies, start_time, end_time, sid, risk_overrides,
+  }, { timeout: 900_000 });
+  return decodePortfolio(data);
+}
+
+/**
+ * One asset of a Multi-Asset basket, run on a backend worker process so the
+ * page can run several at once. Same response shape as runPortfolioBacktest,
+ * but only `per_strategy` is filled, its equity curve is thinned for drawing,
+ * and its stats carry `ann_vol_pct` measured on the full curve. `run_id` (the
+ * run's start time in ms) lets the backend drop an older run's queued assets.
+ */
+export async function runMultiAssetBacktest({ strategy, start_time, end_time, run_id }) {
+  const { data } = await api.post("/api/backtest/multi-asset", {
+    strategies: [strategy], start_time, end_time, run_id,
   }, { timeout: 900_000 });
   return decodePortfolio(data);
 }
@@ -388,6 +416,13 @@ export async function marketLabVolatility({ symbol, timeframe, start_time, end_t
 /** Day/hour (UTC) returns, autocorrelation, distribution, conditional streaks. */
 export async function marketLabStatistics({ symbol, timeframe, start_time, end_time, params }) {
   const { data } = await api.post("/api/marketlab/statistics", {
+    symbol, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+export async function marketLabWeekdayWindows({ symbol, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/weekday-windows", {
     symbol, timeframe, start_time, end_time, params,
   });
   return data;

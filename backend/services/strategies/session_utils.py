@@ -40,6 +40,13 @@ def et_ordinal_days(times_s) -> np.ndarray:
     return np.asarray(days, dtype="float64")
 
 
+def is_weekend_utc(times_s):
+    """True on Saturday/Sunday by the UTC calendar day. Works on a scalar epoch-
+    seconds int or a numpy array. 1970-01-01 was a Thursday, so (day + 3) % 7 is
+    Mon=0 .. Sun=6 and the weekend is 5 and 6."""
+    return (np.asarray(times_s, dtype="int64") // 86400 + 3) % 7 >= 5
+
+
 def parse_hhmm(s: str) -> dt_time:
     m = _HHMM_RE.match((s or "").strip())
     if not m:

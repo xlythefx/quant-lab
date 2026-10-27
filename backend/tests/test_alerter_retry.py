@@ -1,4 +1,6 @@
 """No double orders: retry only when the request provably never reached the receiver."""
+import re
+
 import httpx
 import pytest
 
@@ -74,9 +76,29 @@ def test_502_and_503_are_retried_up_to_three_attempts(harness):
 def test_timeout_is_ten_seconds_and_payload_shape_unchanged(harness):
     harness["script"] = [_Resp(200)]
     rule = {"name": "r", "secret": "abc12345xyz", "strategy_alias": "VWMA", "leverage": 25}
-    live_alerter._post("https://example.invalid/hook", live_alerter.build_payload(rule, "EXIT_LONG", "SOLUSDT"),
+    live_alerter._post("https://example.invalid/hook",
+                       live_alerter.build_payload(rule, "EXIT_LONG", "SOLUSDT", sent_at="2026-10-26T14:15:02.812Z"),
                        strategy_id="s", symbol="SOLUSDT", action="EXIT_LONG", rule_name="r")
     call = harness["calls"][0]
     assert call["timeout"] == 10.0
     assert call["json"] == {"secret": "abc12345xyz", "strategy": "VWMA", "leverage": "25",
-                            "action": "EXIT_LONG", "symbol": "SOLUSDT"}
+                            "action": "EXIT_LONG", "symbol": "SOLUSDT",
+                            "sent_at": "2026-10-26T14:15:02.812Z"}
+
+
+def test_sent_at_is_utc_millis_and_stays_the_same_on_retries(harness):
+    harness["script"] = [httpx.ConnectError("refused"), _Resp(502), _Resp(200)]
+    rule = {"name": "r", "secret": "abc12345xyz", "strategy_alias": "VWMA", "leverage": 25}
+    payload = live_alerter.build_payload(rule, "BUY", "SOLUSDT")
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", payload["sent_at"])
+    live_alerter._post("https://example.invalid/hook", payload,
+                       strategy_id="s", symbol="SOLUSDT", action="BUY", rule_name="r")
+    assert len(harness["calls"]) == 3
+    assert {c["json"]["sent_at"] for c in harness["calls"]} == {payload["sent_at"]}
+
+
+def test_sent_at_token_in_custom_template():
+    rule = {"name": "r", "secret": "s3cr3t-token", "strategy_alias": "VWMA", "leverage": 5,
+            "payload_template": '{"a": "{{action}}", "t": "{{sent_at}}"}'}
+    p = live_alerter.build_payload(rule, "SELL", "SOLUSDT", sent_at="2026-10-26T00:00:00.001Z")
+    assert p == {"a": "SELL", "t": "2026-10-26T00:00:00.001Z"}

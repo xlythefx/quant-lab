@@ -28,6 +28,8 @@ CONFIGS = {
     "original 1D":        (AnnStrategyV2, {}),
     "original 4h":        (AnnStrategyV2, {"anchor": "240"}),
     "original 1W":        (AnnStrategyV2, {"anchor": "1W"}),
+    "original long only": (AnnStrategyV2, {"sides": {"long": True, "short": False}}),
+    "original short only":(AnnStrategyV2, {"sides": {"long": False, "short": True}}),
     "plus default":       (AnnStrategyV2Plus, {}),
     "plus ann signal":    (AnnStrategyV2Plus, {"signal": "ann"}),
     "plus no band":       (AnnStrategyV2Plus, {"band_k": 0.0}),

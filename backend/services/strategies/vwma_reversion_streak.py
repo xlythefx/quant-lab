@@ -94,6 +94,19 @@ class VwmaReversionStreakStrategy(_vr.VwmaReversionStrategy):
                      "Optional kill switch stops the strategy after a losing streak at the smallest "
                      "size. Backtest-only sizing; single position."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "VWMA Reversion's signals, but trade size shrinks after losing streaks and grows back after "
+            "winning ones. A backtest-only sizing experiment.\n\n"
+            "- Buys (long) when: z-score (distance from the 30-bar VWMA, a volume-weighted average, in "
+            "units of its usual spread) below -1.5 and 25-bar RSI (a 0–100 buying-vs-selling gauge) under "
+            "35, in the UTC session windows.\n"
+            "- Sells short when: z-score above +1.5 and RSI above 65.\n"
+            "- Closes the trade when: price closes back at or past the VWMA.\n"
+            "- Stop loss: in backtests a close 6 × ATR (average bar range) beyond entry always applies, "
+            "even with the ATR stop switch off; live follows the switch.\n\n"
+            "Good to know: 2 losses in a row step size down (full → half → quarter of a 1% Risk%); 2 wins "
+            "step it back up. One position at a time. Baseline: this strategy with sizing off."
+        ),
     )
 
     OVERLAYS = _vr.VwmaReversionStrategy.OVERLAYS + [

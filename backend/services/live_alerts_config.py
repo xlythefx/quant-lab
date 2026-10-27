@@ -40,7 +40,7 @@ _VALID_BROKERS = ("binance", "tradestation")
 _cache: list[dict] | None = None
 
 # Tokens available in a custom payload_template JSON string.
-PAYLOAD_TOKENS = ("action", "symbol", "secret", "strategy", "leverage")
+PAYLOAD_TOKENS = ("action", "symbol", "secret", "strategy", "leverage", "sent_at")
 
 
 def _auto_broker(symbol: str) -> str:

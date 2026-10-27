@@ -375,7 +375,7 @@ def chart_data(specs: list[StrategySpec],
         overlays_by_strategy[spec.strategy_id] = backtest_engine._build_overlays(
             strategy, sig_df, time_a)
         regime_by_strategy[spec.strategy_id] = backtest_engine._regime_segments(
-            sig_df, strategy.p)
+            sig_df, strategy.p, with_inputs=True)
 
     return {
         "candles_by_dataset": candles_by_dataset,
@@ -391,7 +391,8 @@ def run_portfolio(specs: list[StrategySpec],
                   risk_overrides: Optional[dict] = None,
                   df_by_spec: Optional[dict] = None,
                   sid: Optional[str] = None,
-                  with_chart_data: bool = True) -> dict:
+                  with_chart_data: bool = True,
+                  per_strategy_only: bool = False) -> dict:
     """Walk 1..N strategies through a single shared cash pool.
 
     Same-bar conflicts resolved by `spec.priority` (low number wins). When a
@@ -409,6 +410,11 @@ def run_portfolio(specs: list[StrategySpec],
     trades and stats (the dashboard endpoint, Monte Carlo) should pass False —
     building them for 6 strategies over 221k bars cost ~180 MB of payload and
     ~17s of serialization. Fetch them via `chart_data()` instead.
+
+    `per_strategy_only=True` skips the aggregate block (portfolio equity,
+    trades, stats, analytics, correlation) and returns it empty. For a
+    one-strategy run it is a duplicate of the per_strategy slice, so the
+    Multi-Asset page — which only reads per_strategy — passes True.
     """
     if not specs:
         raise ValueError("at least one StrategySpec is required")
@@ -588,46 +594,50 @@ def run_portfolio(specs: list[StrategySpec],
 
     # ---- Build result -------------------------------------------------
     aggregate_trades = []
-    for s in streams:
-        for tr in s.trades:
-            aggregate_trades.append({**tr, "strategy_id": s.spec.strategy_id,
-                                     "symbol": s.spec.symbol})
-    aggregate_trades.sort(key=lambda t: t["entry_time"])
+    if not per_strategy_only:
+        for s in streams:
+            for tr in s.trades:
+                aggregate_trades.append({**tr, "strategy_id": s.spec.strategy_id,
+                                         "symbol": s.spec.symbol})
+        aggregate_trades.sort(key=lambda t: t["entry_time"])
 
     final_equity = state.equity_curve[-1]["equity"] if state.equity_curve else starting_capital
 
     _emit({"stage": "stats"})
 
-    # Aggregate stats use the existing engine helpers — feed the merged
-    # trades and the portfolio equity curve.
-    equity_arr     = np.array([p["equity"] for p in state.equity_curve], dtype=float)
-    dd_dollars_arr = np.array([p["drawdown_dollars"] for p in state.equity_curve], dtype=float)
-    time_arr       = np.array([p["time"] for p in state.equity_curve], dtype=np.int64)
+    stats: dict = {}
+    analytics: dict = {}
+    if not per_strategy_only:
+        # Aggregate stats use the existing engine helpers — feed the merged
+        # trades and the portfolio equity curve.
+        equity_arr     = np.array([p["equity"] for p in state.equity_curve], dtype=float)
+        dd_dollars_arr = np.array([p["drawdown_dollars"] for p in state.equity_curve], dtype=float)
+        time_arr       = np.array([p["time"] for p in state.equity_curve], dtype=np.int64)
 
-    stats = backtest_engine._compute_stats(
-        aggregate_trades, final_equity, dd_dollars_arr, time_arr,
-        starting_capital, equity_arr,
-    )
+        stats = backtest_engine._compute_stats(
+            aggregate_trades, final_equity, dd_dollars_arr, time_arr,
+            starting_capital, equity_arr,
+        )
 
-    # Aggregate analytics: pass a stub strategy with no sessions config so the
-    # by-session block lands in 'unknown'. Per-strategy analytics (below)
-    # carry the per-strategy session breakdown.
-    class _NoSessionsStub:
-        p = {"sessions": {}}
-    # Use the first stream's sig_df for `sig_df` arg (only time array is read
-    # for exposure %). Trades reference each strategy's symbol but exposure
-    # currently maps via time → idx — works as long as the unified timeline
-    # is used. Pass the equity-curve time grid instead.
-    agg_sig_df = pd.DataFrame({"time": time_arr})
-    aggregate_equity_for_analytics = [
-        {"time": p["time"], "equity": p["equity"],
-         "value": p["value"], "drawdown": p["drawdown"]}
-        for p in state.equity_curve
-    ]
-    analytics = backtest_engine._compute_analytics(
-        aggregate_trades, aggregate_equity_for_analytics, agg_sig_df,
-        _NoSessionsStub(), starting_capital,
-    )
+        # Aggregate analytics: pass a stub strategy with no sessions config so the
+        # by-session block lands in 'unknown'. Per-strategy analytics (below)
+        # carry the per-strategy session breakdown.
+        class _NoSessionsStub:
+            p = {"sessions": {}}
+        # Use the first stream's sig_df for `sig_df` arg (only time array is read
+        # for exposure %). Trades reference each strategy's symbol but exposure
+        # currently maps via time → idx — works as long as the unified timeline
+        # is used. Pass the equity-curve time grid instead.
+        agg_sig_df = pd.DataFrame({"time": time_arr})
+        aggregate_equity_for_analytics = [
+            {"time": p["time"], "equity": p["equity"],
+             "value": p["value"], "drawdown": p["drawdown"]}
+            for p in state.equity_curve
+        ]
+        analytics = backtest_engine._compute_analytics(
+            aggregate_trades, aggregate_equity_for_analytics, agg_sig_df,
+            _NoSessionsStub(), starting_capital,
+        )
 
     # Per-strategy block: trades, synthetic equity curve, stats, analytics.
     per_strategy: dict[str, dict] = {}
@@ -711,12 +721,13 @@ def run_portfolio(specs: list[StrategySpec],
         ],
         "risk_config": rc,
         "trades": aggregate_trades,
-        "equity": state.equity_curve,
+        "equity": [] if per_strategy_only else state.equity_curve,
         "skipped_signals": state.skipped_signals,
         "stats": stats,
         "analytics": analytics,
         "per_strategy": per_strategy,
-        "correlation": portfolio_correlation.compute(per_strategy, starting_capital),
+        "correlation": {} if per_strategy_only
+                       else portfolio_correlation.compute(per_strategy, starting_capital),
     }
 
 

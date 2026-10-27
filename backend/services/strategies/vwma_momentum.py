@@ -49,15 +49,23 @@ def _rsi(close: pd.Series, length: int) -> pd.Series:
 
 class VwmaMomentumStrategy(Strategy):
     PARAM_SCHEMA = [
-        ParamSpec("vwma_length",        ParamType.INT,   75,   min=10, max=300, step=1, group="VWMA"),
-        ParamSpec("use_rsi_filter",     ParamType.BOOL,  True,                          group="RSI"),
-        ParamSpec("rsi_length",         ParamType.INT,   14,   min=5,  max=50,  step=1, group="RSI"),
+        ParamSpec("vwma_length",        ParamType.INT,   75,   min=10, max=300, step=1, group="VWMA",
+                  description="Bars in the VWMA (volume-weighted moving average) trend line. Bigger = "
+                              "slower line that follows longer trends."),
+        ParamSpec("use_rsi_filter",     ParamType.BOOL,  True,                          group="RSI",
+                  description="On: entries also need RSI to agree (long above the floor, short below the "
+                              "ceiling). Off: RSI is ignored."),
+        ParamSpec("rsi_length",         ParamType.INT,   14,   min=5,  max=50,  step=1, group="RSI",
+                  description="Bars used to calculate RSI (a 0–100 gauge of recent up moves vs down moves)."),
         ParamSpec("rsi_long_min",       ParamType.INT,   40,   min=10, max=80,  step=1, group="RSI",
                   description="Long requires RSI above this floor."),
         ParamSpec("rsi_short_max",      ParamType.INT,   60,   min=20, max=90,  step=1, group="RSI",
                   description="Short requires RSI below this ceiling."),
-        ParamSpec("use_volume_filter",  ParamType.BOOL,  True,                          group="Volume"),
-        ParamSpec("vol_length",         ParamType.INT,   45,   min=5,  max=200, step=1, group="Volume"),
+        ParamSpec("use_volume_filter",  ParamType.BOOL,  True,                          group="Volume",
+                  description="On: entries need the bar's volume above its average × the volume "
+                              "multiplier. Off: volume is ignored."),
+        ParamSpec("vol_length",         ParamType.INT,   45,   min=5,  max=200, step=1, group="Volume",
+                  description="Bars in the average volume that each bar's volume is compared against."),
         ParamSpec("vol_mult",           ParamType.FLOAT, 1.05, min=0.5, max=5.0, step=0.05, group="Volume",
                   description="Bar volume must exceed avg × this multiplier."),
         ParamSpec("trade_24_7", ParamType.BOOL, False, group="Sessions",
@@ -73,7 +81,8 @@ class VwmaMomentumStrategy(Strategy):
                   description="UTC session windows where new entries are allowed."),
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
-                  group="Direction"),
+                  group="Direction",
+                  description="Which directions may trade: tick Long and/or Short."),
         ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
                   description="Max concurrent positions per side. Each tranche is sized at the strategy's Risk%. Set to 1 to disable stacking."),
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
@@ -86,6 +95,19 @@ class VwmaMomentumStrategy(Strategy):
         description=("Trend-follow VWMA with optional volume confirmation and RSI gate. "
                      "Exits when momentum stalls (close crosses VWMA with opposite slope)."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Follows the trend: buys above a rising VWMA (a 75-bar moving average where high-volume bars "
+            "count more), shorts below a falling one.\n\n"
+            "- Buys (long) when: price closes above a rising VWMA, the 14-bar RSI (a 0–100 "
+            "buying-vs-selling gauge) is above 40, and volume beats its 45-bar average × 1.05.\n"
+            "- Sells short when: price closes below a falling VWMA, RSI under 60, same volume check.\n"
+            "- Closes the trade when: price closes back across the VWMA and the VWMA has turned against the "
+            "trade. Backtests may flip straight into the opposite trade on that bar.\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: new trades open only in the UTC windows 00:00–04:00, 05:00–09:00 and "
+            "12:30–16:00 unless Trade 24/7 is on; exits fire any time. RSI and volume checks can be "
+            "switched off."
+        ),
     )
 
     OVERLAYS = [

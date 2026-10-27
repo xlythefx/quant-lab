@@ -1,5 +1,5 @@
-// Shared candle-chart marker builders. Used by Dashboard (v1) and DashboardV2 so
-// the entry/exit arrows stay identical between the two. Keep this the single
+// Shared candle-chart marker builders. Used by TradingChart, DashboardV2 and the
+// Sandbox so the entry/exit arrows stay identical everywhere. Keep this the single
 // source of truth — don't re-implement makeMarker/tradesToMarkers per page.
 
 export const COLOR_WIN   = "#22c55e";

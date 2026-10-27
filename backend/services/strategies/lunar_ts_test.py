@@ -208,7 +208,8 @@ class LunarTSTestStrategy(Strategy):
         ParamSpec("one_entry_per_day", ParamType.BOOL, True, group="Entries",
                   description="Cap to 1 entry per session (TS entriestoday(d) < 1)."),
 
-        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction"),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction",
+                  description="Which directions may trade: tick Long and/or Short."),
 
         # --- Risk ---
         ParamSpec("risk_pct",  ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
@@ -226,6 +227,20 @@ class LunarTSTestStrategy(Strategy):
                      "TEST against the production 'lunar' strategy."),
         schema=PARAM_SCHEMA,
         archived=True,
+        guide=(
+            "Literal TradeStation (TS) port of the moon strategy for ES (S&P 500 futures). A "
+            "'phase' number comes from the New York date plus two days: near 1 at full moon, "
+            "near 0 at new moon (29.53-day cycle). Trades open only on a session's first "
+            "hourly bar.\n\n"
+            "- Buys (long) when: the phase 35 bars ago tops both 1 and 65 bars ago (full moon "
+            "just passed).\n"
+            "- Sells short when: the reverse (new moon just passed) and the ATR (average daily "
+            "price range) grew in the last finished session.\n"
+            "- Closes the trade when: the opposite turn appears at a session start, the $3,250 "
+            "target is hit, or after 345 bars.\n"
+            "- Stop loss: $1,750; once $1,750 up, it moves to 2.5 points past entry.\n\n"
+            "Good to know: archived. Unlike 'Lunar', lags count hourly bars, not sessions."
+        ),
     )
 
     OVERLAYS = [

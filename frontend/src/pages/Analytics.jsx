@@ -20,6 +20,7 @@ const TABS = [
   { id: "overview",     label: "Overview" },
   { id: "sessions",     label: "Sessions" },
   { id: "heatmap",      label: "Heatmap" },
+  { id: "weekdays",     label: "Weekdays" },
   { id: "monthly",      label: "Monthly" },
   { id: "drawdown",     label: "Drawdown" },
   { id: "gaussian",     label: "Gaussian Fit" },
@@ -220,7 +221,7 @@ export default function Analytics() {
           <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">
             <div className="text-base text-text mb-1">No backtest result loaded</div>
             <div className="text-xs">Run a strategy on the Dashboard first.</div>
-            <a href="#dashboard" className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm">
+            <a href="#dashboardv2" className="inline-block mt-4 px-4 py-2 rounded-md bg-accent-grad text-white text-sm">
               Open Dashboard →
             </a>
           </div>
@@ -268,6 +269,7 @@ export default function Analytics() {
             )}
             {tab === "sessions"     && <SessionsTab     result={result} />}
             {tab === "heatmap"      && <HeatmapTab      result={result} />}
+            {tab === "weekdays"     && <WeekdaysTab     result={result} trades={filteredTrades} />}
             {tab === "monthly"      && <MonthlyTab      result={result} />}
             {tab === "drawdown"     && <DrawdownTab     result={result} />}
             {tab === "gaussian"     && <GaussianTab     result={result} />}
@@ -1086,6 +1088,171 @@ function HeatmapTab({ result }) {
             ))}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WEEKDAYS — per-day performance, ranked on % per trade (sizing-independent)
+// ---------------------------------------------------------------------------
+
+// Net % return of one trade: the price move (slippage already in the fills)
+// minus fees as a % of the position's value. Unlike pnl_dollars this does not
+// grow with the account, so early and late years weigh the same.
+function _netPct(t) {
+  const notional = (t.units || 0) * (t.entry_price || 0);
+  const feePct = notional > 0 ? ((t.fees || 0) / notional) * 100 : 0;
+  return (t.pnl_pct ?? 0) - feePct;
+}
+
+function _dayVerdict(n, tStat) {
+  if (n === 0) return { label: "No trades", cls: "text-muted" };
+  if (n < 30 || tStat == null) return { label: "Too few trades", cls: "text-muted" };
+  if (tStat >= 2) return { label: "Likely good", cls: "text-profit" };
+  if (tStat <= -2) return { label: "Likely bad", cls: "text-loss" };
+  if (Math.abs(tStat) >= 1) return { label: "Weak", cls: "text-text" };
+  return { label: "Noise", cls: "text-muted" };
+}
+
+function WeekdaysTab({ result, trades }) {
+  const rows = useMemo(() => {
+    const days = DOW.map((name) => ({ name, rets: [], usd: 0, years: {} }));
+    for (const t of trades || []) {
+      if (t.entry_time == null) continue;
+      const dt = new Date(t.entry_time * 1000);
+      const day = days[(dt.getUTCDay() + 6) % 7];   // JS Sun=0 → Mon=0
+      const r = _netPct(t);
+      day.rets.push(r);
+      day.usd += t.pnl_dollars ?? 0;
+      const yr = dt.getUTCFullYear();
+      day.years[yr] = (day.years[yr] ?? 0) + r;
+    }
+    return days.map((d) => {
+      const n = d.rets.length;
+      const mean = n ? d.rets.reduce((a, b) => a + b, 0) / n : null;
+      let tStat = null;
+      if (n >= 2) {
+        const sd = Math.sqrt(d.rets.reduce((a, r) => a + (r - mean) ** 2, 0) / (n - 1));
+        tStat = sd > 0 ? mean / (sd / Math.sqrt(n)) : null;
+      }
+      const gp = d.rets.filter((r) => r > 0).reduce((a, b) => a + b, 0);
+      const gl = -d.rets.filter((r) => r < 0).reduce((a, b) => a + b, 0);
+      const yrVals = Object.values(d.years);
+      return {
+        name: d.name, n, mean, tStat,
+        winRate: n ? (d.rets.filter((r) => r > 0).length / n) * 100 : null,
+        pf: gl > 0 ? gp / gl : null,
+        usd: d.usd,
+        greenYears: yrVals.filter((v) => v > 0).length,
+        totalYears: yrVals.length,
+        verdict: _dayVerdict(n, tStat),
+      };
+    });
+  }, [trades]);
+
+  const traded = rows.filter((r) => r.n > 0);
+  const best = traded.length ? traded.reduce((b, r) => (r.mean > b.mean ? r : b)) : null;
+  const worst = traded.length ? traded.reduce((b, r) => (r.mean < b.mean ? r : b)) : null;
+  const solid = rows.filter((r) => r.n >= 30 && r.tStat != null && Math.abs(r.tStat) >= 2);
+  const maxAbs = Math.max(1e-9, ...traded.map((r) => Math.abs(r.mean)));
+  const weekendsOff = result.params?.skip_weekends === true;
+
+  if (!traded.length) {
+    return <div className="rounded-xl border border-line bg-bg-panel/60 p-10 text-center text-muted">no trades</div>;
+  }
+
+  return (
+    <div className="space-y-3">
+      <InsightCard rows={[
+        [`Best day`,  best.name,  `${fmtPct(best.mean)} per trade · ${fmtInt(best.n)} trades`,
+         best.mean >= 0 ? "profit" : "loss"],
+        [`Worst day`, worst.name, `${fmtPct(worst.mean)} per trade · ${fmtInt(worst.n)} trades`,
+         worst.mean >= 0 ? "profit" : "loss"],
+        [`Days that look real`, `${solid.length} of ${traded.length}`,
+         solid.length ? solid.map((r) => r.name).join(", ") : "the rest could be luck", "neutral"],
+        [`Grouped by`, "UTC day the trade opened", "", "neutral"],
+      ]} />
+
+      {weekendsOff && (
+        <div className="rounded-md border border-accent-blue/30 bg-accent-blue/5 px-4 py-2 text-[11px] text-muted">
+          Weekends are switched off in this run's settings, so Sat and Sun are empty.
+          Turn <span className="text-text">Skip weekends</span> off and rerun to compare them.
+        </div>
+      )}
+
+      <div className="rounded-xl border border-line bg-bg-panel/60 overflow-x-auto">
+        <div className="px-4 py-2 text-[10px] uppercase tracking-wider text-muted border-b border-line">
+          Performance by weekday
+        </div>
+        <table className="w-full text-xs font-mono">
+          <thead>
+            <tr className="text-muted text-[10px] border-b border-line">
+              <th className="px-4 py-2 text-left font-normal">Day</th>
+              <th className="px-4 py-2 text-right font-normal">Trades</th>
+              <th className="px-4 py-2 text-right font-normal">Win rate</th>
+              <th className="px-4 py-2 text-left font-normal w-1/4"
+                  title="Average % gained or lost per trade, after slippage and fees. Does not grow with the account, so every year counts the same.">
+                Avg % per trade</th>
+              <th className="px-4 py-2 text-right font-normal"
+                  title="Sum of winning % ÷ sum of losing %. Above 1.00 = this day makes money.">
+                Profit factor</th>
+              <th className="px-4 py-2 text-right font-normal"
+                  title="Dollar P&L. Grows with the account, so it over-weights recent years — rank on Avg % instead.">
+                Total P&amp;L</th>
+              <th className="px-4 py-2 text-right font-normal"
+                  title="Calendar years where this day was net positive, out of the years it traded.">
+                Years green</th>
+              <th className="px-4 py-2 text-right font-normal"
+                  title="How far the average trade is from zero, measured in 'noise widths'. Within ±2, luck can easily explain it.">
+                t-stat</th>
+              <th className="px-4 py-2 text-right font-normal">Verdict</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const pos = (r.mean ?? 0) >= 0;
+              const w = r.n ? (Math.abs(r.mean) / maxAbs) * 50 : 0;
+              return (
+                <tr key={r.name} className="border-b border-line/50 hover:bg-bg-elev/30">
+                  <td className="px-4 py-1.5 text-text">{r.name}</td>
+                  <td className="px-4 py-1.5 text-right">{fmtInt(r.n)}</td>
+                  <td className="px-4 py-1.5 text-right">{r.n ? fmtPct(r.winRate, false) : "—"}</td>
+                  <td className="px-4 py-1.5">
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-4 bg-bg-elev/40 rounded relative min-w-[80px]">
+                        <div className="absolute top-0 bottom-0 left-1/2 w-px bg-line" />
+                        {r.n > 0 && (
+                          <div className={`absolute top-0 bottom-0 left-1/2 ${pos ? "bg-profit/40" : "bg-loss/40"}`}
+                               style={{ width: `${w}%`, transform: pos ? "" : "translateX(-100%)" }} />
+                        )}
+                      </div>
+                      <span className={`w-16 text-right ${r.n ? (pos ? "text-profit" : "text-loss") : "text-muted"}`}>
+                        {r.n ? fmtPct(r.mean) : "—"}
+                      </span>
+                    </div>
+                  </td>
+                  <td className={`px-4 py-1.5 text-right ${r.pf == null ? "text-muted" : r.pf >= 1 ? "text-profit" : "text-loss"}`}>
+                    {r.pf == null ? "—" : fmtNum(r.pf)}
+                  </td>
+                  <td className={`px-4 py-1.5 text-right ${r.n ? (r.usd >= 0 ? "text-profit" : "text-loss") : "text-muted"}`}>
+                    {r.n ? fmtUsd(r.usd) : "—"}
+                  </td>
+                  <td className="px-4 py-1.5 text-right">{r.n ? `${r.greenYears} / ${r.totalYears}` : "—"}</td>
+                  <td className="px-4 py-1.5 text-right">{r.tStat == null ? "—" : fmtNum(r.tStat)}</td>
+                  <td className={`px-4 py-1.5 text-right ${r.verdict.cls}`}>{r.verdict.label}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="rounded-xl border border-line bg-bg-panel/40 p-4 text-xs text-muted space-y-1">
+        <div className="text-[10px] uppercase tracking-wider mb-1">How to read this</div>
+        <div>· With 7 days, one is always "best" — luck alone picks a winner. Rank on <span className="text-text">Avg % per trade</span>, not dollars.</div>
+        <div>· Trust a day only if it has 30+ trades, a t-stat beyond ±2, <span className="text-text">and</span> is green in most years. Even then, about 1 in 4 runs shows a "Likely" day by chance.</div>
+        <div>· If you switch days off because of this page, re-test on data you didn't pick them from — another coin, walk-forward, or the holdout. Re-running the same backtest with the bad days removed will always look better, and proves nothing.</div>
       </div>
     </div>
   );

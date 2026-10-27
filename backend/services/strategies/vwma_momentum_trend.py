@@ -85,33 +85,49 @@ class VwmaMomentumTrendStrategy(Strategy):
         # ---- Optional slow-trend regime filter (default OFF) ----
         ParamSpec("use_trend_filter", ParamType.BOOL, False, group="Trend Filter",
                   description="Only trade WITH a slow EMA (long above it, short below)."),
-        ParamSpec("trend_ema_length", ParamType.INT, 200, min=50, max=600, step=1, group="Trend Filter"),
+        ParamSpec("trend_ema_length", ParamType.INT, 200, min=50, max=600, step=1, group="Trend Filter",
+                  description="Bars in the slow EMA (exponential moving average) the trend filter compares "
+                              "price against. Only used when the trend filter is on."),
         # ---- RSI gate (default OFF — earn its place) ----
-        ParamSpec("use_rsi_filter", ParamType.BOOL, False, group="RSI"),
-        ParamSpec("rsi_length", ParamType.INT, 21, min=5, max=60, step=1, group="RSI"),
+        ParamSpec("use_rsi_filter", ParamType.BOOL, False, group="RSI",
+                  description="On: longs need RSI above the floor below, shorts need RSI below 100 minus "
+                              "it. Off: RSI is ignored."),
+        ParamSpec("rsi_length", ParamType.INT, 21, min=5, max=60, step=1, group="RSI",
+                  description="Bars used to calculate RSI (a 0–100 gauge of recent up moves vs down moves)."),
         ParamSpec("rsi_long_min", ParamType.INT, 50, min=10, max=80, step=1, group="RSI",
                   description="Long requires RSI above this (shorts require RSI below 100-this)."),
         # ---- Volume gate (default OFF) ----
-        ParamSpec("use_volume_filter", ParamType.BOOL, False, group="Volume"),
-        ParamSpec("vol_length", ParamType.INT, 48, min=5, max=300, step=1, group="Volume"),
-        ParamSpec("vol_mult", ParamType.FLOAT, 1.2, min=0.5, max=5.0, step=0.05, group="Volume"),
+        ParamSpec("use_volume_filter", ParamType.BOOL, False, group="Volume",
+                  description="On: entries need the bar's volume above its average × the volume "
+                              "multiplier. Off: volume is ignored."),
+        ParamSpec("vol_length", ParamType.INT, 48, min=5, max=300, step=1, group="Volume",
+                  description="Bars in the average volume that each bar's volume is compared against."),
+        ParamSpec("vol_mult", ParamType.FLOAT, 1.2, min=0.5, max=5.0, step=0.05, group="Volume",
+                  description="Bar volume must exceed its average × this number (volume filter on)."),
         # ---- Volatility-targeted sizing (the research edge, default ON) ----
         ParamSpec("use_vol_target", ParamType.BOOL, True, group="Vol Targeting",
                   description="Scale each entry by target_ATR% / current_ATR% (clamped) — "
                               "smaller when volatile, bigger when calm. Barroso & Santa-Clara."),
-        ParamSpec("atr_length", ParamType.INT, 14, min=5, max=100, step=1, group="Vol Targeting"),
+        ParamSpec("atr_length", ParamType.INT, 14, min=5, max=100, step=1, group="Vol Targeting",
+                  description="Bars used to measure ATR (the average high-to-low range of a bar) for "
+                              "volatility-targeted sizing."),
         ParamSpec("vol_target_pct", ParamType.FLOAT, 1.0, min=0.1, max=10.0, step=0.1, group="Vol Targeting",
                   description="Target per-bar ATR as % of price. Position size aims to keep this constant."),
-        ParamSpec("vol_scale_min", ParamType.FLOAT, 0.25, min=0.05, max=1.0, step=0.05, group="Vol Targeting"),
-        ParamSpec("vol_scale_max", ParamType.FLOAT, 3.0, min=1.0, max=10.0, step=0.5, group="Vol Targeting"),
+        ParamSpec("vol_scale_min", ParamType.FLOAT, 0.25, min=0.05, max=1.0, step=0.05, group="Vol Targeting",
+                  description="Smallest size multiplier vol targeting may use (0.25 = a quarter of Risk%)."),
+        ParamSpec("vol_scale_max", ParamType.FLOAT, 3.0, min=1.0, max=10.0, step=0.5, group="Vol Targeting",
+                  description="Largest size multiplier vol targeting may use (3 = three times Risk%)."),
         # ---- Direction (default LONG only) ----
-        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": False}, group="Direction"),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": False}, group="Direction",
+                  description="Which directions may trade: tick Long and/or Short. Long only by default."),
         # ---- Sizing ----
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Crypto/spot base sizing: notional = equity × risk_pct × vol_scale ÷ price."),
         ParamSpec("contracts", ParamType.INT, 1, min=1, max=100, step=1, group="Risk",
                   description="Futures sizing: contracts (risk_pct inert on futures)."),
-        ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk"),
+        ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
+                  description="Max entries open at once per side; extra ones are added on later bars while "
+                              "entry rules still hold. 1 = no stacking."),
     ]
 
     META = StrategyMeta(
@@ -122,6 +138,19 @@ class VwmaMomentumTrendStrategy(Strategy):
                      "confirmation, and an optional slow-trend filter. Long-only default. "
                      "Exit on the VWMA cross."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "A slower trend-follower built for 1h/4h charts: rides multi-day moves above a rising VWMA "
+            "(a moving average where high-volume bars count more; 120 bars ≈ 5 days on 1h) and sizes trades "
+            "by how jumpy the market is.\n\n"
+            "- Buys (long) when: the last 2 closes are above the VWMA (a held break, not a one-bar poke) "
+            "and the VWMA is rising.\n"
+            "- Sells short when: off by default (long only).\n"
+            "- Closes the trade when: price closes below the VWMA while the VWMA is falling.\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: size = Risk% × (1% ÷ ATR as % of price), kept between 0.25× and 3×, so smaller "
+            "when bars swing wildly (ATR = average bar range, 14 bars). Backtest-only; not applied to "
+            "futures. Trend-EMA, RSI and volume filters start off."
+        ),
     )
 
     OVERLAYS = [

@@ -9,7 +9,10 @@ terminal state stream over Socket.IO. Mirrors the patterns already in use by
 walkforward.py / cost_sweep.py / grid_search.py.
 
 One job at a time, globally. If a second download is requested while one is
-running, the first is cancelled and the new one starts.
+running, the first is cancelled and the new one starts. A job may carry several
+symbols and timeframes (spec["symbols"] x spec["timeframes"]); they download
+one after another. In a batch, a pair that fails is reported and skipped —
+except a Binance IP ban, which stops the whole batch.
 
 Socket events emitted:
   download_progress  per-batch progress (carries broker/symbol/tf/cursor/%)
@@ -96,30 +99,39 @@ def _normalize_spec(spec: dict) -> dict:
     broker = (spec.get("broker") or "binance").strip().lower()
     if broker not in _BROKERS:
         raise ValueError(f"unknown broker {broker!r}; allowed: {_BROKERS}")
-    symbol = str(spec.get("symbol") or "").strip().upper()
-    if not symbol:
+    symbols = [str(s or "").strip().upper() for s in (spec.get("symbols") or [spec.get("symbol")])]
+    if not all(symbols):
         raise ValueError("symbol is required")
     # CCXT symbols carry their market in the name (BTCUSDT.P, MEXC.LTCUSDT —
     # see market_data.CCXT_BROKERS): the markers decide both the CCXT client
     # and the data/{broker}/ folder, so keep broker and symbol in agreement
     # whichever one the caller set.
     if broker in market_data.CCXT_BROKERS:
-        symbol = market_data.ccxt_symbol_for(symbol, broker)
-        broker = market_data.ccxt_broker_for(symbol)
-    timeframe = str(spec.get("timeframe") or "").strip()
-    if not timeframe:
+        symbols = [market_data.ccxt_symbol_for(s, broker) for s in symbols]
+        brokers = {market_data.ccxt_broker_for(s) for s in symbols}
+        if len(brokers) > 1:
+            raise ValueError(f"one batch can't mix markets: {sorted(brokers)}")
+        broker = brokers.pop()
+    symbols = list(dict.fromkeys(symbols))  # drop repeats, keep order
+    timeframes = [str(t or "").strip() for t in (spec.get("timeframes") or [spec.get("timeframe")])]
+    if not all(timeframes):
         raise ValueError("timeframe is required")
+    timeframes = list(dict.fromkeys(timeframes))  # drop repeats, keep order
     start_ms = int(spec.get("start_ms"))
     end_ms = int(spec.get("end_ms"))
     if end_ms <= start_ms:
         raise ValueError("end must be after start")
     return {
         "broker": broker,
-        "symbol": symbol,
-        "timeframe": timeframe,
+        "symbol": symbols[0],  # symbol + timeframe = the pair downloading now
+        "symbols": symbols,
+        "timeframe": timeframes[0],
+        "timeframes": timeframes,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "sid": spec.get("sid"),
+        # Crypto only: replace the saved file with a fresh copy (see download_range).
+        "overwrite": bool(spec.get("overwrite")),
         "expected": int(spec.get("expected") or 1),
         "job_id": spec.get("job_id"),
     }
@@ -136,6 +148,7 @@ class DownloadJob:
         self.state = "starting"  # starting | running | done | cancelled | error
         self.cancel_flag = False
         self.started_at = time.time()
+        self._tf_started = self.started_at  # when the current timeframe began (ETA)
         self.error: Optional[str] = None
         # Most recent progress payload (mirrors what we stream via socket so
         # /status can re-hydrate the UI on a page refresh).
@@ -144,6 +157,9 @@ class DownloadJob:
             "broker": self.spec["broker"],
             "symbol": self.spec["symbol"],
             "timeframe": self.spec["timeframe"],
+            "timeframes": self.spec["timeframes"],
+            "item_index": 0,  # which (symbol, timeframe) pair of the batch
+            "item_count": len(self.spec["symbols"]) * len(self.spec["timeframes"]),
             "fetched": 0,
             "expected": int(self.spec["expected"]),
             "start_ms": self.spec["start_ms"],
@@ -173,7 +189,9 @@ class DownloadJob:
             "spec": {
                 "broker": self.spec["broker"],
                 "symbol": self.spec["symbol"],
+                "symbols": self.spec["symbols"],
                 "timeframe": self.spec["timeframe"],
+                "timeframes": self.spec["timeframes"],
                 "start_ms": self.spec["start_ms"],
                 "end_ms": self.spec["end_ms"],
             },
@@ -200,29 +218,42 @@ class DownloadJob:
             self.state = "running"
             # Initial 0% event so the UI paints the bar immediately.
             self._record_progress(status="starting")
-            if self.spec["broker"] in market_data.CCXT_BROKERS:
-                meta = self._run_ccxt()
-            elif self.spec["broker"] == "yahoo":
-                meta = self._run_yahoo()
-            elif self.spec["broker"] == "tradestation":
-                meta = self._run_tradestation()
-            elif self.spec["broker"] == "databento":
-                meta = self._run_databento()
-            else:
-                meta = self._run_dukascopy()
+            items = [(s, tf) for s in self.spec["symbols"] for tf in self.spec["timeframes"]]
+            results = []
+            for i, (sym, tf) in enumerate(items):
+                if self.cancel_flag:
+                    break
+                self.spec["symbol"], self.spec["timeframe"] = sym, tf
+                self._tf_started = time.time()
+                self._record_progress(symbol=sym, timeframe=tf, item_index=i, status="downloading",
+                                      fetched=0, pages_done=0, pages_total=None, eta_seconds=None,
+                                      cursor_ms=self.spec["start_ms"])
+                try:
+                    meta = self._run_one()
+                except market_data.BinanceBanned:
+                    raise
+                except Exception as e:
+                    if len(items) == 1:
+                        raise
+                    log.warning("batch: %s %s failed, skipping: %s", sym, tf, e)
+                    results.append({"symbol": sym, "timeframe": tf, "error": str(e)})
+                    continue
+                results.append({"symbol": sym, "timeframe": tf, **meta})
             if self.cancel_flag:
                 self.state = "cancelled"
-                self._emit("download_cancelled", {"job_id": self.job_id})
+                self._emit("download_cancelled", {"job_id": self.job_id, "results": results})
                 return
+            ok = [r for r in results if "error" not in r]
+            if not ok:
+                raise RuntimeError(f"all {len(results)} downloads failed — first: {results[0]['error']}")
             self.state = "done"
             global _last_result
-            _last_result = {**meta, "broker": self.spec["broker"]}
+            _last_result = {**ok[-1], "broker": self.spec["broker"], "results": results}
             self._emit("download_complete", {
                 "job_id": self.job_id,
                 "broker": self.spec["broker"],
-                "symbol": self.spec["symbol"],
-                "timeframe": self.spec["timeframe"],
-                **meta,
+                **ok[-1],
+                "results": results,
             })
         except Exception as e:
             log.exception("download job failed (broker=%s)", self.spec.get("broker"))
@@ -232,13 +263,31 @@ class DownloadJob:
 
     # ---- broker dispatch ---------------------------------------------------
 
+    def _run_one(self) -> dict:
+        """Download self.spec["timeframe"] with the broker's adapter."""
+        if self.spec["broker"] in market_data.CCXT_BROKERS:
+            return self._run_ccxt()
+        if self.spec["broker"] == "yahoo":
+            return self._run_yahoo()
+        if self.spec["broker"] == "tradestation":
+            return self._run_tradestation()
+        if self.spec["broker"] == "databento":
+            return self._run_databento()
+        return self._run_dukascopy()
+
     def _run_ccxt(self) -> dict:
         s = self.spec
 
         def progress_cb(p):
+            done, total = int(p.get("pages_done", 0)), int(p.get("pages_total") or 0)
+            spent = time.time() - self._tf_started
             self._record_progress(
                 fetched=int(p.get("fetched", 0)),
-                cursor_ms=int(p.get("last_ts") or s["start_ms"]),
+                pages_done=done,
+                pages_total=total,
+                cursor_ms=int(p.get("cursor_ms") or s["start_ms"]),
+                # Time left for this timeframe, from the pace so far.
+                eta_seconds=spent * (total - done) / done if done and total else None,
                 status="downloading",
             )
 
@@ -250,6 +299,7 @@ class DownloadJob:
             s["start_ms"], s["end_ms"],
             progress_cb=progress_cb,
             cancel_check=cancel_check,
+            overwrite=s["overwrite"],
         )
 
     def _run_dukascopy(self) -> dict:

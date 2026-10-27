@@ -15,6 +15,10 @@ The idea, in plain words:
   4. Take-profit = the opposite side of the box. Stop-loss = entry ∓ atr_mult ×
      the volatility unit. One trade per day; whichever side is swept first wins;
      the trade is held until TP or stop (not force-closed at session end).
+  5. Weekends are off by default (`skip_weekends`): no box and no entries on
+     Saturday/Sunday (UTC day), and a trade still open when Saturday starts is
+     closed on the first Saturday bar. The sweep needs London/NY liquidity,
+     which is absent at the weekend.
 
 WHEN DO WE ACTUALLY GET IN? (`entry_trigger`) — this is the real fork
   - "reclaim" (default, the original behaviour): after the sweep we WAIT for a bar
@@ -83,7 +87,7 @@ from services.strategies.base import (
     Strategy, StrategyMeta, ParamSpec, ParamType, Signal, OverlaySpec,
 )
 from services.strategies.session_utils import (
-    parse_hhmm, in_window_live, session_mask,
+    parse_hhmm, in_window_live, session_mask, is_weekend_utc,
 )
 
 
@@ -121,6 +125,11 @@ class AsiaRangeBreakoutStrategy(Strategy):
                   group="Entry Window",
                   description="UTC window where a sweep+reclaim may open a trade. "
                               "Should start at/after the Asia window ends."),
+        ParamSpec("skip_weekends", ParamType.BOOL, True, group="Entry Window",
+                  description="Saturday/Sunday (UTC day) are off: no box, no new trades, and a "
+                              "trade still open when Saturday starts is closed on the first "
+                              "Saturday bar. The setup relies on London/NY liquidity, which is "
+                              "absent at the weekend."),
         # ---- Sweep depth: how far past the box counts as a real liquidity grab ----
         ParamSpec("depth_measure", ParamType.SELECT, "atr", group="Sweep",
                   options=[
@@ -155,7 +164,9 @@ class AsiaRangeBreakoutStrategy(Strategy):
         # ---- Direction toggle (defaults to long-only) ----
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": False},
-                  group="Direction"),
+                  group="Direction",
+                  description="Which directions may trade: tick Long (fade a sweep below the box) "
+                              "and/or Short (fade a sweep above it). Long only by default."),
         # ---- Sizing (crypto uses risk_pct, futures use contracts; pyramiding fixed at 1) ----
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Crypto/spot sizing: notional = equity × risk_pct ÷ entry price."),
@@ -174,6 +185,19 @@ class AsiaRangeBreakoutStrategy(Strategy):
                      "fill at the sweep level; entry-relative stop in the same unit; one "
                      "trade/day; configurable sessions + sides."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Boxes the Asia-session high and low (00:00-08:00 UTC), then fades a 'liquidity sweep': "
+            "price pokes out of the box to trigger other traders' orders, then comes back in.\n\n"
+            "- Buys (long) when: between 08:00 and 16:00 UTC a bar's low dips at least 0.5 ATR below "
+            "the box (ATR = average bar size over 14 bars), then a bar closes back inside. Entry at "
+            "the next bar's open.\n"
+            "- Sells short when: off by default; the mirror image above the box.\n"
+            "- Closes the trade when: a bar closes at or above the box top.\n"
+            "- Stop loss: a bar closes more than 5 ATR below entry.\n\n"
+            "Good to know: one trade per UTC day, held until target or stop. Weekends are skipped; "
+            "an open trade closes on the first Saturday bar. A 'touch' option enters at the sweep "
+            "price without waiting."
+        ),
     )
 
     OVERLAYS = [
@@ -220,6 +244,8 @@ class AsiaRangeBreakoutStrategy(Strategy):
         short_on = bool(sides.get("short"))
         depth = float(p["break_depth"])
         touch_mode = p.get("entry_trigger") == "touch"
+        skip_wk = bool(p.get("skip_weekends", True))
+        weekend_a = is_weekend_utc(time_a) if skip_wk else np.zeros(n, dtype=bool)
 
         # Outputs.
         cond_long = np.zeros(n, dtype=bool)
@@ -234,6 +260,8 @@ class AsiaRangeBreakoutStrategy(Strategy):
         # Walk day-by-day: build the box from the Asia bars, then scan the entry
         # bars for the first sweep+reclaim.
         for d in np.unique(day_a):
+            if skip_wk and is_weekend_utc(d * 86400):
+                continue        # weekend off: no box, so nothing can arm
             day_idx = np.nonzero(day_a == d)[0]
             asia_idx = day_idx[asia_mask[day_idx]]
             if asia_idx.size == 0:
@@ -325,9 +353,11 @@ class AsiaRangeBreakoutStrategy(Strategy):
         box_bot_exit = pd.Series(box_bot_exit).ffill().to_numpy()
 
         # Take-profit conditions for the engine (close reached the opposite side).
+        # A skipped weekend bar also exits: a trade carried out of Friday is closed
+        # on the first Saturday bar (fills at the next open, like any bar exit).
         finite_exit = np.isfinite(box_top_exit) & np.isfinite(box_bot_exit)
-        bar_exit_long = finite_exit & (close_a >= box_top_exit)
-        bar_exit_short = finite_exit & (close_a <= box_bot_exit)
+        bar_exit_long = (finite_exit & (close_a >= box_top_exit)) | weekend_a
+        bar_exit_short = (finite_exit & (close_a <= box_bot_exit)) | weekend_a
 
         # ---- Display-only sim: entry/exit markers + the live stop line. Mirrors the
         # engine's precedence (act on bar t-1's signal, fill at bar t's open, exit on
@@ -477,8 +507,11 @@ class AsiaRangeBreakoutStrategy(Strategy):
         in_asia = _in(p["asia_session"])
         in_entry = _in(p["entry_session"])
 
+        # Weekend off: no box (so no entry) and any open trade is closed below.
+        weekend_off = bool(p.get("skip_weekends", True)) and bool(is_weekend_utc(ts))
+
         # Extend the Asia box while inside the Asia window.
-        if in_asia:
+        if in_asia and not weekend_off:
             bh = state.get("box_high")
             bl = state.get("box_low")
             state["box_high"] = hi if bh is None else max(bh, hi)
@@ -508,10 +541,11 @@ class AsiaRangeBreakoutStrategy(Strategy):
             stop_hit = (np.isfinite(aae) and np.isfinite(entry_p)
                         and c <= entry_p - atr_mult * aae)
             tp_hit = np.isfinite(tp) and c >= tp
-            if tp_hit or stop_hit:
+            if tp_hit or stop_hit or weekend_off:
                 state["pos"] = 0
                 return Signal(side="long", kind="exit", price=c, time=ts,
-                              reason="atr_stop" if stop_hit else "box_tp")
+                              reason="atr_stop" if stop_hit else "box_tp" if tp_hit
+                              else "weekend_close")
             return None
         if pos == -1:
             entry_p = state.get("entry_p", np.nan)
@@ -520,10 +554,11 @@ class AsiaRangeBreakoutStrategy(Strategy):
             stop_hit = (np.isfinite(aae) and np.isfinite(entry_p)
                         and c >= entry_p + atr_mult * aae)
             tp_hit = np.isfinite(tp) and c <= tp
-            if tp_hit or stop_hit:
+            if tp_hit or stop_hit or weekend_off:
                 state["pos"] = 0
                 return Signal(side="short", kind="exit", price=c, time=ts,
-                              reason="atr_stop" if stop_hit else "box_tp")
+                              reason="atr_stop" if stop_hit else "box_tp" if tp_hit
+                              else "weekend_close")
             return None
 
         # ---- Flat: look for the day's first sweep+reclaim inside the entry window ----

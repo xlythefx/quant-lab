@@ -146,6 +146,20 @@ class PivotBreakoutStrategy(Strategy):
                      "rising and volatility hasn't been contracting; exits on a dollar target, a "
                      "stop with breakeven-lock, or after ~9 days."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Buys S&P 500 futures (ES, 1-hour bars) when price breaks above yesterday's R1 level. "
+            "The pivot is the average of yesterday's high, low and close; R1 = 2 x pivot - "
+            "yesterday's low.\n\n"
+            "- Buys (long) when: price closed below R1 earlier today, then a bar closes at or above "
+            "R1 minus 2 ticks (buys at the next bar's open). Also needs yesterday's low above the "
+            "day before's, and daily ranges not shrinking three days running.\n"
+            "- Sells short when: never (long only).\n"
+            "- Closes the trade when: profit reaches $1,700 per contract, or after 9 trading days.\n"
+            "- Stop loss: $1,200 per contract, moved to entry + 2 ticks once open profit reaches "
+            "$1,200.\n\n"
+            "Good to know: at most one entry a day. A 'day' is a trading session, found by the "
+            "overnight gap, not by clock times."
+        ),
     )
 
     OVERLAYS = [

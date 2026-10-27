@@ -14,7 +14,6 @@ import BrandAtom from "../BrandAtom.jsx";
  */
 
 const PRIMARY = [
-  { view: "dashboard",    href: "#dashboard",    label: "Dashboard",     icon: IconGrid },
   { view: "dashboardv2",  href: "#dashboardv2",  label: "Dashboard V2",  icon: IconChart },
   { view: "multiasset",   href: "#multiasset",   label: "Multi-Asset",   icon: IconStack },
   { view: "marketlab",    href: "#marketlab",    label: "Market Lab",    icon: IconFlask },
@@ -54,9 +53,8 @@ export default function IconNavRail({ view = "dashboardv2" }) {
       {/* primary nav (split so Validation flyout slots in after Multi-Asset) */}
       <RailLink {...PRIMARY[0]} active={view === PRIMARY[0].view} />
       <RailLink {...PRIMARY[1]} active={view === PRIMARY[1].view} />
-      <RailLink {...PRIMARY[2]} active={view === PRIMARY[2].view} />
       <ValidationFlyout view={view} />
-      {PRIMARY.slice(3).map((it) => (
+      {PRIMARY.slice(2).map((it) => (
         <RailLink key={it.view} {...it} active={view === it.view} />
       ))}
 
@@ -345,7 +343,6 @@ function ValidationFlyout({ view }) {
 // ---- icons (20px, currentColor) --------------------------------------------
 const S = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" };
 
-function IconGrid() { return (<svg {...S}><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>); }
 function IconChart() { return (<svg {...S}><path d="M3 3v18h18" /><path d="M7 14l3-4 3 3 5-7" /></svg>); }
 function IconStack() { return (<svg {...S}><rect x="3" y="4" width="18" height="5" rx="1" /><rect x="3" y="11" width="18" height="5" rx="1" /><path d="M3 20h18" /></svg>); }
 function IconFlask() { return (<svg {...S}><path d="M9 3h6" /><path d="M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3" /><path d="M7 16h10" /></svg>); }

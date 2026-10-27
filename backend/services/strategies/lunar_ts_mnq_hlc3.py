@@ -57,6 +57,20 @@ class LunarTSMNQHLC3Strategy(_hlc3.LunarTSTestHLC3Strategy):
                      "$2/point. Look-ahead OFF. IS 2008-2019 / OS 2020-today."),
         schema=_MNQ_SCHEMA,
         kind="hlc",
+        guide=(
+            "Main moon strategy with TradeStation (TS) settings for MNQ (Micro Nasdaq-100 "
+            "futures, $2 a point). A 'phase' number comes from the New York date plus two "
+            "days: near 1 at full moon, near 0 at new moon. Trades open only on a session's "
+            "first hourly bar.\n\n"
+            "- Buys (long) when: the phase 35 bars ago tops both 1 and 65 bars ago (full moon "
+            "just passed).\n"
+            "- Sells short when: the reverse (new moon just passed) and the 10-session ATR "
+            "(average daily range, from HLC3 = average of high, low, close) rose.\n"
+            "- Closes the trade when: the opposite turn appears at a session start, the $425 "
+            "target is hit, or after 345 bars.\n"
+            "- Stop loss: $300; once $300 up, it moves to 2.5 points past entry.\n\n"
+            "Good to know: backtests start Jan 2008, before MNQ launched (May 2019)."
+        ),
     )
 
     # IS+OS window (2008 -> today). No end cap so OS runs to the latest data.

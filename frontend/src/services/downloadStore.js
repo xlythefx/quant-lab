@@ -23,10 +23,12 @@ let state = {
   jobId: null,
   broker: null,
   symbol: null,
-  timeframe: null,
+  symbols: [],
+  timeframes: [],
+  overwrite: false, // true = replacing saved files (a cancel leaves them untouched)
   start: null,
   end: null,
-  progress: null,   // { fetched, expected, cursor_ms, start_ms, end_ms, status, broker }
+  progress: null,   // { timeframe, tf_index, pages_done, pages_total, eta_seconds, fetched, cursor_ms, ... }
   result: null,     // server payload on download_complete
   error: null,      // string on download_error
   cancelled: false, // true after download_cancelled
@@ -76,16 +78,16 @@ export function subscribe(fn) {
  * If a job is already running, throws synchronously — the UI's Cancel
  * button should be used first.
  */
-export async function startDownload({ symbol, timeframe, start, end, sid, jobId, broker = "binance" }) {
+export async function startDownload({ symbols, timeframes, start, end, sid, jobId, broker = "binance", overwrite = false }) {
   if (state.busy) throw new Error("a download is already in progress");
   setState({
     busy: true,
-    jobId, broker, symbol, timeframe, start, end,
+    jobId, broker, symbol: symbols[0], symbols, timeframes, overwrite, start, end,
     progress: null, result: null, error: null, cancelled: false,
     startedAt: Date.now(),
   });
   try {
-    const r = await downloadDataset({ symbol, timeframe, start, end, sid, jobId, broker });
+    const r = await downloadDataset({ symbols, timeframes, start, end, sid, jobId, broker, overwrite });
     // Backend may rewrite the job_id (e.g., if it dedupes). Adopt it so socket
     // event filtering matches.
     if (r?.job_id && r.job_id !== state.jobId) setState({ jobId: r.job_id });
@@ -124,7 +126,8 @@ export async function hydrate() {
         jobId: snap.job_id,
         broker: spec.broker || null,
         symbol: spec.symbol || null,
-        timeframe: spec.timeframe || null,
+        symbols: spec.symbols || (spec.symbol ? [spec.symbol] : []),
+        timeframes: spec.timeframes || (spec.timeframe ? [spec.timeframe] : []),
         start: null,
         end: null,
         progress: snap.progress || null,

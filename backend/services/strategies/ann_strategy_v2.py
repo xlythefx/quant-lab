@@ -9,6 +9,7 @@ Plain-English rule set:
   out > 0 → long, out < 0 → short, out == 0 → keep the last side.
 
   Always in the market: every change of side is a flip (close + open the other way).
+  `sides` can switch one side off (held flat instead); both on = the Pine.
 
 What the network really is: with no biases every layer is an odd function, so out(0) = 0
 and sign(out) == sign(x) for any |x| below ~18.13%. Past that it turns around (a +30% day
@@ -197,6 +198,9 @@ class AnnStrategyV2(Strategy):
         ParamSpec("anchor", ParamType.SELECT, "1D", group="Signal", options=_ANCHORS,
                   description="Pine 'Timeframe' input: price is compared with the PREVIOUS "
                               "period's average (ohlc4). 1 day = yesterday, UTC."),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction",
+                  description="Both on = the Pine. A side that is off is held flat instead "
+                              "(long only: long when the net says long, out of the market otherwise)."),
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Position size as % of equity."),
     ]
@@ -208,6 +212,20 @@ class AnnStrategyV2(Strategy):
                      "how far price is from yesterday's average price. Always in the market, "
                      "flips long/short. In practice = long above yesterday's average, short below."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Compares the current price with yesterday's average price and trades the direction of "
+            "the move, using a small fixed neural network copied from TradingView.\n\n"
+            "- Buys (long) when: price is above yesterday's average price (by less than ~18%), or more "
+            "than ~18% below it (it bets on a bounce after a crash).\n"
+            "- Sells short when: price is below yesterday's average, or more than ~18% above it (it bets "
+            "against a pump).\n"
+            "- Closes the trade when: the signal switches side. It closes and flips the other way on "
+            "the same bar.\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: always in the market unless you switch a side off (then it waits in cash). "
+            "The network is fixed: its numbers were set once and never learn. 'Yesterday' runs "
+            "00:00-00:00 UTC; Anchor can use the last 4 hours or last week instead."
+        ),
     )
 
     OVERLAYS = [
@@ -225,8 +243,7 @@ class AnnStrategyV2(Strategy):
         y = ann((o4 - prev_o4) / prev_o4)
         out["anchor"] = prev_o4
         out["ann_out"] = y
-        return flip_columns(out, np.where(y > 0, 1.0, np.where(y < 0, -1.0, np.nan)),
-                            {"long": True, "short": True})
+        return flip_columns(out, np.where(y > 0, 1.0, np.where(y < 0, -1.0, np.nan)), self.p["sides"])
 
     def on_candle(self, candle: dict, state: dict) -> Union[Signal, list[Signal], None]:
         if not bool(candle.get("isClosed", False)):
@@ -237,5 +254,5 @@ class AnnStrategyV2(Strategy):
             o4 = (float(candle["open"]) + float(candle["high"]) + float(candle["low"]) + float(candle["close"])) / 4.0
             y = float(ann(np.array([(o4 - prev_o4) / prev_o4]))[0])
             bias = 1 if y > 0 else -1 if y < 0 else None
-        return live_flip(state, bias, {"long": True, "short": True},
+        return live_flip(state, bias, self.p["sides"],
                          int(candle["time"]), float(candle["close"]), "ann_flip")

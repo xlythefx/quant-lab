@@ -76,6 +76,18 @@ class AnnStrategyV2Plus(Strategy):
                      "average price, short below — plus a dead band scaled to yesterday's range "
                      "so it only flips on clear moves, and long/short switches."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Our rebuilt version of ANN Strategy v2: follow the move away from yesterday's average "
+            "price, but only flip after a clear move.\n\n"
+            "- Buys (long) when: price is clearly above yesterday's average, past the dead band (a "
+            "buffer zone around the average, sized from yesterday's high-to-low range).\n"
+            "- Sells short when: price is clearly below it.\n"
+            "- Closes the trade when: price clearly crosses to the other side. Inside the band it keeps "
+            "its current position.\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: Signal 'Plain rule' only follows the move; 'ANN network' also bets against "
+            "moves over ~18%, like the Original. Dead band 0 flips on every cross, like the Original."
+        ),
     )
 
     OVERLAYS = [

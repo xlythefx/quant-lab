@@ -129,6 +129,19 @@ class Rsi2ReversionStrategy(Strategy):
                      "uptrend (price > 200-day SMA) on volatility-expansion days; exits on "
                      "RSI>80, a dollar stop with profit-protect, or after ~10 days."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Buys sharp dips in S&P 500 futures (ES, 1-hour bars) while the long-term trend is up. "
+            "RSI is a 0-100 gauge of recent up versus down moves; under 10 means very oversold.\n\n"
+            "- Buys (long) when: price is above the 200-day simple average (SMA) of daily closes "
+            "and the 2-day RSI of daily closes is below 10. Buys at the next bar's open.\n"
+            "- Sells short when: never (long only).\n"
+            "- Closes the trade when: the daily RSI rises above 80 (exits next bar's open), or "
+            "after 10 trading days.\n"
+            "- Stop loss: $1,400 per contract, tightened to a $700 loss once open profit reaches "
+            "$1,400.\n\n"
+            "Good to know: the daily numbers update hourly using today's price so far. At most one "
+            "entry a day. The original's 'range bigger than yesterday's' filter is off by default."
+        ),
     )
 
     OVERLAYS = [

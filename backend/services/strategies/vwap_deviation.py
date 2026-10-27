@@ -218,6 +218,19 @@ class VwapDeviationStrategy(Strategy):
                      "Deviation strategy."),
         schema=PARAM_SCHEMA,
         kind="ohlc",
+        guide=(
+            "Buys dips far below the day's VWAP (volume-weighted average price since 00:00 UTC) in "
+            "an uptrend; takes profit back at the VWAP.\n\n"
+            "- Buys (long) when: a bar closes over 1 ATR (average bar size, 10 bars) below the "
+            "VWAP, the 5-bar RSI (0-100 gauge of recent ups vs downs) is under 35, and price is "
+            "above the 200-bar EMA (a smoothed average). Buys at the next bar's open.\n"
+            "- Sells short when: off by default (mirror image).\n"
+            "- Closes the trade when: a bar closes at or above the VWAP.\n"
+            "- Stop loss: a bar closing over 6 ATRs below the previous bar's close (a crash guard, "
+            "not tied to the entry price).\n\n"
+            "Good to know: adds an entry each signal bar, up to 10 at once (10% of equity each); "
+            "all close together. Trades 24/7; extra filters off."
+        ),
     )
 
     OVERLAYS = [

@@ -8,6 +8,7 @@ import { KpiCard, Section, InsightCard, TabBar } from "../components/analytics/p
 import { fmtNum, fmtPct, fmtInt } from "../services/format.js";
 import {
   getSymbols, marketLabRegime, marketLabRegimeHmm, marketLabVolatility, marketLabStatistics, marketLabScan,
+  marketLabWeekdayWindows,
   marketLabFadeSafety, marketLabFeatureImportance, marketLabScanBatch, marketLabPatterns, marketLabSimilarity,
   getPresets, savePresets,
   startModelBench, cancelModelBench, getModelBenchStatus, getModelBenchLastResult,
@@ -17,6 +18,7 @@ import {
   RegimeRibbon, REGIME_COLORS, buildRegimeColors, VBarChart, LineChart, HistogramChart, CentroidShape, EdgeHeatmap,
 } from "../components/marketlab/charts.jsx";
 import RegimeCandleChart from "../components/marketlab/RegimeCandleChart.jsx";
+import WeekdayWindowsTab from "../components/marketlab/WeekdayWindowsTab.jsx";
 
 // ---- date helpers (same convention as WalkForward) ----
 function dateStrToEpoch(s, endOfDay = false) {
@@ -35,6 +37,7 @@ const TABS = [
   { id: "regimehmm", label: "HMM Regime" },
   { id: "volatility", label: "Volatility" },
   { id: "statistics", label: "Statistics" },
+  { id: "weekdays", label: "Weekday Windows" },
   { id: "scanner", label: "Alpha Scanner" },
   { id: "fadesafety", label: "Fade Safety" },
   { id: "features", label: "Feature Importance" },
@@ -43,6 +46,11 @@ const TABS = [
   { id: "bench", label: "Model Bench" },
 ];
 
+const WEEKDAY_DEFAULTS = { entry_hour: 0, exit_hour: 0, holdout_months: 18, fee_pct: 0.04, slippage_bps: 1 };
+const WEEKDAY_FIELDS = [
+  ["entry_hour", "Entry hour (UTC)", 1], ["exit_hour", "Exit hour (UTC)", 1],
+  ["holdout_months", "Holdout months", 1], ["fee_pct", "Fee % / side", 0.01], ["slippage_bps", "Slippage bp", 0.5],
+];
 const FEATURE_DEFAULTS = { fwd_horizon: 10, max_samples: 20000 };
 const FEATURE_FIELDS = [["fwd_horizon", "Forward bars", 1], ["max_samples", "Max samples", 1000]];
 const PATTERN_DEFAULTS = { k: 6, window_len: 20, fwd_horizon: 10 };
@@ -143,7 +151,7 @@ export default function MarketLab() {
   const onTab = (id) => { setTabInHash(id); setTab(id); };
 
   // per-tab result cache + loading/error
-  const blank = { regime: null, regimehmm: null, volatility: null, statistics: null, scanner: null, fadesafety: null, features: null, patterns: null, similarity: null };
+  const blank = { regime: null, regimehmm: null, volatility: null, statistics: null, weekdays: null, scanner: null, fadesafety: null, features: null, patterns: null, similarity: null };
   const [results, setResults] = useState(blank);
   const [loading, setLoading] = useState({ ...blank, regime: false });
   const [errors, setErrors] = useState(blank);
@@ -156,6 +164,7 @@ export default function MarketLab() {
   const [featureParams, setFeatureParams] = usePersistentState("ql.mlab.features", FEATURE_DEFAULTS);
   const [patternParams, setPatternParams] = usePersistentState("ql.mlab.patterns", PATTERN_DEFAULTS);
   const [simParams, setSimParams] = usePersistentState("ql.mlab.sim", SIM_DEFAULTS);
+  const [weekdayParams, setWeekdayParams] = usePersistentState("ql.mlab.weekdays", WEEKDAY_DEFAULTS);
   const [regimeModalOpen, setRegimeModalOpen] = useState(false);
   const [hmmModalOpen, setHmmModalOpen] = useState(false);
   const [scanModalOpen, setScanModalOpen] = useState(false);
@@ -203,7 +212,7 @@ export default function MarketLab() {
   const API = {
     regime: marketLabRegime, regimehmm: marketLabRegimeHmm,
     volatility: marketLabVolatility, statistics: marketLabStatistics,
-    scanner: marketLabScan, fadesafety: marketLabFadeSafety,
+    weekdays: marketLabWeekdayWindows, scanner: marketLabScan, fadesafety: marketLabFadeSafety,
     features: marketLabFeatureImportance,
     patterns: marketLabPatterns, similarity: marketLabSimilarity,
   };
@@ -215,6 +224,7 @@ export default function MarketLab() {
     features: { ...regimeParams, ...featureParams },
     patterns: patternParams,
     similarity: simParams,
+    weekdays: weekdayParams,
   }[which] || {});
 
   async function runActive() {
@@ -306,6 +316,11 @@ export default function MarketLab() {
             onChange={setFadeParams} onReset={() => setFadeParams(FADESAFE_DEFAULTS)}
             hint="Same VWMA z-score + RSI setup as the Alpha Scanner, but bucketed by the Black-Scholes 'stretch' (how big the faded move is vs a statistically normal move). Tests whether low-stretch fades carry the edge and tail-stretch fades bleed — i.e. whether a fade_safe filter is worth adding to VWMA Reversion." />
         )}
+        {tab === "weekdays" && (
+          <ParamsBar title="Weekday window settings" fields={WEEKDAY_FIELDS} params={weekdayParams}
+            onChange={setWeekdayParams} onReset={() => setWeekdayParams(WEEKDAY_DEFAULTS)}
+            hint="Every entry-day → exit-day window at these UTC hours, traded like Weekday Swing V2 with the trend filter off. The last 'Holdout months' are kept out of the heatmap so you can check a window on data you didn't pick it from. Re-run after editing." />
+        )}
         {tab === "features" && (
           <ParamsBar title="Feature settings" fields={FEATURE_FIELDS} params={featureParams}
             onChange={setFeatureParams} onReset={() => setFeatureParams(FEATURE_DEFAULTS)}
@@ -326,6 +341,7 @@ export default function MarketLab() {
         {tab === "regimehmm" && <HmmRegimeTab data={results.regimehmm} loading={loading.regimehmm} />}
         {tab === "volatility" && <VolatilityTab data={results.volatility} loading={loading.volatility} />}
         {tab === "statistics" && <StatisticsTab data={results.statistics} loading={loading.statistics} />}
+        {tab === "weekdays" && <WeekdayWindowsTab data={results.weekdays} loading={loading.weekdays} />}
         {tab === "scanner" && (
           <ScannerTab data={results.scanner} loading={loading.scanner}
             symbol={symbol} scanParams={scanParams} regimeParams={regimeParams}
@@ -417,22 +433,40 @@ function RegimeTab({ data, loading }) {
           />
         </Card>
 
-        <Card title="What happens next" hint="Average return over the next bar, conditioned on the current regime.">
+        <Card title="What happens next"
+              hint={`Average return over the next ${fmtInt(data.meta?.method?.fwd_horizon || 1)} bar(s) after each regime, against ALL bars. "Noise" = the gap is inside ±2 standard errors, i.e. most likely luck.`}>
           <table className="w-full text-sm">
             <thead>
               <tr className="text-[11px] uppercase tracking-wider text-muted text-left">
-                <th className="py-1">Regime</th><th>Avg next</th><th>Win rate</th><th className="text-right">n</th>
+                <th className="py-1">Regime</th><th>Avg next</th><th>vs all bars</th><th>Win rate</th><th className="text-right">n</th>
               </tr>
             </thead>
             <tbody>
-              {data.forward_returns?.map((r) => (
-                <tr key={r.regime} className="border-t border-line/50">
-                  <td className="py-1.5" style={{ color: REGIME_COLORS[r.regime] }}>{r.regime}</td>
-                  <td className={signClass(r.avg_fwd_return_pct)}>{pct(r.avg_fwd_return_pct)}</td>
-                  <td className="text-muted">{r.win_rate == null ? "—" : `${fmtNum(r.win_rate)}%`}</td>
-                  <td className="text-right text-muted">{fmtInt(r.n)}</td>
+              {data.forward_baseline && (
+                <tr className="border-t border-line/50 text-muted">
+                  <td className="py-1.5">All bars (baseline)</td>
+                  <td className={signClass(data.forward_baseline.avg_fwd_return_pct)}>{pct(data.forward_baseline.avg_fwd_return_pct)}</td>
+                  <td>—</td>
+                  <td>{data.forward_baseline.win_rate == null ? "—" : `${fmtNum(data.forward_baseline.win_rate)}%`}</td>
+                  <td className="text-right">{fmtInt(data.forward_baseline.n)}</td>
                 </tr>
-              ))}
+              )}
+              {data.forward_returns?.map((r) => {
+                const base = data.forward_baseline?.avg_fwd_return_pct;
+                const diff = r.avg_fwd_return_pct != null && base != null ? r.avg_fwd_return_pct - base : null;
+                const real = diff != null && r.se_pct != null && Math.abs(diff) > 2 * r.se_pct;
+                return (
+                  <tr key={r.regime} className="border-t border-line/50">
+                    <td className="py-1.5" style={{ color: REGIME_COLORS[r.regime] }}>{r.regime}</td>
+                    <td className={signClass(r.avg_fwd_return_pct)}>{pct(r.avg_fwd_return_pct)}</td>
+                    <td className={real ? signClass(diff) : "text-muted"}>
+                      {diff == null ? "—" : `${pct(diff)} ${real ? "" : "· noise"}`}
+                    </td>
+                    <td className="text-muted">{r.win_rate == null ? "—" : `${fmtNum(r.win_rate)}%`}</td>
+                    <td className="text-right text-muted">{fmtInt(r.n)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </Card>

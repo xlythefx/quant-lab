@@ -66,4 +66,18 @@ class DonchianBreakoutEodStrategy(_db.DonchianBreakoutStrategy):
                      "EoD-only exit is feed-independent, so a genuine edge should read the same on "
                      "raw and seam-adjusted (v2) data. Exits-group params are inert."),
         schema=_db.DonchianBreakoutStrategy.PARAM_SCHEMA,
+        guide=(
+            "Donchian Breakout (Intraday) for crude-oil futures (CL, 1-hour bars) with every stop "
+            "and target removed: each trade rides to the end of the day. The Donchian channel is "
+            "the highest high and lowest low of the last 36 bars.\n\n"
+            "- Buys (long) when: as in the parent: price touches the channel top, the 100-day "
+            "average of daily closes is rising, today's close isn't in the top 20% of today's "
+            "range, and last week wasn't a strong one-way week.\n"
+            "- Sells short when: price touches the channel bottom and last week wasn't a strong "
+            "one-way week.\n"
+            "- Closes the trade when: 17:00 New York time (end of day), nothing else.\n"
+            "- Stop loss: none; the Exits settings do nothing here.\n\n"
+            "Good to know: a robustness test. A close-only exit depends less on the data source "
+            "than tight intraday stops do."
+        ),
     )

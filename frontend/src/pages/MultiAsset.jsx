@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import IconNavRail from "../components/dashboardv2/IconNavRail.jsx";
 import StrategyEditor from "../components/StrategyEditor.jsx";
 import PriceChartV2 from "../components/dashboardv2/PriceChartV2.jsx";
@@ -7,7 +7,8 @@ import RangeSelector from "../components/dashboardv2/RangeSelector.jsx";
 import PerformanceTab, { deriveSliceMetrics } from "../components/dashboardv2/PerformanceReport.jsx";
 import { TabBar } from "../components/analytics/primitives.jsx";
 import BrandAtom from "../components/BrandAtom.jsx";
-import { getSymbols, getStrategies, getRiskConfig, runPortfolioBacktest, getPortfolioChartData } from "../services/api.js";
+import { getSymbols, getStrategies, getRiskConfig, getPortfolioChartData } from "../services/api.js";
+import { getState as getRunState, subscribe as subscribeRuns, syncSetup, runBasket, runVariants } from "../services/multiAssetStore.js";
 import { saveUserDefaults, getUserDefaults } from "../services/strategiesStore.js";
 import { setLast as setLastResult } from "../services/lastResultStore.js";
 import { usePersistentState } from "../services/usePersistentState.js";
@@ -46,6 +47,20 @@ const OPTION_CLS = "bg-bg-panel text-text";
 
 const assetId = (symbol, broker) => `${symbol}::${broker || ""}`;
 const ALL_ID = "__all__";
+
+// Direction views for strategies with a `sides` setting. Each is its OWN run.
+const DIRS = ["both", "long", "short"];
+const SIDES_OF = {
+  both: { long: true, short: true },
+  long: { long: true, short: false },
+  short: { long: false, short: true },
+};
+const DIR_META = {
+  both:  { label: "Both",       color: "#3b82f6" },
+  long:  { label: "Long only",  color: "#22c55e" },
+  short: { label: "Short only", color: "#f97316" },
+};
+const dirOf = (s) => (s?.long && s?.short ? "both" : s?.long ? "long" : s?.short ? "short" : null);
 
 // Rail orderings. `stat` sorts read the finished run; assets that have not
 // finished (or failed) have no number and always sink to the bottom, in label
@@ -103,18 +118,17 @@ export default function MultiAsset() {
   const [scale, setScale]           = usePersistentState("ql.ma.scale", "linear");
   const [tab, setTab]               = usePersistentState("ql.ma.tab", "performance");
   const [sortId, setSortId]         = usePersistentState("ql.ma.sort", "pnl_desc");
+  const [sidesOn, setSidesOn]       = usePersistentState("ql.ma.sidesOn", false);    // direction compare shown
+  const [dirView, setDirView]       = usePersistentState("ql.ma.dirView", "both");   // which run the report shows
 
   const [datasets, setDatasets] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [riskConfig, setRiskConfig] = useState(null);
 
   // Per-asset run state: {status: "queued"|"running"|"done"|"error", result?, error?}
-  const [runs, setRuns] = useState({});
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState(null);   // {index, total, label}
+  const { runs, variants, loading, startedAt } = useSyncExternalStore(subscribeRuns, getRunState);
   const [elapsed, setElapsed] = useState(0);
   const [editing, setEditing] = useState(false);
-  const inflightRef = useRef(0);
 
   // Per-asset chart data, fetched lazily for the selected asset then cached.
   const [chartCache, setChartCache] = useState({});   // {assetId: data|null(failed)}
@@ -140,10 +154,12 @@ export default function MultiAsset() {
 
   // One shared param set per strategy — resolved WITHOUT a symbol on purpose so
   // per-symbol presets don't sneak in (the point is: does the idea transfer as-is?).
-  const params = useMemo(
-    () => paramsById[strategyId] || resolveDefaultParams(meta, null, timeframe, getUserDefaults(strategyId)),
-    [paramsById, strategyId, meta, timeframe],
-  );
+  // Saved params are laid over the defaults, so a setting added to the strategy
+  // after you last pressed Apply still shows up (with its default).
+  const params = useMemo(() => {
+    const base = resolveDefaultParams(meta, null, timeframe, getUserDefaults(strategyId));
+    return paramsById[strategyId] ? { ...base, ...paramsById[strategyId] } : base;
+  }, [paramsById, strategyId, meta, timeframe]);
 
   const timeframes = useMemo(() => {
     const seen = new Set(datasets.map((d) => d.timeframe));
@@ -191,51 +207,43 @@ export default function MultiAsset() {
   // Keep the selection on something in the basket ("All assets" needs 2+).
   const showAll = basketRows.length >= 2;
   useEffect(() => {
+    // Wait for the dataset list: until it loads the basket looks empty, which
+    // would reset the selection every time you come back to the page.
+    if (!datasets.length) return;
     if (selectedId === ALL_ID ? !showAll : !basketRows.some((r) => r.id === selectedId)) {
       setSelectedId(showAll ? ALL_ID : (basketRows[0]?.id || ""));
     }
-  }, [basketRows, selectedId, showAll]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [basketRows, selectedId, showAll, datasets.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Inputs changed → results are stale, drop them (never show numbers from a different setup).
-  useEffect(() => { setRuns({}); clearCharts(); inflightRef.current++; setLoading(false); setProgress(null); },
-    [strategyId, timeframe, params]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The setup the results belong to. A different one → the store drops them
+  // (never show numbers from a different setup); the same one — e.g. coming
+  // back from another page — keeps them. Null until the strategy catalog has
+  // loaded: before that `params` is only a placeholder, and comparing it would
+  // wipe good results on every return to the page.
+  const setupKey = meta ? JSON.stringify({
+    strategyId, timeframe, params, rangeKey, customRange: rangeKey === "CUSTOM" ? customRange : null,
+  }) : null;
+  useEffect(() => { if (setupKey && syncSetup(setupKey)) clearCharts(); }, [setupKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!loading) { setElapsed(0); return; }
-    const t0 = Date.now();
-    const id = setInterval(() => setElapsed(Date.now() - t0), 500);
+    if (!loading || !startedAt) { setElapsed(0); return; }
+    const tick = () => setElapsed(Date.now() - startedAt);
+    tick();
+    const id = setInterval(tick, 500);
     return () => clearInterval(id);
-  }, [loading]);
+  }, [loading, startedAt]);
 
   const specFor = (row) => ({
     strategy_id: strategyId, symbol: row.symbol, timeframe, params, priority: 1, broker: row.broker || undefined,
   });
   const windowFor = (row) => rangeToWindow(rangeKey, { firstTime: row.dataset.first_time, lastTime: row.dataset.last_time }, customRange);
 
-  // ---- run: one independent backtest per asset, in sequence ----------------
-  const runAll = async () => {
-    if (!strategyId || !basketRows.length) return;
-    const myReq = ++inflightRef.current;
-    setLoading(true);
+  // ---- run: one independent backtest per asset (the store runs it, so it
+  // keeps going — and its results stay — while you're on another page) ------
+  const runAll = () => {
+    if (!strategyId || !basketRows.length || !setupKey) return;
     clearCharts();
-    setRuns(Object.fromEntries(basketRows.map((r) => [r.id, { status: "queued" }])));
-
-    for (let i = 0; i < basketRows.length; i++) {
-      const row = basketRows[i];
-      if (myReq !== inflightRef.current) return;
-      setProgress({ index: i + 1, total: basketRows.length, label: row.label });
-      setRuns((r) => ({ ...r, [row.id]: { status: "running" } }));
-      try {
-        const res = await runPortfolioBacktest({ strategies: [specFor(row)], ...windowFor(row) });
-        if (myReq !== inflightRef.current) return;
-        setRuns((r) => ({ ...r, [row.id]: { status: "done", result: res } }));
-      } catch (e) {
-        if (myReq !== inflightRef.current) return;
-        setRuns((r) => ({ ...r, [row.id]: { status: "error", error: e?.response?.data?.error || e.message || "Backtest failed." } }));
-      }
-    }
-    setLoading(false);
-    setProgress(null);
+    runBasket(setupKey, basketRows, (row) => ({ strategy: specFor(row), ...windowFor(row) }));
   };
 
   // Drill-in from the overview (curve click or legend) → that asset's report.
@@ -246,32 +254,75 @@ export default function MultiAsset() {
   const selectedRow = (!isAll && assetById[selectedId]) || null;
   const selectedRun = (!isAll && runs[selectedId]) || null;
   const selectedResult = selectedRun?.status === "done" ? selectedRun.result : null;
+
+  // ---- direction view (strategies with a `sides` setting) ------------------
+  // The report can show the selected asset's Both / Long-only / Short-only run.
+  // Each is a SEPARATE backtest: with one trade a day, the longs inside a Both
+  // run are not a Long-only strategy (the day's slot may go to a short first).
+  // The basket run already is the variant matching your own setting.
+  const hasSides = !!meta?.schema?.some((s) => s.name === "sides");
+  const mainDir = dirOf(params?.sides);
+  const showSides = hasSides && !!mainDir && sidesOn;
+  const viewDir = showSides ? dirView : mainDir;
+  const assetVariants = (selectedRow && variants[selectedId]) || {};
+  const runOfDir = (d) => (d === mainDir ? selectedRun : assetVariants[d]);
+  const viewRun = runOfDir(viewDir);
+  const viewResult = viewRun?.status === "done" ? viewRun.result : null;
+  const viewPending = !!selectedResult && !viewResult;
+  const viewParams = useMemo(() => (showSides ? { ...params, sides: SIDES_OF[viewDir] } : params),
+    [showSides, params, viewDir]);
+  useEffect(() => {
+    if (!showSides || !selectedRow || !selectedResult || !setupKey) return;
+    runVariants(setupKey, selectedId, DIRS.filter((d) => d !== mainDir), (d) => ({
+      strategy: { ...specFor(selectedRow), params: { ...params, sides: SIDES_OF[d] } },
+      ...windowFor(selectedRow),
+    }));
+  }, [showSides, selectedId, selectedResult, setupKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Chart data follows the direction view too (its stop lines depend on which
+  // trades were taken), so it is cached per asset AND direction.
+  const chartKey = `${selectedId}|${viewDir}`;
   // No cleanup-cancel here: `chartLoading` is a dependency, so the effect
   // re-runs the instant it flips to true — a cleanup flag would cancel the very
   // fetch it just started and the spinner would never clear. Staleness is
   // handled by the generation counter instead.
   useEffect(() => {
-    if (tab !== "chart" || !selectedRow || !selectedResult || selectedId in chartCache || chartLoading) return;
+    if (tab !== "chart" || !selectedRow || !viewResult || chartKey in chartCache || chartLoading) return;
     const gen = chartGenRef.current;
-    const id = selectedId;
+    const key = chartKey;
     setChartLoading(true);
-    getPortfolioChartData({ strategies: [specFor(selectedRow)], ...windowFor(selectedRow) })
-      .then((d) => { if (gen === chartGenRef.current) setChartCache((c) => ({ ...c, [id]: d })); })
-      .catch(() => { if (gen === chartGenRef.current) setChartCache((c) => ({ ...c, [id]: null })); })  // record failure → no refetch loop
+    getPortfolioChartData({ strategies: [{ ...specFor(selectedRow), params: viewParams }], ...windowFor(selectedRow) })
+      .then((d) => { if (gen === chartGenRef.current) setChartCache((c) => ({ ...c, [key]: d })); })
+      .catch(() => { if (gen === chartGenRef.current) setChartCache((c) => ({ ...c, [key]: null })); })  // record failure → no refetch loop
       .finally(() => setChartLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, selectedId, selectedResult, chartCache, chartLoading]);
+  }, [tab, chartKey, viewResult, chartCache, chartLoading]);
 
   // ---- per-asset performance report (same derivations as Dashboard V2) ----
-  const slice = selectedResult?.per_strategy?.[strategyId] || null;
-  const sc = startingCapital(selectedResult, riskConfig);
+  const slice = viewResult?.per_strategy?.[strategyId] || null;
+  const sc = startingCapital(viewResult, riskConfig);
   const derived = useMemo(() => deriveSliceMetrics(slice, sc), [slice, sc]);
   const monthGrid = useMemo(() => monthlyReturnsGrid(slice?.analytics?.monthly_returns, sc), [slice, sc]);
   const underwater = useMemo(() => underwaterSeries(slice), [slice]);
-  const assetChart = useMemo(() => ({
-    strategies: selectedRow ? [{ id: selectedId, color: "#3b82f6", label: selectedRow.label }] : [],
-    points: { [selectedId]: (slice?.equity || []).map((e) => ({ time: e.time, value: e.value })) },
-  }), [slice, selectedId, selectedRow]);
+  // One line normally; with the direction compare on, one line per finished
+  // direction run (Both / Long only / Short only) for the selected asset.
+  const assetChart = useMemo(() => {
+    const pts = (s) => (s?.equity || []).map((e) => ({ time: e.time, value: e.value }));
+    if (!selectedRow) return { strategies: [], points: {} };
+    if (!showSides) {
+      return { strategies: [{ id: selectedId, color: "#3b82f6", label: selectedRow.label }], points: { [selectedId]: pts(slice) } };
+    }
+    const strategies = [], points = {};
+    for (const d of DIRS) {
+      const run = runOfDir(d);
+      const s = run?.status === "done" ? run.result.per_strategy?.[strategyId] : null;
+      if (!s) continue;
+      strategies.push({ id: `__dir_${d}__`, color: DIR_META[d].color, label: DIR_META[d].label });
+      points[`__dir_${d}__`] = pts(s);
+    }
+    return { strategies, points };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slice, selectedId, selectedRow, showSides, selectedRun, assetVariants, strategyId]);
 
   // ---- "All assets" overview: one equity line per finished asset -----------
   const overview = useMemo(() => {
@@ -312,15 +363,19 @@ export default function MultiAsset() {
   };
   const onResetDefaults = () => onApplyParams(resolveDefaultParams(meta, null, timeframe, getUserDefaults(strategyId)));
 
-  const stats = selectedResult?.per_strategy?.[strategyId]?.stats;
-  const pill = stats ? statusPill(stats) : { label: selectedRun?.status === "error" ? "FAILED" : "NO RUN", tone: selectedRun?.status === "error" ? "loss" : "muted" };
+  const stats = viewResult?.per_strategy?.[strategyId]?.stats;
+  const failed = selectedRun?.status === "error" || viewRun?.status === "error";
+  const pill = stats ? statusPill(stats)
+    : { label: failed ? "FAILED" : viewPending ? "RUNNING" : "NO RUN", tone: failed ? "loss" : "muted" };
   const pillCls = pill.tone === "profit" ? "text-profit border-profit/40 bg-profit/10"
     : pill.tone === "loss" ? "text-loss border-loss/40 bg-loss/10"
     : pill.tone === "neutral" ? "text-accent-cyan border-accent-cyan/40 bg-accent-cyan/10"
     : "text-muted border-line bg-bg-elev";
   const doneCount = Object.values(runs).filter((r) => r.status === "done").length;
+  const finishedCount = Object.values(runs).filter((r) => r.status === "done" || r.status === "error").length;
+  const runningLabels = basketRows.filter((r) => runs[r.id]?.status === "running").map((r) => r.label);
   const canRun = !!strategyId && basketRows.length > 0 && !loading;
-  const activeForChart = useMemo(() => [{ id: strategyId, params, color: "#3b82f6" }], [strategyId, params]);
+  const activeForChart = useMemo(() => [{ id: strategyId, params: viewParams, color: "#3b82f6" }], [strategyId, viewParams]);
 
   // ---- Analytics deep-dive for the selected asset --------------------------
   // Same handoff as Dashboard V2 (lastResultStore → #analytics?key=…), but the
@@ -337,8 +392,8 @@ export default function MultiAsset() {
     if (!analyticsKey) { e.preventDefault(); return; }
     setLastResult(analyticsKey, {
       strategy_id: strategyId, symbol: selectedRow.symbol, timeframe,
-      risk_config: selectedResult.risk_config,
-      params: slice.spec?.params || params,
+      risk_config: viewResult.risk_config,
+      params: slice.spec?.params || viewParams,
       // Compact benchmark series keeps Analytics' buy-and-hold line alive;
       // full candles are only ever fetched on demand for the Chart tab.
       candles: slice.benchmark || [],
@@ -432,6 +487,7 @@ export default function MultiAsset() {
               <span className="text-xs text-muted">
                 {isAll ? `${basketRows.length} assets · ` : ""}{meta?.name || strategyId || "no strategy"} · {timeframe}
                 {selectedRow ? ` · ${ASSET_LABELS[selectedRow.cls] || selectedRow.cls}` : ""}
+                {selectedRow && showSides ? ` · ${DIR_META[viewDir].label}` : ""}
               </span>
             </div>
             <div className="text-xs text-muted mt-1 font-mono">
@@ -501,17 +557,20 @@ export default function MultiAsset() {
           {isAll && overview.count > 0 && <OverviewStrip o={overview} />}
 
           <div className="px-6 py-5 flex-1 flex flex-col min-h-0">
-            {loading && progress && (
+            {loading && basketRows.length > 0 && (
               <div className="mb-4 rounded-xl border border-accent-blue/30 bg-accent-blue/5 px-4 py-3">
                 <div className="flex items-center justify-between gap-3 mb-2">
                   <div className="flex items-center gap-2 text-sm text-text min-w-0">
                     <span className="w-3.5 h-3.5 rounded-full border-2 border-accent-blue border-t-transparent animate-spin shrink-0" />
-                    <span className="truncate">{progress.index} / {progress.total} · running {progress.label}…</span>
+                    <span className="truncate">
+                      {fmtInt(finishedCount)} / {fmtInt(basketRows.length)} done
+                      {runningLabels.length > 0 && ` · running ${runningLabels.join(", ")}…`}
+                    </span>
                   </div>
                   <span className="text-xs font-mono text-muted shrink-0">{fmtElapsed(elapsed)}</span>
                 </div>
                 <div className="h-2 rounded bg-bg-elev/60 overflow-hidden">
-                  <div className="h-full bg-accent-grad transition-all" style={{ width: `${((progress.index - 1) / progress.total) * 100}%` }} />
+                  <div className="h-full bg-accent-grad transition-all" style={{ width: `${(finishedCount / basketRows.length) * 100}%` }} />
                 </div>
               </div>
             )}
@@ -578,7 +637,7 @@ export default function MultiAsset() {
               <div className="px-4 py-2 rounded-lg text-sm text-loss bg-loss/10 border border-loss/30">{selectedRun.error}</div>
             )}
 
-            {selectedRow && selectedResult && slice && (
+            {selectedRow && selectedResult && (
               <div className="flex-1 flex flex-col min-h-0">
                 <div className="mb-4">
                   <TabBar
@@ -588,7 +647,22 @@ export default function MultiAsset() {
                   />
                 </div>
 
-                {tab === "performance" && (
+                {hasSides && mainDir && (
+                  <DirectionBar
+                    on={showSides}
+                    view={viewDir}
+                    main={mainDir}
+                    runOf={runOfDir}
+                    onPick={(d) => { setSidesOn(true); setDirView(d); }}
+                    onClose={() => setSidesOn(false)}
+                  />
+                )}
+
+                {viewPending && (viewRun?.status === "error"
+                  ? <div className="px-4 py-2 rounded-lg text-sm text-loss bg-loss/10 border border-loss/30">{DIR_META[viewDir].label}: {viewRun.error}</div>
+                  : <EmptyHint title={`Running ${DIR_META[viewDir].label}…`} sub={`${selectedRow.label} · one extra backtest for this asset`} />)}
+
+                {slice && tab === "performance" && (
                   <PerformanceTab
                     derived={derived}
                     sc={sc}
@@ -599,18 +673,19 @@ export default function MultiAsset() {
                     monthGrid={monthGrid}
                     interpText={interpretation(slice, derived)}
                     hasAdvanced={!!slice.analytics?.advanced}
+                    byRegime={slice.analytics?.by_regime}
                   />
                 )}
 
-                {tab === "chart" && (
+                {slice && tab === "chart" && (
                   <>
                     <div className="text-[11px] text-muted/80 mb-2 font-mono">
-                      {selectedRow.label} · candles, overlays, dashed ATR stop (while a trade is open), entry/exit markers.
+                      {selectedRow.label}{showSides ? ` · ${DIR_META[viewDir].label}` : ""} · candles, overlays, dashed ATR stop (while a trade is open), entry/exit markers.
                     </div>
                     <div className="rounded-xl border border-line bg-bg-panel/40 overflow-hidden flex-1" style={{ minHeight: 560 }}>
                       <PriceChartV2
-                        result={selectedResult}
-                        chartData={chartCache[selectedId] || null}
+                        result={viewResult}
+                        chartData={chartCache[chartKey] || null}
                         loading={chartLoading}
                         selectedId={strategyId}
                         active={activeForChart}
@@ -780,6 +855,38 @@ function OverviewStrip({ o }) {
       <Kpi label="Median return" value={o.median == null ? "—" : fmtPct(o.median)} valueCls={tone(o.median)} sub="middle asset" />
       <Kpi label="Avg max drawdown" value={o.avgDD == null ? "—" : fmtPct(o.avgDD, false)} valueCls="text-loss" sub="peak-to-trough" />
       <Kpi label="Total trades" value={fmtInt(o.trades)} sub="across all assets" />
+    </div>
+  );
+}
+
+// Both / Long only / Short only for the selected asset. Picking one turns the
+// comparison on (two extra backtests for this asset, then cached); the button
+// matching your own Direction setting is the basket run itself.
+function DirectionBar({ on, view, main, runOf, onPick, onClose }) {
+  return (
+    <div className="flex items-center gap-2 mb-3 flex-wrap">
+      <span className="text-[10px] uppercase tracking-widest text-muted">Direction</span>
+      {DIRS.map((d) => {
+        const active = on ? view === d : main === d;
+        const status = d === main ? "done" : runOf(d)?.status;
+        return (
+          <button
+            key={d}
+            onClick={() => onPick(d)}
+            title={d === main ? "Your Direction setting — the basket run itself" : "A separate backtest with only this direction"}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[11px] transition ${active ? "border-line bg-bg-elev text-text" : "border-line/50 text-muted hover:text-text"}`}
+          >
+            <span className="w-2 h-2 rounded-full" style={{ background: DIR_META[d].color }} />
+            <span>{DIR_META[d].label}</span>
+            {d === main && <span className="text-muted/70">· your setting</span>}
+            {on && status === "running" && <span className="text-muted animate-pulse">…</span>}
+            {on && status === "error" && <span className="text-loss">failed</span>}
+          </button>
+        );
+      })}
+      {on
+        ? <button onClick={onClose} className="text-[11px] text-muted hover:text-text underline-offset-2 hover:underline">hide comparison</button>
+        : <span className="text-[11px] text-muted/70">pick one to compare long vs short — runs 2 extra backtests for this asset</span>}
     </div>
   );
 }

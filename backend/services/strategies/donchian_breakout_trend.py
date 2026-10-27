@@ -38,4 +38,18 @@ class DonchianBreakoutTrendStrategy(_db.DonchianBreakoutStrategy):
                      "port; adds one directional filter to avoid fighting the trend."),
         schema=_db.DonchianBreakoutStrategy.PARAM_SCHEMA,
         archived=True,
+        guide=(
+            "Donchian Breakout (Intraday) for crude-oil futures (CL, 1-hour bars) with one extra "
+            "rule: no shorting while the long-term trend is up. The Donchian channel is the highest "
+            "high and lowest low of the last 36 bars.\n\n"
+            "- Buys (long) when: same as the parent (price touches the channel top, rising 100-day "
+            "average of daily closes, plus the daily and weekly filters).\n"
+            "- Sells short when: price touches the channel bottom, last week wasn't a strong "
+            "one-way week, and the 100-day average isn't rising.\n"
+            "- Closes the trade when: profit reaches $2,400 per contract, or at 17:00 New York time.\n"
+            "- Stop loss: as in the parent: $1,200 per contract, a breakeven lock, and a trailing "
+            "stop using the ATR (average bar size).\n\n"
+            "Good to know: archived. The short-side trend rule is always on; the MovingUp switch "
+            "only affects longs."
+        ),
     )

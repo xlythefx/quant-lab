@@ -15,7 +15,7 @@ const VALIDATION_ITEMS = [
   { href: "#reportimport", view: "reportimport", label: "Report Import" },
 ];
 
-export default function Navbar({ view = "dashboard", mode, onModeChange }) {
+export default function Navbar({ view = "dashboardv2" }) {
   const [connected, setConnected] = useState(socket.connected);
 
   useEffect(() => {
@@ -54,9 +54,6 @@ export default function Navbar({ view = "dashboard", mode, onModeChange }) {
       </div>
 
       <div className="flex items-center gap-4">
-        {onModeChange && (
-          <ModeToggleInline mode={mode} onChange={onModeChange} />
-        )}
         <button
           onClick={goLive}
           title="Switch to the Live Terminal"
@@ -147,27 +144,6 @@ function NavDropdown({ label, items, view }) {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function ModeToggleInline({ mode, onChange }) {
-  const opts = ["backtest", "live"];
-  return (
-    <div className="flex items-center gap-1 p-1 rounded-lg border border-line bg-bg-elev">
-      {opts.map((m) => (
-        <button
-          key={m}
-          onClick={() => onChange(m)}
-          className={`px-3 py-1 text-xs font-medium uppercase tracking-wider rounded-md transition ${
-            mode === m
-              ? "bg-accent-grad text-white shadow"
-              : "text-muted hover:text-text"
-          }`}
-        >
-          {m}
-        </button>
-      ))}
     </div>
   );
 }

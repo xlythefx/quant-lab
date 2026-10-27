@@ -177,7 +177,7 @@ export default function MonteCarlo() {
               <div className="text-xs text-muted font-mono mt-0.5">{subtitle}</div>
             )}
           </div>
-          <a href="#dashboard" className="text-xs text-accent-blue hover:underline">← Dashboard</a>
+          <a href="#dashboardv2" className="text-xs text-accent-blue hover:underline">← Dashboard</a>
         </header>
 
         {handoff && <HandoffStrip handoff={handoff} onClear={() => setHandoff(null)} />}

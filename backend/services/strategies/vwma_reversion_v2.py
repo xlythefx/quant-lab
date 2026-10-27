@@ -87,13 +87,18 @@ from services.strategies.session_utils import parse_hhmm, in_window_live, sessio
 class VwmaReversionV2Strategy(Strategy):
     PARAM_SCHEMA = [
         # --- Core VWMA reversion (identical to the base strategy) -----------
-        ParamSpec("vwma_length",   ParamType.INT,   30,  min=5,   max=200, step=1,   group="VWMA"),
+        ParamSpec("vwma_length",   ParamType.INT,   30,  min=5,   max=200, step=1,   group="VWMA",
+                  description="Bars in the VWMA (volume-weighted average price) that price should snap "
+                              "back to; also the window for measuring the z-score spread."),
         ParamSpec("z_threshold",   ParamType.FLOAT, 1.5, min=0.5, max=4.0, step=0.1, group="VWMA",
                   description="Stretch required for the FIRST rung. Each later rung needs this plus "
                               "Z step per rung already open."),
-        ParamSpec("rsi_length",    ParamType.INT,   25,  min=5,  max=50, step=1, group="RSI"),
-        ParamSpec("rsi_long_max",  ParamType.INT,   35,  min=25, max=40, step=1, group="RSI"),
-        ParamSpec("rsi_short_min", ParamType.INT,   65,  min=60, max=75, step=1, group="RSI"),
+        ParamSpec("rsi_length",    ParamType.INT,   25,  min=5,  max=50, step=1, group="RSI",
+                  description="Bars used to calculate RSI (a 0–100 gauge of recent up moves vs down moves)."),
+        ParamSpec("rsi_long_max",  ParamType.INT,   35,  min=25, max=40, step=1, group="RSI",
+                  description="Every long rung needs RSI below this value (oversold)."),
+        ParamSpec("rsi_short_min", ParamType.INT,   65,  min=60, max=75, step=1, group="RSI",
+                  description="Every short rung needs RSI above this value (overbought)."),
 
         # --- The ladder ------------------------------------------------------
         ParamSpec("z_step", ParamType.FLOAT, 0.1, min=0.0, max=2.0, step=0.05, group="Ladder",
@@ -112,7 +117,9 @@ class VwmaReversionV2Strategy(Strategy):
                   description="ONE stop for the whole ladder, at average entry -/+ ATR mult x average "
                               "entry ATR. Breach it and every rung closes together. On by default; turn "
                               "it off only to measure what the stop is actually worth."),
-        ParamSpec("atr_length", ParamType.INT,   10,  min=5, max=50, step=1,   group="Stop"),
+        ParamSpec("atr_length", ParamType.INT,   10,  min=5, max=50, step=1,   group="Stop",
+                  description="Bars used to measure ATR (the average high-to-low range of a bar) for the "
+                              "shared ladder stop."),
         ParamSpec("atr_mult",   ParamType.FLOAT, 6.0, min=1, max=20, step=0.5, group="Stop",
                   description="Stop distance in ATRs from the ladder's AVERAGE entry (not from the first "
                               "rung), so the stop tightens toward price as you add."),
@@ -148,6 +155,19 @@ class VwmaReversionV2Strategy(Strategy):
                      "deeper z-score, under one shared ATR stop on the ladder's average entry. Long-only "
                      "and 24/7 by default. Set pyramiding=1 for the plain single-position version."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "A ladder version of VWMA Reversion: it can hold up to 4 equal-size entries (\"rungs\"), and "
+            "each extra rung needs price stretched further from its average than the last.\n\n"
+            "- Buys (long) when: z-score (distance from the 30-bar VWMA, a volume-weighted average, in "
+            "units of its usual spread) reaches -1.5 and 25-bar RSI (a 0–100 buying-vs-selling gauge) is "
+            "under 35. Rungs 2–4 need -1.6, -1.7, -1.8; at most one rung per bar.\n"
+            "- Sells short when: off by default (long only).\n"
+            "- Closes the trade when: price closes back at or past the VWMA; all rungs close together.\n"
+            "- Stop loss: on. One shared stop 6 × ATR (average bar range) beyond the rungs' average entry "
+            "price.\n\n"
+            "Good to know: trades 24/7 by default; no regime filter. Pyramiding 1 gives a plain "
+            "single-position version."
+        ),
     )
 
     OVERLAYS = [

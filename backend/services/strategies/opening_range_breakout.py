@@ -102,7 +102,9 @@ class OpeningRangeBreakoutStrategy(Strategy):
         # ---- Direction toggle (defaults to both) ----
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
-                  group="Direction"),
+                  group="Direction",
+                  description="Which directions may trade: tick Long (buy a close above the box) "
+                              "and/or Short (sell a close below it)."),
         # ---- Sizing (crypto uses risk_pct, futures use contracts; pyramiding fixed at 1) ----
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
                   description="Crypto/spot sizing: notional = equity × risk_pct ÷ entry price."),
@@ -120,6 +122,18 @@ class OpeningRangeBreakoutStrategy(Strategy):
                      "is the OPPOSITE EDGE of the box on a close; flatten at session "
                      "close; one trade/day; configurable sessions + sides. No ATR."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Marks the high and low of the 15 minutes from 13:30 UTC (the 'opening range'), then "
+            "trades in the direction price breaks out of that box.\n\n"
+            "- Buys (long) when: a bar closes above the box between 13:45 and 15:45 UTC. Entry at "
+            "the next bar's open.\n"
+            "- Sells short when: a bar closes below the box in that window.\n"
+            "- Closes the trade when: the window ends at 15:45 UTC. No profit target.\n"
+            "- Stop loss: a bar closes beyond the opposite edge of the box.\n\n"
+            "Good to know: one trade per UTC day; the first break wins. Times are fixed UTC with no "
+            "daylight-saving shift, so 13:30 UTC is the US stock open only in summer. On a 15m "
+            "chart the box is one bar; use 5m for a finer range."
+        ),
     )
 
     OVERLAYS = [

@@ -115,6 +115,102 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
 - **Old `#livealerts` page stays fully working** until the cutover soak completes
   (plans/10) — don't remove it before then.
 
+## Where QuantLab runs live, and the live rules (checked Oct 26, 2026)
+
+- **Prod only: ubuntu-prod 191.218.162.171 → `lab.nexafamily.com`** (nginx basic auth,
+  unit `quantlab.service`, port 6173). It is **NOT on staging 182** — no unit, no folder, no
+  vhost there. `vps-deployment/deploy_ubuntu.py` (gitignored, local only) hardcodes
+  `CRED_KEY = "ubuntu-prod"`. "QuantLab on staging" doesn't exist; what looks like staging
+  is the **Pixel Alpha test feed** the rules post to.
+- **Adding a coin = adding a rule (deployment) in the Live Terminal on lab.nexafamily.com.**
+  No code change and no deploy needed when the strategy already has the knobs. A deploy
+  never overwrites the box's rules: `stage_data` skips `live_alerts.json`,
+  `live_terminal.db`, `live_state/`.
+- **Live rule 1 — `VWMA Reversion LTCUSDT 15m`** (enabled): `vwma_reversion`, vwma 23,
+  z 1.5, rsi 15, **longs only**, **`trade_24_7: true`** (so its session toggles are
+  ignored), ATR stop off, 25x, account `live` →
+  `https://pixel-alpha.com/binance_test_webhook`. Sends BUY / EXIT_LONG pairs.
+- **Live rule 2 — `VWMA Reversion RENDERUSDT 15m`**: added Oct 26, 2026 and **RUNNING
+  since Oct 26, 2026 03:53 UTC** (the user switched it on). Same webhook and secret as LTC
+  (via `secret_source`) and the same alias, 25x, account `live`; params below. Pixel Alpha
+  needs a RENDERUSDT asset with max sizing ≥ 3× base size (the user set it up). To
+  switch it on or off from a terminal: PATCH `/api/live/deployments/<url-encoded name>`
+  with `{"status": "RUNNING"|"PAUSED"}`. Pre-change backup on the box:
+  `/root/quantlab-backups/live_alerts.json.20261026-before-render`.
+- **Live rules 3 + 4 — `VWMA Reversion QNTUSDT 15m` and `VWMA Reversion SANTOSUSDT 15m`**:
+  RUNNING since Oct 26, 2026 04:25 UTC. Same webhook, secret, alias, 25x, `live` as LTC;
+  pyramiding 3, no stop, **`trade_24_7: true`**. Their Pine has Asia `"0000-0000"` (which
+  in Pine means a full 24h) with London and Main off. In QuantLab a 00:00–00:00 window is
+  **empty** (`in_window_live` needs start < end), so 24h sessions must be `trade_24_7`.
+  - QNT (Pine "XlytheAI - QNT VWMA"): vwma 34, z 1.2, rsi 26, RSI < 35 / > 65, **longs only**.
+  - SANTOS (Pine "XlytheAI - SANTOS VWMA"): vwma 46, z 1.0, rsi 14, **RSI < 32** / > 65,
+    longs + shorts.
+  - Their Pine checks entries *before* exits and has no `process_orders_on_close`, so
+    TradingView fills on the next bar's open. Live, both still send at bar close.
+  - Parity (local parquet, ~5 yrs): QNT 2,554 / 2,557 match; SANTOS 9,631 / 9,689 (99.4%).
+    The SANTOS gap is 41 same-bar long↔short flips (~1 per 6 weeks) where the Pine
+    reverses on one bar and QuantLab exits, then enters next bar if still valid. SANTOS is
+    busy: ~27 entries/week, 3,732 of 6,710 are stacked adds.
+  - Pre-change backup: `/root/quantlab-backups/live_alerts.json.20261026-before-qnt-santos`.
+  - The parity script is `vwma_parity.py` (Oct 26 session scratchpad). It's a bar-by-bar Pine
+    port vs `on_candle`; rebuild it from this description if needed.
+- **Every webhook carries `sent_at` (since Oct 26, 2026):** UTC ISO with ms
+  (`"2026-10-26T14:15:02.812Z"`), stamped once in `build_payload` when the signal is
+  dispatched. Retries resend the same value. It's also a `{{sent_at}}` token for
+  `payload_template`. Pixel Alpha's engine reads it to measure signal → fill delay, so the
+  box clock must stay NTP-synced (191: `NTPSynchronized=yes`). The frontend token hint
+  text in `AlertsView.jsx` / `LiveAlerts.jsx` doesn't list it yet.
+- To add a rule from a terminal, POST `/api/live/deployments` on the box's loopback
+  (`http://127.0.0.1:6173`, which skips nginx basic auth). Send `"secret": "***"` +
+  `"secret_source": "<existing rule name>"` so the real secret never leaves the server.
+  Note `live_alerts.json` is `{"rules": [...]}`, not a bare list.
+
+### RENDERUSDT 15m — follow the Pine exactly (LIVE since Oct 26, 2026)
+
+Source: the TradingView `//@version=6` strategy **"XlytheAI - RENDER VWMA"** (the full Pine
+was reviewed Oct 26, 2026; it is not in this repo). Maps onto `vwma_reversion` with no code
+change:
+
+| Pine | Value | QuantLab rule param |
+|---|---|---|
+| timeframe | 15m | rule `timeframe: "15m"` |
+| VWMA Length | 35 | `vwma_length: 35` |
+| Z-Score Threshold | 1.5 | `z_threshold: 1.5` |
+| RSI Length | 21 | `rsi_length: 21` |
+| `rsiVal < 35` / `rsiVal > 65` (hardcoded) | 35 / 65 | `rsi_long_max: 35`, `rsi_short_min: 65` (= defaults) |
+| Enable Longs / Shorts | both ON | `sides: {long: true, short: true}` |
+| Asia Session | ON, `0100-0830` | `sessions.tokyo {enabled, start "01:00", end "08:30"}` |
+| London Session | ON, `0830-1230` | `sessions.london {enabled, start "08:30", end "12:30"}` |
+| Main Trading Session | OFF, `1230-1645` | `sessions.ny_am {enabled: false, "12:30"–"16:45"}`; `ny_pm` off |
+| (no 24/7 in Pine) | — | `trade_24_7: false` (unlike LTC) |
+| `pyramiding = 3` | 3 | `pyramiding: 3` |
+| no stop; exits `close >= / <= mean`, not session-gated | — | `atr_stop: false`, `use_regime: false` |
+| leverage | not in Pine | 25, same as LTC |
+
+Type the session start/end times explicitly. QuantLab's defaults (tokyo 00:00–04:00, london
+05:00–12:30, ny_am 12:30–16:00) are NOT the Pine's.
+
+**Timezone: settled. The times are UTC; enter them as-is.** The Pine calls
+`time(timeframe.period, sess)` with **no** timezone argument, so sessions run in the
+exchange timezone (Binance = UTC). The chart's **UTC+8** setting only changes the clock
+labels. (TradingView's List of Trades shows UTC+8, so add 8h when comparing.)
+
+**Parity check (Oct 26, 2026)**: a bar-by-bar port of the Pine vs `on_candle` replayed
+over local `RENDERUSDT_15m.parquet` (Nov 2021 – Oct 21, 2026, 171k bars). Result: **3,977
+of 3,978 actions match on the same bar**. The only miss is a same-bar flip (Dec 05, 2024):
+the Pine closes and reverses on one bar, while QuantLab only exits that bar. ~10.9 entries
+a week; **1,570 of 2,774 entries are 2nd/3rd stacked tranches**. `process_orders_on_close =
+true` only moves the backtest fill to the signal bar's close. Live, both send at bar close.
+
+Before arming:
+- Pixel Alpha needs a RENDERUSDT asset (the user is adding it). The acceptor
+  (`trading-flask` `webhook.py`) adds to the position on a repeated BUY/SELL
+  (`handle_add`) but SKIPS it as `maxed_sizing` past the asset's **max sizing**. So max
+  sizing must allow **3× base_size** or tranches 2–3 never fill. EXIT closes the whole stack.
+- One sender only. The user confirmed TradingView won't also send RENDER to that webhook.
+- First live rule with **shorts on**, so the first real SELL / EXIT_SHORT on that feed.
+- RENDERUSDT is a TRADING Binance spot pair, so it passes `is_live_eligible`.
+
 ## Deployment reality — how a strategy actually reaches the market
 
 **QuantLab is the research lab, not the execution venue.** The full path is:
@@ -137,7 +233,7 @@ size vs what the acceptor actually does).
 ### ⚠ Sizing is owned by the acceptor, and the backtest models a DIFFERENT scheme
 
 This is by design and is not to be "fixed" in the payload: `build_payload` deliberately
-sends only `{secret, strategy, leverage, action, symbol}` — no quantity, no risk_pct. One
+sends only `{secret, strategy, leverage, action, symbol, sent_at}` — no quantity, no risk_pct. One
 place owns risk, and the same shape works for both TradingView and QuantLab alerts.
 
 **What live actually trades** (`_scale_qty` in the acceptor,
@@ -303,8 +399,8 @@ catalogs and the `ASSET_CLASSES` enum only ever emit `"futures"`; the live trigg
   correctly shows both fee types). `risk_pct`, `contracts`, `pyramiding` are per-strategy
   (PARAM_SCHEMA), edited in the Dashboard Settings panel.
 - **UI:** the Settings panel ([StrategyEditor.jsx](frontend/src/components/StrategyEditor.jsx))
-  takes a `hiddenParams` prop; [Dashboard.jsx](frontend/src/pages/Dashboard.jsx) computes it from
-  the selected symbol's asset class (`_isContractSized`) to hide the inert sizing slider —
+  takes a `hiddenParams` prop; [DashboardV2.jsx](frontend/src/pages/DashboardV2.jsx) computes it from
+  the selected symbol's asset class (`hiddenSizingParams`) to hide the inert sizing slider —
   `risk_pct` on futures, `contracts` on crypto. WalkForward/GridSearch param editors do NOT yet
   do this (still show both as optimizable ranges).
 

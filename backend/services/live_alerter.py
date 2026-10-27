@@ -11,8 +11,14 @@ Each POST carries the JSON payload the Binance acceptor expects:
     "strategy": "<alias>",
     "leverage": "<int as string>",
     "action":   "BUY | SELL | EXIT_LONG | EXIT_SHORT",
-    "symbol":   "BTCUSDT"
+    "symbol":   "BTCUSDT",
+    "sent_at":  "2026-10-26T14:15:02.812Z"
   }
+
+`sent_at` is when QuantLab decided the signal (UTC, milliseconds). It is stamped
+once when the payload is built, so retries resend the same value and a retried
+signal measures as slow rather than looking fresh. The receiver uses it to time
+the gap between signal and fill, so this box's clock must stay NTP-synced.
 
 Every attempt (ok/fail) emits a `live_alert_dispatched` Socket.IO event.
 """
@@ -22,6 +28,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -58,26 +65,34 @@ def action_for(sig: Signal) -> Optional[str]:
     return _ACTION_MAP.get((sig.side, sig.kind))
 
 
-def _default_payload(rule: dict, action: str, symbol: str) -> dict:
+def sent_at_now() -> str:
+    """UTC now as ISO-8601 with milliseconds, e.g. 2026-10-26T14:15:02.812Z."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _default_payload(rule: dict, action: str, symbol: str, sent_at: str) -> dict:
     return {
         "secret":   rule["secret"],
         "strategy": rule["strategy_alias"],
         "leverage": str(rule["leverage"]),
         "action":   action,
         "symbol":   symbol,
+        "sent_at":  sent_at,
     }
 
 
-def build_payload(rule: dict, action: str, symbol: str) -> dict:
+def build_payload(rule: dict, action: str, symbol: str, sent_at: Optional[str] = None) -> dict:
+    sent_at = sent_at or sent_at_now()
     template = rule.get("payload_template")
     if not template:
-        return _default_payload(rule, action, symbol)
+        return _default_payload(rule, action, symbol, sent_at)
     tokens = {
         "action":   action,
         "symbol":   symbol,
         "secret":   rule["secret"],
         "strategy": rule["strategy_alias"],
         "leverage": str(rule["leverage"]),
+        "sent_at":  sent_at,
     }
     rendered = template
     for key, val in tokens.items():
@@ -86,7 +101,7 @@ def build_payload(rule: dict, action: str, symbol: str) -> dict:
         return json.loads(rendered)
     except (json.JSONDecodeError, ValueError):
         log.warning("payload_template for rule %r failed to render — falling back to default", rule.get("name"))
-        return _default_payload(rule, action, symbol)
+        return _default_payload(rule, action, symbol, sent_at)
 
 
 def _emit_dispatched(strategy_id: str, symbol: str, action: str, *,

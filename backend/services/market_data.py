@@ -16,13 +16,18 @@ so every existing caller keeps working unchanged.
 """
 import os
 import shutil
+import threading
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional
 
 import ccxt
 import numpy as np
 import pandas as pd
+import requests
+import requests.adapters
+from urllib3.util.ssl_ import create_urllib3_context
 
 from config import (
     DATA_DIR,
@@ -385,54 +390,302 @@ def ensure_parquet(symbol: str, timeframe: str, force: bool = False) -> Dict:
     return {"cached": False, "rows": len(df), "path": path}
 
 
-def download_range(
-    symbol: str,
-    timeframe: str,
-    start_ms: int,
-    end_ms: int,
-    progress_cb=None,
-    cancel_check=None,
-) -> Dict:
-    """
-    Download a custom date range and write/merge into the Parquet for
-    (symbol, timeframe). If a file already exists, the new rows are merged
-    in (deduped) so the cache grows incrementally.
-    Returns {rows_added, rows_total, path, first_time, last_time}.
+# ---------------------------------------------------------------------------
+# Auto-detect, gap planning and the parallel Binance downloader
+# ---------------------------------------------------------------------------
 
-    `cancel_check`: optional callable returning True if the caller wants to
-    abort. Checked between pages — the partial result still gets merged into
-    the parquet so cancellation isn't a total loss.
-    """
-    if start_ms >= end_ms:
-        raise ValueError("start must be before end")
+# Older than every crypto exchange. Binance and Bybit answer a `since` this old
+# with their FIRST bar; MEXC answers with an empty page (it keeps a rolling
+# window), so it falls back to the _seek_first_bar search.
+_HISTORY_FLOOR_MS = 1262304000000  # Jan 01, 2010
 
-    pair = _to_ccxt_symbol(symbol)
-    client = _client_for(symbol)
-    broker = ccxt_broker_for(symbol)
-    _require_market(client, pair, symbol)
-    # Odd intervals the exchange lacks are pulled finer and resampled.
-    fetch_tf = _fetch_tf_for(client, timeframe)
-    native = fetch_tf == timeframe
-    tf_seconds = TIMEFRAME_SECONDS[fetch_tf]
-    page_limit = 1000
+# A jump this big between two saved bars counts as a hole to re-check.
+# Smaller jumps are normal (exchange maintenance, a quiet market).
+_HOLE_MIN_SEC = 86400
 
-    new_rows = []
-    since = start_ms
-    log.info("Downloading %s %s from %s to %s (fetch_tf=%s, broker=%s)", symbol, timeframe, start_ms, end_ms, fetch_tf, broker)
+# Binance REST klines per market (keyed by perp?): url, per-IP weight budget
+# per minute, bars per page, weight per page. Perps charge by page size — 1000
+# bars cost 5, 499 bars only 2 — so 499-bar pages get more bars per minute.
+_BINANCE_KLINES = {
+    False: ("https://api.binance.com/api/v3/klines", 6000, 1000, 2),
+    True: ("https://fapi.binance.com/fapi/v1/klines", 2400, 499, 2),
+}
+# Share of that budget one download may spend. The live runners warm up from
+# Binance REST on this same IP, and an IP ban (HTTP 418) would block them too.
+DOWNLOAD_BUDGET_SHARE = 0.5
+_DOWNLOAD_WORKERS = 8
 
+# Bybit / MEXC go one page at a time. ~4 pages/s is what that measured on
+# Binance (Oct 2026) — only used for the time estimate.
+_SEQUENTIAL_PAGE_BARS = 1000
+_SEQUENTIAL_PAGES_PER_SEC = 4.0
+
+
+def _probe_page(client, pair: str, timeframe: str, since: Optional[int] = None,
+                attempts: int = 3) -> list:
+    """A 1-bar _fetch_page for auto-detect. A timeout or dropped connection is
+    retried a couple of times — otherwise one network blip skips a whole
+    symbol in a batch. Exchange errors (e.g. unknown pair) are not retried."""
+    for attempt in range(attempts):
+        try:
+            return _fetch_page(client, pair, timeframe, since=since, limit=1)
+        except ccxt.NetworkError as e:
+            if attempt == attempts - 1:
+                raise
+            log.warning("auto-detect request failed (%s) — retrying", e)
+            time.sleep(2 * (attempt + 1))
+    return []
+
+
+def _first_bar_ms(client, pair: str, timeframe: str, now_ms: int) -> Optional[int]:
+    """Open time of the oldest bar the exchange has for `pair`."""
+    rows = _probe_page(client, pair, timeframe, since=_HISTORY_FLOOR_MS)
+    if rows:
+        return int(rows[0][0])
+    near = _seek_first_bar(client, pair, timeframe, _HISTORY_FLOOR_MS, now_ms)
+    if near is None:
+        return None
+    rows = _probe_page(client, pair, timeframe, since=near)
+    return int(rows[0][0]) if rows else None
+
+
+def _last_bar_ms(client, pair: str, timeframe: str) -> Optional[int]:
+    """Open time of the newest bar (usually still forming)."""
+    rows = _probe_page(client, pair, timeframe)
+    return int(rows[-1][0]) if rows else None
+
+
+def _saved_times(path: str) -> Optional[np.ndarray]:
+    """Sorted bar times (seconds) already in the parquet, or None."""
+    if not os.path.exists(path):
+        return None
+    t = pd.read_parquet(path, columns=["time"])["time"].to_numpy(dtype="int64")
+    return np.sort(t) if len(t) else None
+
+
+def missing_segments(start_ms: int, end_ms: int, saved_sec, tf_sec: int) -> List[Dict]:
+    """The parts of [start_ms, end_ms] the saved file doesn't cover yet, oldest first:
+
+      head — before the file's first bar
+      hole — a jump of more than a day inside the file. Often a real exchange
+             outage that stays empty; re-checking one costs a page or two.
+      tail — from the file's last bar on. That bar is fetched again because it
+             may still have been forming when it was saved.
+
+    With no saved file the whole range is one "all" segment."""
+    if saved_sec is None or len(saved_sec) == 0:
+        segs = [{"kind": "all", "start_ms": start_ms, "end_ms": end_ms}]
+    else:
+        first_ms, last_ms = int(saved_sec[0]) * 1000, int(saved_sec[-1]) * 1000
+        segs = []
+        if start_ms < first_ms:
+            segs.append({"kind": "head", "start_ms": start_ms, "end_ms": min(end_ms, first_ms - 1)})
+        gaps = np.diff(saved_sec)
+        for i in np.flatnonzero(gaps > max(_HOLE_MIN_SEC, 2 * tf_sec)):
+            segs.append({
+                "kind": "hole",
+                "start_ms": max(start_ms, (int(saved_sec[i]) + tf_sec) * 1000),
+                "end_ms": min(end_ms, int(saved_sec[i + 1]) * 1000 - 1),
+            })
+        if end_ms > last_ms:
+            segs.append({"kind": "tail", "start_ms": max(start_ms, last_ms), "end_ms": end_ms})
+    return [s for s in segs if s["start_ms"] < s["end_ms"]]
+
+
+def _plan_pages(segments: List[Dict], tf_ms: int, page_bars: int) -> List[Dict]:
+    """Cut segments into fixed windows of `page_bars` bars, in the order the
+    workers take them: {"seg", "since", "until"} (until exclusive). A head is
+    cut from its newest end backwards, so if the download stops early the part
+    that's done still touches the saved file instead of leaving a hole."""
+    span = tf_ms * page_bars
+    pages = []
+    for n, seg in enumerate(segments):
+        s, e = seg["start_ms"], seg["end_ms"] + 1
+        if seg["kind"] == "head":
+            windows = [(max(s, b - span), b) for b in range(e, s, -span)]
+        else:
+            windows = [(a, min(a + span, e)) for a in range(s, e, span)]
+        pages.extend({"seg": n, "since": a, "until": b} for a, b in windows)
+    return pages
+
+
+def _kept_rows(segments: List[Dict], pages: List[Dict], results: Dict[int, list]) -> list:
+    """Rows to save once the workers are finished, even after an early stop: per
+    segment, the pages done in an unbroken run from where it started (all of
+    them if it finished). A partly filled hole is dropped — what's left of it
+    could be smaller than a day, and the next run would never see it."""
+    rows = []
+    for n, seg in enumerate(segments):
+        idx = [i for i, p in enumerate(pages) if p["seg"] == n]
+        run = []
+        for i in idx:
+            if i not in results:
+                break
+            run.append(i)
+        if seg["kind"] == "hole" and len(run) < len(idx):
+            continue
+        for i in run:
+            rows.extend(results[i])
+    return rows
+
+
+class _RateGate:
+    """Spaces requests evenly so a download spends at most its share of
+    Binance's per-IP weight budget. Every Binance reply also says how much
+    weight the whole IP used this minute (live runners included); above 80%,
+    every worker waits for the next minute, when Binance resets the count."""
+
+    def __init__(self, limit_per_min: int, page_weight: int, share: float):
+        self.limit = limit_per_min
+        self.interval = 60.0 * page_weight / (limit_per_min * share)
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self, stopped) -> bool:
+        """Block until this request's turn; False if the download stopped first."""
+        with self._lock:
+            slot = max(time.monotonic(), self._next)
+            self._next = slot + self.interval
+        while not stopped():
+            left = slot - time.monotonic()
+            if left <= 0:
+                return True
+            time.sleep(min(left, 0.25))
+        return False
+
+    def hold(self, seconds: float) -> None:
+        with self._lock:
+            self._next = max(self._next, time.monotonic() + seconds)
+
+    def observe(self, used_weight: Optional[int]) -> None:
+        if used_weight is not None and used_weight > 0.8 * self.limit:
+            log.warning("Binance weight at %d/%d this minute — pausing downloads", used_weight, self.limit)
+            self.hold(60 - time.time() % 60 + 1)
+
+
+class BinanceBanned(RuntimeError):
+    """HTTP 418 — Binance banned this IP for a while. A batch must stop here:
+    carrying on would only extend the ban (and it blocks live runners too)."""
+
+
+def _with_note(exc: Exception, note: str) -> Exception:
+    """Same exception type (a ban stays a ban), plus what happened to the file."""
+    try:
+        return type(exc)(f"{exc} — {note}")
+    except Exception:
+        return RuntimeError(f"{exc} — {note}")
+
+
+class _OwnTLSAdapter(requests.adapters.HTTPAdapter):
+    """By default requests shares ONE SSL context across every session in the
+    process. pip-system-certs (truststore) on this PC switches that context to
+    "don't verify" for a moment during each handshake and checks the
+    certificate itself afterwards — reading the same shared settings. With 8
+    workers, one thread's check could run while another had them relaxed
+    (urllib3 then logs InsecureRequestWarning). A context per worker thread
+    removes the race."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.load_verify_locations(requests.utils.DEFAULT_CA_BUNDLE_PATH)  # what requests uses
+        kwargs["ssl_context"] = ctx
+        super().init_poolmanager(*args, **kwargs)
+
+
+_tls = threading.local()
+
+
+def _http() -> requests.Session:
+    """One HTTP session per worker thread, each with its own SSL context."""
+    s = getattr(_tls, "session", None)
+    if s is None:
+        s = _tls.session = requests.Session()
+        s.mount("https://", _OwnTLSAdapter())
+    return s
+
+
+def _binance_page(url: str, market_id: str, interval: str, page: Dict, page_bars: int,
+                  gate: _RateGate, stopped, volume_mult: float = 1.0) -> Optional[list]:
+    """One page of Binance klines, trimmed to the page's own window (None if the
+    download stopped first). Network errors and 5xx are retried, a 429 waits
+    out Binance's Retry-After, and a 418 (IP ban) ends the whole download."""
+    for attempt in range(6):
+        if not gate.wait(stopped):
+            return None
+        try:
+            r = _http().get(url, timeout=20, params={
+                "symbol": market_id, "interval": interval,
+                "startTime": page["since"], "limit": page_bars,
+            })
+        except requests.RequestException as e:
+            log.warning("klines page %s failed: %s — retrying", page["since"], e)
+            time.sleep(2 * (attempt + 1))
+            continue
+        used = r.headers.get("X-MBX-USED-WEIGHT-1M", "")
+        gate.observe(int(used) if used.isdigit() else None)
+        if r.status_code == 418:
+            raise BinanceBanned(
+                f"Binance banned this IP for {r.headers.get('Retry-After', '?')}s (HTTP 418) — "
+                "live runners on this machine are blocked too until it lifts")
+        if r.status_code == 429:
+            gate.hold(float(r.headers.get("Retry-After") or 60))
+            continue
+        if r.status_code >= 500:
+            time.sleep(2 * (attempt + 1))
+            continue
+        if r.status_code != 200:
+            raise RuntimeError(f"Binance klines HTTP {r.status_code}: {r.text[:200]}")
+        return [
+            [int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5]) * volume_mult]
+            for k in r.json() if page["since"] <= k[0] < page["until"]
+        ]
+    raise RuntimeError(f"Binance kept failing on the page starting at {page['since']}")
+
+
+def _fetch_pages_parallel(pages: List[Dict], fetch, workers: int, stopped, on_page):
+    """Run `fetch(page, stopped)` over every page on `workers` threads.
+    Returns ({page index: rows}, first exception or None). The first error
+    stops the remaining pages; `on_page(rows)` runs on the calling thread."""
+    results: Dict[int, list] = {}
+    error: Optional[Exception] = None
+    failed = threading.Event()
+
+    def stop() -> bool:
+        return failed.is_set() or stopped()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(fetch, p, stop): i for i, p in enumerate(pages)}
+        for fut in as_completed(futures):
+            try:
+                rows = fut.result()
+            except Exception as e:
+                error = error or e
+                failed.set()
+                continue
+            if rows is not None:
+                results[futures[fut]] = rows
+                on_page(rows)
+    return results, error
+
+
+def _fetch_sequential(client, pair: str, fetch_tf: str, seg: Dict, stopped, on_page) -> list:
+    """One segment, one page at a time (Bybit, MEXC)."""
+    tf_ms = TIMEFRAME_SECONDS[fetch_tf] * 1000
+    out = []
+    since, end_ms = seg["start_ms"], seg["end_ms"]
     while since < end_ms:
-        if cancel_check is not None and cancel_check():
-            log.info("download_range cancelled at since=%s", since)
+        if stopped():
+            log.info("download stopped at since=%s", since)
             break
         try:
-            rows = _fetch_page(client, pair, fetch_tf, since=since, limit=page_limit)
+            rows = _fetch_page(client, pair, fetch_tf, since=since, limit=_SEQUENTIAL_PAGE_BARS)
         except (ccxt.NetworkError, ccxt.ExchangeError) as e:
             log.warning("page failed since=%s: %s — retrying", since, e)
             time.sleep(2)
             continue
 
         if not rows:
-            if new_rows:
+            if out:
                 break  # ran past the newest bar
             # Nothing yet: `since` may predate a rolling-window exchange's history.
             first = _seek_first_bar(client, pair, fetch_tf, since, end_ms)
@@ -442,38 +695,205 @@ def download_range(
             since = first
             continue
 
-        # Trim rows that exceed end_ms.
         rows = [r for r in rows if r[0] <= end_ms]
         if not rows:
             break
+        out.extend(rows)
+        on_page(rows)
 
-        new_rows.extend(rows)
-        last_ts = rows[-1][0]
-
-        if progress_cb:
-            try:
-                progress_cb({"fetched": len(new_rows), "last_ts": last_ts})
-            except Exception:
-                pass
-
-        next_since = last_ts + tf_seconds * 1000
+        next_since = rows[-1][0] + tf_ms
         if next_since <= since:
             break
         since = next_since
         time.sleep(0.05)
+    return out
 
+
+def plan_download(symbol: str, timeframe: str, start_ms: Optional[int] = None,
+                  end_ms: Optional[int] = None) -> Dict:
+    """Auto-detect: what a download of (symbol, timeframe) would fetch. The
+    range defaults to the exchange's whole history and is clamped to it (and
+    to now); only the parts missing from the saved file are planned. Costs
+    two small requests (oldest bar + newest bar; ~15 more on MEXC)."""
+    pair = _to_ccxt_symbol(symbol)
+    client = _client_for(symbol)
+    _require_market(client, pair, symbol)
+    fetch_tf = _fetch_tf_for(client, timeframe)
+    now_ms = int(time.time() * 1000)
+    first = _first_bar_ms(client, pair, fetch_tf, now_ms)
+    if first is None:
+        raise RuntimeError(f"{client.name} returned no candles for {symbol} {timeframe}")
+    last = _last_bar_ms(client, pair, fetch_tf) or now_ms
+
+    lo = first if start_ms is None else max(first, start_ms)
+    # A delisted pair's history stops at its last bar — plan nothing past it.
+    hi = min(now_ms, last + TIMEFRAME_SECONDS[fetch_tf] * 1000 - 1)
+    if end_ms is not None:
+        hi = min(hi, end_ms)
+    broker = ccxt_broker_for(symbol)
+    saved = _saved_times(parquet_path(symbol, timeframe, broker))
+    tf_sec = TIMEFRAME_SECONDS[timeframe]
+    segments = missing_segments(lo, hi, saved, tf_sec) if lo < hi else []
+
+    parallel = split_venue(symbol)[0] is None  # Binance spot + perps
+    fetch_tf_ms = TIMEFRAME_SECONDS[fetch_tf] * 1000
+
+    def cost(segs) -> Dict:
+        if parallel:
+            _, limit, page_bars, weight = _BINANCE_KLINES[is_perp_symbol(symbol)]
+            pages = len(_plan_pages(segs, fetch_tf_ms, page_bars))
+            est = pages * 60.0 * weight / (limit * DOWNLOAD_BUDGET_SHARE) + (1 if pages else 0)
+        else:
+            pages = len(_plan_pages(segs, fetch_tf_ms, _SEQUENTIAL_PAGE_BARS))
+            est = pages / _SEQUENTIAL_PAGES_PER_SEC
+        bars = sum((s["end_ms"] - s["start_ms"]) // (tf_sec * 1000) + 1 for s in segs)
+        return {"bars": int(bars), "pages": pages, "est_seconds": round(est, 1)}
+
+    fill = cost(segments)
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "broker": broker,
+        "exchange": client.name,
+        "active": bool(client.market(pair).get("active", True)),  # False once delisted
+        "first_ms": first,
+        "last_ms": last,
+        "start_ms": lo,
+        "end_ms": hi,
+        "saved": None if saved is None else {
+            "first_ms": int(saved[0]) * 1000,
+            "last_ms": int(saved[-1]) * 1000,
+            "rows": int(len(saved)),
+        },
+        # Default: fill only the gaps.
+        "segments": segments,
+        **fill,
+        # Overwrite: a fresh copy of the whole range instead.
+        "overwrite": cost(missing_segments(lo, hi, None, tf_sec) if lo < hi else []),
+        "parallel": parallel,
+    }
+
+
+def _write_parquet_atomic(df: pd.DataFrame, path: str) -> None:
+    """Write next to `path`, then swap it in. A crash or a full disk mid-write
+    can't leave a half-written file where a good one was."""
+    tmp = path + ".tmp"
+    try:
+        df.to_parquet(tmp, index=False)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def download_range(
+    symbol: str,
+    timeframe: str,
+    start_ms: int,
+    end_ms: int,
+    progress_cb=None,
+    cancel_check=None,
+    overwrite: bool = False,
+) -> Dict:
+    """
+    Download what's missing of [start_ms, end_ms] for (symbol, timeframe) and
+    merge it into the Parquet. The range is clamped to the exchange's first bar
+    and to now, and only the gaps the saved file doesn't cover are fetched
+    (see missing_segments) — so re-running is cheap and resumes a stopped run.
+    Binance is fetched in parallel within its rate budget; Bybit and MEXC one
+    page at a time.
+
+    `progress_cb` gets {pages_done, pages_total, fetched, cursor_ms}.
+    `cancel_check`: optional callable returning True to stop. Pages already
+    fetched are still merged (see _kept_rows).
+
+    `overwrite`: fetch the whole clamped range fresh and REPLACE the file with
+    it. The saved file is only swapped out once the new copy is complete — a
+    cancel or an error leaves it exactly as it was.
+
+    Returns {rows_added, rows_total, rows_before, replaced, path, first_time,
+    last_time, segments, pages}.
+    """
+    if start_ms >= end_ms:
+        raise ValueError("start must be before end")
+
+    plan = plan_download(symbol, timeframe, start_ms, end_ms)
+    if overwrite:
+        segments = missing_segments(plan["start_ms"], plan["end_ms"], None, TIMEFRAME_SECONDS[timeframe])
+        plan["pages"] = plan["overwrite"]["pages"]
+    else:
+        segments = plan["segments"]
+    pair = _to_ccxt_symbol(symbol)
+    client = _client_for(symbol)
+    broker = plan["broker"]
+    # Odd intervals the exchange lacks are pulled finer and resampled.
+    fetch_tf = _fetch_tf_for(client, timeframe)
+    native = fetch_tf == timeframe
+    tf_ms = TIMEFRAME_SECONDS[fetch_tf] * 1000
+    stopped = cancel_check or (lambda: False)
+    log.info("Downloading %s %s: %d missing segment(s), %d pages (fetch_tf=%s, broker=%s, parallel=%s)",
+             symbol, timeframe, len(segments), plan["pages"], fetch_tf, broker, plan["parallel"])
+
+    progress = {"pages_done": 0, "pages_total": plan["pages"], "fetched": 0, "cursor_ms": plan["start_ms"]}
+    last_emit = [0.0]
+
+    def on_page(rows):
+        progress["pages_done"] += 1
+        progress["fetched"] += len(rows)
+        if rows:
+            progress["cursor_ms"] = int(rows[-1][0])
+        now = time.monotonic()
+        if progress_cb and (now - last_emit[0] >= 0.25 or progress["pages_done"] == progress["pages_total"]):
+            last_emit[0] = now
+            try:
+                progress_cb(dict(progress))
+            except Exception:
+                pass
+
+    error = None
+    if plan["parallel"]:
+        url, limit, page_bars, weight = _BINANCE_KLINES[is_perp_symbol(symbol)]
+        pages = _plan_pages(segments, tf_ms, page_bars)
+        gate = _RateGate(limit, weight, DOWNLOAD_BUDGET_SHARE)
+        market = client.market(pair)
+        mult = market.get("contractSize") or 1.0
+        interval = client.timeframes[fetch_tf]
+
+        def fetch(page, stop):
+            return _binance_page(url, market["id"], interval, page, page_bars, gate, stop, mult)
+
+        results, error = _fetch_pages_parallel(pages, fetch, _DOWNLOAD_WORKERS, stopped, on_page)
+        new_rows = _kept_rows(segments, pages, results)
+    else:
+        new_rows = []
+        for seg in segments:
+            if stopped():
+                break
+            new_rows.extend(_fetch_sequential(client, pair, fetch_tf, seg, stopped, on_page))
+
+    path = parquet_path(symbol, timeframe, broker)
+    if overwrite and (error or stopped()):
+        # A partial fresh copy must never replace a complete old file.
+        if error:
+            raise _with_note(error, "your saved file was not changed")
+        new_rows = []
     new_df = pd.DataFrame(new_rows, columns=["ts_ms", "open", "high", "low", "close", "volume"])
     if new_df.empty:
-        # Nothing fetched — but file may still exist.
-        path = parquet_path(symbol, timeframe, broker)
+        if error:
+            raise error
+        # Nothing fetched — already up to date, or the exchange had nothing.
         if os.path.exists(path):
             existing = pd.read_parquet(path)
             return {
                 "rows_added": 0,
                 "rows_total": int(len(existing)),
+                "rows_before": int(len(existing)),
+                "replaced": False,
                 "path": path,
                 "first_time": int(existing["time"].min()) if len(existing) else None,
                 "last_time": int(existing["time"].max()) if len(existing) else None,
+                "segments": len(segments),
+                "pages": plan["pages"],
             }
         raise RuntimeError(f"{client.name} returned no candles for that range")
 
@@ -481,32 +901,37 @@ def download_range(
         new_df["time"] = (new_df["ts_ms"] // 1000).astype("int64")
         new_df = new_df[["time", "open", "high", "low", "close", "volume"]]
     else:
-        # Trim to the requested window before resampling so partial edge bars
-        # don't leak in, then aggregate fetch_tf -> target timeframe.
-        new_df = new_df[new_df["ts_ms"] <= end_ms]
-        new_df = _resample_ohlcv_ms(new_df, timeframe)
+        # Aggregate fetch_tf -> target timeframe. Rows are already trimmed to
+        # the requested window, so partial edge bars don't leak in.
+        new_df = _resample_ohlcv_ms(new_df.sort_values("ts_ms"), timeframe)
 
-    path = parquet_path(symbol, timeframe, broker)
     rows_before = 0
     if os.path.exists(path):
-        existing = pd.read_parquet(path)
+        existing = pd.read_parquet(path, columns=["time"]) if overwrite else pd.read_parquet(path)
         rows_before = len(existing)
-        merged = pd.concat([existing, new_df], ignore_index=True)
+        merged = new_df if overwrite else pd.concat([existing, new_df], ignore_index=True)
     else:
         merged = new_df
 
     # keep="last": freshly fetched bars win, so a bar that was still forming at
     # the previous download's end gets replaced by its finished version.
     merged = merged.drop_duplicates(subset=["time"], keep="last").sort_values("time").reset_index(drop=True)
-    merged.to_parquet(path, index=False)
+    _write_parquet_atomic(merged, path)
     _invalidate_datasets_cache()
+
+    if error:
+        raise _with_note(error, f"kept {len(new_df):,} fetched bars; download again to resume")
 
     return {
         "rows_added": int(len(merged) - rows_before),
         "rows_total": int(len(merged)),
+        "rows_before": int(rows_before),
+        "replaced": bool(overwrite and rows_before),
         "path": path,
         "first_time": int(merged["time"].min()),
         "last_time": int(merged["time"].max()),
+        "segments": len(segments),
+        "pages": plan["pages"],
     }
 
 

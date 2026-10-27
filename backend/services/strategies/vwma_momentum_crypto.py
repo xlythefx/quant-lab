@@ -18,15 +18,23 @@ from services.strategies.base import (
 class VwmaMomentumCryptoStrategy(_vm.VwmaMomentumStrategy):
     # Same fields as VwmaMomentumStrategy.PARAM_SCHEMA, only the defaults changed.
     PARAM_SCHEMA = [
-        ParamSpec("vwma_length",        ParamType.INT,   10,   min=10, max=300, step=1, group="VWMA"),
-        ParamSpec("use_rsi_filter",     ParamType.BOOL,  True,                          group="RSI"),
-        ParamSpec("rsi_length",         ParamType.INT,   22,   min=5,  max=50,  step=1, group="RSI"),
+        ParamSpec("vwma_length",        ParamType.INT,   10,   min=10, max=300, step=1, group="VWMA",
+                  description="Bars in the VWMA (volume-weighted moving average) trend line. Bigger = "
+                              "slower line that follows longer trends."),
+        ParamSpec("use_rsi_filter",     ParamType.BOOL,  True,                          group="RSI",
+                  description="On: entries also need RSI to agree (long above the floor, short below the "
+                              "ceiling). Off: RSI is ignored."),
+        ParamSpec("rsi_length",         ParamType.INT,   22,   min=5,  max=50,  step=1, group="RSI",
+                  description="Bars used to calculate RSI (a 0–100 gauge of recent up moves vs down moves)."),
         ParamSpec("rsi_long_min",       ParamType.INT,   30,   min=10, max=80,  step=1, group="RSI",
                   description="Long requires RSI above this floor."),
         ParamSpec("rsi_short_max",      ParamType.INT,   60,   min=20, max=90,  step=1, group="RSI",
                   description="Short requires RSI below this ceiling."),
-        ParamSpec("use_volume_filter",  ParamType.BOOL,  True,                          group="Volume"),
-        ParamSpec("vol_length",         ParamType.INT,   107,  min=5,  max=200, step=1, group="Volume"),
+        ParamSpec("use_volume_filter",  ParamType.BOOL,  True,                          group="Volume",
+                  description="On: entries need the bar's volume above its average × the volume "
+                              "multiplier. Off: volume is ignored."),
+        ParamSpec("vol_length",         ParamType.INT,   107,  min=5,  max=200, step=1, group="Volume",
+                  description="Bars in the average volume that each bar's volume is compared against."),
         ParamSpec("vol_mult",           ParamType.FLOAT, 2.55, min=0.5, max=5.0, step=0.05, group="Volume",
                   description="Bar volume must exceed avg × this multiplier."),
         ParamSpec("trade_24_7", ParamType.BOOL, True, group="Sessions",
@@ -42,7 +50,8 @@ class VwmaMomentumCryptoStrategy(_vm.VwmaMomentumStrategy):
                   description="UTC session windows where new entries are allowed."),
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": False},
-                  group="Direction"),
+                  group="Direction",
+                  description="Which directions may trade: tick Long and/or Short. Long only by default."),
         ParamSpec("pyramiding", ParamType.INT, 1, min=1, max=20, step=1, group="Risk",
                   description="Max concurrent positions per side. Each tranche is sized at the strategy's Risk%. Set to 1 to disable stacking."),
         ParamSpec("risk_pct", ParamType.FLOAT, 3.0, min=0.1, max=100.0, step=0.1, group="Risk",
@@ -56,4 +65,17 @@ class VwmaMomentumCryptoStrategy(_vm.VwmaMomentumStrategy):
                      "long-only above 30, heavy volume gate (107 × 2.55), trading 24/7. "
                      "Same engine as VWMA Momentum — only the defaults differ."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "VWMA Momentum with crypto-tuned starting values. The logic is identical; only the defaults "
+            "differ.\n\n"
+            "- Buys (long) when: price closes above a rising 10-bar VWMA (a moving average where "
+            "high-volume bars count more), the 22-bar RSI (a 0–100 gauge of recent buying vs selling) is "
+            "above 30, and the bar's volume is over 2.55 × its 107-bar average.\n"
+            "- Sells short when: off by default (long only). If ticked: price below a falling VWMA, RSI "
+            "under 60, same volume check.\n"
+            "- Closes the trade when: price closes below the VWMA while the VWMA is falling.\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: trades 24/7 by default, so the session windows are ignored. The strict volume "
+            "rule means it only enters on unusually busy bars."
+        ),
     )

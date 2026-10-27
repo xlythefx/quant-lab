@@ -89,19 +89,30 @@ class NexaStrategy(Strategy):
         ParamSpec("vwma_length",    ParamType.INT, 168, min=10, max=600, step=1, group="VWMA",
                   description="Volume-weighted average; price must be on the right side of it."),
 
-        ParamSpec("macd_fast",      ParamType.INT, 12, min=2,  max=100, step=1, group="MACD"),
-        ParamSpec("macd_slow",      ParamType.INT, 26, min=5,  max=200, step=1, group="MACD"),
-        ParamSpec("macd_signal",    ParamType.INT, 9,  min=2,  max=50,  step=1, group="MACD"),
+        ParamSpec("macd_fast",      ParamType.INT, 12, min=2,  max=100, step=1, group="MACD",
+                  description="Fast EMA length in bars for MACD (fast average minus slow average, a "
+                              "momentum gauge)."),
+        ParamSpec("macd_slow",      ParamType.INT, 26, min=5,  max=200, step=1, group="MACD",
+                  description="Slow EMA length in bars for MACD."),
+        ParamSpec("macd_signal",    ParamType.INT, 9,  min=2,  max=50,  step=1, group="MACD",
+                  description="Bars in the signal line (an EMA of MACD). Long needs MACD above it, "
+                              "short below."),
 
-        ParamSpec("use_rsi_filter", ParamType.BOOL, True, group="RSI"),
-        ParamSpec("rsi_length",     ParamType.INT, 14, min=2,  max=50,  step=1, group="RSI"),
+        ParamSpec("use_rsi_filter", ParamType.BOOL, True, group="RSI",
+                  description="On = block longs when RSI is at/above rsi_long_max and shorts when it is "
+                              "at/below rsi_short_min. Also applies to the opposite-signal exits."),
+        ParamSpec("rsi_length",     ParamType.INT, 14, min=2,  max=50,  step=1, group="RSI",
+                  description="Lookback in bars for RSI (a 0-100 gauge of how stretched recent moves are)."),
         ParamSpec("rsi_long_max",   ParamType.INT, 70, min=20, max=95,  step=1, group="RSI",
                   description="Long requires RSI BELOW this — blocks chasing an overbought bar."),
         ParamSpec("rsi_short_min",  ParamType.INT, 30, min=5,  max=80,  step=1, group="RSI",
                   description="Short requires RSI ABOVE this — blocks chasing an oversold bar."),
 
-        ParamSpec("use_volume_filter", ParamType.BOOL, True, group="Volume"),
-        ParamSpec("vol_length",     ParamType.INT, 50, min=5, max=300, step=1, group="Volume"),
+        ParamSpec("use_volume_filter", ParamType.BOOL, True, group="Volume",
+                  description="On = a signal needs bar volume above its average x vol_mult. Also "
+                              "applies to the opposite-signal exits."),
+        ParamSpec("vol_length",     ParamType.INT, 50, min=5, max=300, step=1, group="Volume",
+                  description="Bars in the rolling average volume that the volume filter compares against."),
         ParamSpec("vol_mult",       ParamType.FLOAT, 1.2, min=0.5, max=5.0, step=0.05, group="Volume",
                   description="Bar volume must exceed avg x this multiplier."),
 
@@ -122,6 +133,20 @@ class NexaStrategy(Strategy):
                      "Pine script. All five filters must agree to enter; exits are opposite-signal "
                      "only (no stop or target in the source)."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Enters only when five separate checks all agree a trend is under way. Converted from "
+            "the 'Elias Strategy' TradingView script.\n\n"
+            "- Buys (long) when: the close is above both cloud lines (Ichimoku-style averages of each "
+            "bar's midpoint, here not shifted forward), above the 168-bar VWMA (an average weighted "
+            "by volume), MACD (a momentum gauge) is above its signal line, RSI(14) (a 0-100 "
+            "overbought/oversold gauge) is below 70, and volume is above 1.2x its 50-bar average.\n"
+            "- Sells short when: off by default; the mirror image, with RSI above 30.\n"
+            "- Closes the trade when: all five checks agree on the opposite direction, even with "
+            "shorts switched off.\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: exits can come late because the opposite signal must fully line up. No "
+            "time-of-day rules. Sized at 20% of equity by default."
+        ),
     )
 
     OVERLAYS = [

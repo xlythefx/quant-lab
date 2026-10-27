@@ -98,7 +98,8 @@ class WeekdaySwingStrategy(Strategy):
                   description="Weekday to close longs. Any later weekday force-closes."),
         ParamSpec("long_exit_hour",    ParamType.INT, 15, min=0, max=23, step=1, group="Long",
                   description="Close on the first bar at/after this hour on the exit day."),
-        ParamSpec("long_exit_minute",  ParamType.INT, 0,  min=0, max=59, step=1, group="Long"),
+        ParamSpec("long_exit_minute",  ParamType.INT, 0,  min=0, max=59, step=1, group="Long",
+                  description="Minute of the long's exit time on the exit day (in `timezone`). Keep 0 on 1h data."),
         ParamSpec("long_stop_dollars", ParamType.FLOAT, 100.0, min=0.0, max=100000.0, step=1.0, group="Long",
                   description="Pine 'Long Stop Loss ($)'. Stop = entry − $ / point_value. 0 → use long_stop_pct."),
         ParamSpec("long_stop_pct",     ParamType.FLOAT, 0.0, min=0.0, max=20.0, step=0.05, group="Long",
@@ -107,12 +108,16 @@ class WeekdaySwingStrategy(Strategy):
         # ---- Short leg ----
         ParamSpec("short_entry_day",    ParamType.INT, 4,  min=1, max=7,  step=1, group="Short",
                   description="Weekday to open shorts. 1=Mon … 5=Fri, 6=Sat, 7=Sun."),
-        ParamSpec("short_entry_hour",   ParamType.INT, 1,  min=0, max=23, step=1, group="Short"),
-        ParamSpec("short_entry_minute", ParamType.INT, 0,  min=0, max=59, step=1, group="Short"),
+        ParamSpec("short_entry_hour",   ParamType.INT, 1,  min=0, max=23, step=1, group="Short",
+                  description="Hour (in `timezone`) of the bar that opens the short."),
+        ParamSpec("short_entry_minute", ParamType.INT, 0,  min=0, max=59, step=1, group="Short",
+                  description="Minute of the short's entry bar. Keep 0 on 1h data."),
         ParamSpec("short_exit_day",     ParamType.INT, 5,  min=1, max=7,  step=1, group="Short",
                   description="Weekday to close shorts. Any later weekday force-closes."),
-        ParamSpec("short_exit_hour",    ParamType.INT, 15, min=0, max=23, step=1, group="Short"),
-        ParamSpec("short_exit_minute",  ParamType.INT, 0,  min=0, max=59, step=1, group="Short"),
+        ParamSpec("short_exit_hour",    ParamType.INT, 15, min=0, max=23, step=1, group="Short",
+                  description="Close on the first bar at/after this hour (in `timezone`) on the exit day."),
+        ParamSpec("short_exit_minute",  ParamType.INT, 0,  min=0, max=59, step=1, group="Short",
+                  description="Minute of the short's exit time on the exit day. Keep 0 on 1h data."),
         ParamSpec("short_stop_dollars", ParamType.FLOAT, 10.0, min=0.0, max=100000.0, step=1.0, group="Short",
                   description="Pine 'Short Stop Loss ($)' — note the Pine default is 1/10th of the long stop. "
                               "Stop = entry + $ / point_value. 0 → use short_stop_pct."),
@@ -131,7 +136,9 @@ class WeekdaySwingStrategy(Strategy):
             for key, label, default in _MONTHS
         ],
 
-        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction"),
+        ParamSpec("sides", ParamType.SIDES, {"long": True, "short": True}, group="Direction",
+                  description="Which legs may trade: tick Long (start of the week) and/or Short "
+                              "(end of the week)."),
 
         # ---- Risk ----
         ParamSpec("point_value", ParamType.FLOAT, 1.0, min=0.01, max=100000.0, step=1.0, group="Risk",
@@ -150,6 +157,18 @@ class WeekdaySwingStrategy(Strategy):
                      "half, at fixed clock times, gated by an EMA and a month filter. "
                      "Dollar (or %) stop per side; force-close past the exit day."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "A day-of-week pattern: long early in the week, short late in the week, at fixed clock "
+            "times. Ported from a natural-gas TradingView script.\n\n"
+            "- Buys (long) when: it is Monday 01:00 UTC and the close is above the 100-bar EMA (an "
+            "average that weights recent prices more). Entry at the next bar's open.\n"
+            "- Sells short when: it is Thursday 01:00 UTC and the close is below the EMA.\n"
+            "- Closes the trade when: Wednesday 15:00 UTC (long) or Friday 15:00 UTC (short).\n"
+            "- Stop loss: long 100 price points below entry, short 10 above (dollars / point_value, "
+            "1 by default). Optional % stops instead.\n\n"
+            "Good to know: no new entries in March or December. The clock can be New York or "
+            "Chicago time. A trade can't cross the weekend; V2 fixes that."
+        ),
     )
 
     OVERLAYS = [

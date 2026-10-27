@@ -142,17 +142,28 @@ def _hmm_in_regime(out: pd.DataFrame, p, prog=None) -> pd.Series:
 
 class VwmaReversionStrategy(Strategy):
     PARAM_SCHEMA = [
-        ParamSpec("vwma_length",  ParamType.INT,   30,  min=5,  max=200, step=1, group="VWMA"),
-        ParamSpec("z_threshold",  ParamType.FLOAT, 1.5, min=0.5, max=4.0, step=0.1, group="VWMA"),
-        ParamSpec("rsi_length",   ParamType.INT,   25,  min=5,  max=50,  step=1, group="RSI"),
-        ParamSpec("rsi_long_max", ParamType.INT,   35,  min=25, max=40,  step=1, group="RSI"),
-        ParamSpec("rsi_short_min",ParamType.INT,   65,  min=60, max=75,  step=1, group="RSI"),
+        ParamSpec("vwma_length",  ParamType.INT,   30,  min=5,  max=200, step=1, group="VWMA",
+                  description="Bars in the VWMA (volume-weighted average price) that price should snap "
+                              "back to; also the window for measuring the z-score spread."),
+        ParamSpec("z_threshold",  ParamType.FLOAT, 1.5, min=0.5, max=4.0, step=0.1, group="VWMA",
+                  description="How far price must stretch from the VWMA, in standard deviations (z-score), "
+                              "before a trade opens. Bigger = fewer, more extreme entries."),
+        ParamSpec("rsi_length",   ParamType.INT,   25,  min=5,  max=50,  step=1, group="RSI",
+                  description="Bars used to calculate RSI (a 0–100 gauge of recent up moves vs down moves)."),
+        ParamSpec("rsi_long_max", ParamType.INT,   35,  min=25, max=40,  step=1, group="RSI",
+                  description="A long needs RSI below this value (oversold)."),
+        ParamSpec("rsi_short_min",ParamType.INT,   65,  min=60, max=75,  step=1, group="RSI",
+                  description="A short needs RSI above this value (overbought)."),
         ParamSpec("atr_stop",     ParamType.BOOL,  False, group="Stop",
                   description="Use ATR-based stop loss. OFF by default — the reference TradingView "
                               "version has no stop, so the exit is mean-reversion only. Turn on to "
                               "add an ATR stop (then QuantLab will no longer match the Pine)."),
-        ParamSpec("atr_length",   ParamType.INT,   10,  min=5,  max=50,  step=1, group="Stop"),
-        ParamSpec("atr_mult",     ParamType.FLOAT, 6.0, min=1,  max=20,  step=0.5, group="Stop"),
+        ParamSpec("atr_length",   ParamType.INT,   10,  min=5,  max=50,  step=1, group="Stop",
+                  description="Bars used to measure ATR (the average high-to-low range of a bar) for the "
+                              "stop-loss distance."),
+        ParamSpec("atr_mult",     ParamType.FLOAT, 6.0, min=1,  max=20,  step=0.5, group="Stop",
+                  description="Stop distance from the entry price, in multiples of ATR (6 = six average "
+                              "bar ranges)."),
         ParamSpec("trade_24_7", ParamType.BOOL, False, group="Sessions",
                   description="Trade any time of day; the session windows below are ignored."),
         ParamSpec("sessions", ParamType.SESSIONS,
@@ -167,7 +178,8 @@ class VwmaReversionStrategy(Strategy):
                               "Edit start/end per session as needed."),
         ParamSpec("sides", ParamType.SIDES,
                   {"long": True, "short": True},
-                  group="Direction"),
+                  group="Direction",
+                  description="Which directions may trade: tick Long and/or Short."),
         ParamSpec("use_regime", ParamType.BOOL, False, group="Regime",
                   description="Master switch: gate entries by market regime. Pick the method below. "
                               "Exits always fire regardless."),
@@ -179,8 +191,12 @@ class VwmaReversionStrategy(Strategy):
                   ],
                   description="Which regime engine gates entries when Use Regime is on. ADX and 5-Regime "
                               "are fast; HMM re-fits a model over the whole backtest (slower; not used live)."),
-        ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime"),
-        ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime"),
+        ParamSpec("regime_adx_period",    ParamType.INT,   20,   min=5,  max=50,  step=1,   group="Regime",
+                  description="Bars used to calculate ADX (a 0–100 trend-strength gauge) for the ADX and "
+                              "5-Regime methods."),
+        ParamSpec("regime_adx_threshold", ParamType.FLOAT, 40.0, min=10.0, max=60.0, step=1.0, group="Regime",
+                  description="ADX level that counts as trending. ADX method blocks new entries at or above "
+                              "it; 5-Regime uses it to label trends."),
         ParamSpec("allowed_regimes", ParamType.REGIMES,
                   {"Trending Up": False, "Trending Down": False,
                    "High-Volatility": False, "Quiet": True, "Choppy-Range": True},
@@ -205,6 +221,18 @@ class VwmaReversionStrategy(Strategy):
         description=("Z-score mean reversion around VWMA, RSI filter, ATR stop-loss, "
                      "UTC session gating. Long when oversold near band, short when overbought."),
         schema=PARAM_SCHEMA,
+        guide=(
+            "Bets that price snaps back to its average after stretching too far from it (mean "
+            "reversion). The average is a 30-bar VWMA: a moving average where high-volume bars count more.\n\n"
+            "- Buys (long) when: the z-score (distance from the VWMA, in units of its usual spread) drops "
+            "below -1.5 and the 25-bar RSI (a 0–100 buying-vs-selling gauge) is under 35.\n"
+            "- Sells short when: z-score above +1.5 and RSI above 65.\n"
+            "- Closes the trade when: price closes back at or past the VWMA.\n"
+            "- Stop loss: none by default, matching the TradingView version. Optional: 6 × ATR (average "
+            "bar range) from entry.\n\n"
+            "Good to know: new trades open only in the UTC windows 00:00–04:00 and 05:00–16:00 unless "
+            "Trade 24/7 is on; exits fire any time. Regime filter off; pyramiding (stacking entries) 1."
+        ),
     )
 
     PRESETS = {

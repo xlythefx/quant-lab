@@ -7,6 +7,7 @@ jobs/threads/sockets). See services/market_lab.py for the math.
 POST /api/marketlab/regime      — regime classification + forward-return / transition stats
 POST /api/marketlab/volatility  — realized vol, clustering, EWMA/persistence forecast + skill
 POST /api/marketlab/statistics  — day/hour (UTC) returns, autocorrelation, distribution, streaks
+POST /api/marketlab/weekday-windows — 7×7 entry-day → exit-day grid (Weekday Swing V2 fills), IS/OOS
 
   body (all three): {
     symbol, timeframe,
@@ -79,6 +80,11 @@ def volatility():
 @market_lab_bp.post("/statistics")
 def statistics():
     return _run(market_lab.explore_statistics, "statistics")
+
+
+@market_lab_bp.post("/weekday-windows")
+def weekday_windows():
+    return _run(market_lab.weekday_windows, "weekday_windows")
 
 
 @market_lab_bp.post("/scan")

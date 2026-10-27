@@ -8,6 +8,7 @@ REST endpoints for the market data layer.
 """
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
 
@@ -92,8 +93,15 @@ def datasets_download():
         return jsonify({"error": f"unknown broker {broker!r}; allowed: {_BROKERS}"}), 400
 
     try:
-        symbol = validate_symbol(body.get("symbol"))
-        tf = validate_timeframe(body.get("timeframe"))
+        # `symbols` / `timeframes` (lists) download as one batch job;
+        # `symbol` / `timeframe` still work.
+        syms = body.get("symbols") or [body.get("symbol")]
+        tfs = body.get("timeframes") or [body.get("timeframe")]
+        if not isinstance(syms, list) or not isinstance(tfs, list):
+            raise ValidationError("symbols and timeframes must be lists")
+        syms = [validate_symbol(s) for s in syms]
+        symbol = syms[0]
+        tfs = [validate_timeframe(t) for t in tfs]
         start_ms = _parse_date_to_ms(body.get("start"))
         end_ms = _parse_date_to_ms(body.get("end"), end_of_day=True)
     except ValidationError as e:
@@ -102,18 +110,22 @@ def datasets_download():
     if end_ms <= start_ms:
         return jsonify({"error": "end must be after start"}), 400
 
+    tf = tfs[0]
     tf_ms = TIMEFRAME_SECONDS[tf] * 1000
     expected = max(1, (end_ms - start_ms) // tf_ms)
 
     spec = {
         "broker": broker,
         "symbol": symbol,
+        "symbols": syms,
         "timeframe": tf,
+        "timeframes": tfs,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "expected": int(expected),
         "sid": body.get("sid"),
-        "job_id": body.get("job_id") or f"{broker}_{symbol}_{tf}_{start_ms}_{end_ms}",
+        "overwrite": bool(body.get("overwrite")),
+        "job_id": body.get("job_id") or f"{broker}_{'-'.join(syms)}_{'-'.join(tfs)}_{start_ms}_{end_ms}",
     }
 
     try:
@@ -129,8 +141,63 @@ def datasets_download():
         "job_id": job_id,
         "broker": broker,
         "symbol": symbol,
+        "symbols": syms,
         "timeframe": tf,
+        "timeframes": tfs,
         "expected": int(expected),
+    })
+
+
+@market_bp.get("/datasets/probe")
+def datasets_probe():
+    """Auto-detect for the Downloads page (crypto exchanges only). Per symbol
+    and timeframe: the exchange's oldest and newest bar, what's already saved,
+    and what a download would fetch (only the missing parts) with a time
+    estimate. A symbol that fails (typo, not listed) comes back with an
+    `error` instead of failing the rest. Optional start/end narrow the range
+    the same way the download form does.
+
+      GET /api/datasets/probe?symbols=ONEUSDT,OGNUSDT&broker=binance&timeframes=1m,15m
+    """
+    broker = (request.args.get("broker") or "binance").strip().lower()
+    if broker not in market_data.CCXT_BROKERS:
+        return jsonify({"error": "auto-detect is only available for crypto exchanges"}), 400
+    raw = (request.args.get("symbols") or request.args.get("symbol") or "").split(",")
+    raw = list(dict.fromkeys(s.strip().upper() for s in raw if s.strip()))
+    try:
+        if not raw:
+            raise ValidationError("symbol is required")
+        tfs = [validate_timeframe(t) for t in (request.args.get("timeframes") or "").split(",") if t]
+        if not tfs:
+            raise ValidationError("pick at least one timeframe")
+        start = request.args.get("start")
+        end = request.args.get("end")
+        start_ms = _parse_date_to_ms(start) if start else None
+        end_ms = _parse_date_to_ms(end, end_of_day=True) if end else None
+    except (ValidationError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+
+    def probe_one(sym: str) -> dict:
+        try:
+            symbol = market_data.ccxt_symbol_for(validate_symbol(sym), broker)
+            return {"symbol": symbol,
+                    "timeframes": [market_data.plan_download(symbol, tf, start_ms, end_ms) for tf in tfs]}
+        except (ValidationError, ValueError) as e:  # malformed, or not listed on the exchange
+            return {"symbol": sym, "error": str(e)}
+        except Exception as e:
+            log.exception("probe failed for %s on %s", sym, broker)
+            return {"symbol": sym, "error": f"auto-detect failed: {e}"}
+
+    # A few at a time: each symbol is ~2 small requests per timeframe.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        items = list(pool.map(probe_one, raw))
+    plans = [p for it in items for p in it.get("timeframes", [])]
+    return jsonify({
+        "broker": broker,
+        "symbols": items,
+        "pages": sum(p["pages"] for p in plans),
+        "est_seconds": round(sum(p["est_seconds"] for p in plans), 1),
+        "budget_share": market_data.DOWNLOAD_BUDGET_SHARE,
     })
 
 

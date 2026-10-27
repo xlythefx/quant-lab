@@ -170,21 +170,32 @@ def classify_regimes(symbol, timeframe, start, end, params=None) -> dict:
 
     # --- Forward returns conditioned on current regime (CAUSAL labels) ---
     # fwd[i] = close[i+h]/close[i] - 1, defined for i < n-h (drop last h: no look-ahead).
+    # `se_pct` = standard error of the average. With h > 1 the forward windows
+    # overlap, so only ~n/h of them are independent — the SE uses that, or it
+    # would overstate how sure we are. The UI compares each regime to the
+    # all-bars baseline and calls differences inside ±2 SE noise.
     forward_returns = []
+    forward_baseline = None
+
+    def _fwd_stats(vals):
+        return {
+            "n": int(vals.size),
+            "avg_fwd_return_pct": _safe(100.0 * float(vals.mean())),
+            "median_fwd_return_pct": _safe(100.0 * float(np.median(vals))),
+            "win_rate": _safe(100.0 * float(np.mean(vals > 0))),
+            "se_pct": _safe(100.0 * float(vals.std(ddof=1)) / np.sqrt(max(1.0, vals.size / fwd_horizon)))
+                      if vals.size > 1 else None,
+        }
+
     if n > fwd_horizon:
         fwd = c[fwd_horizon:] / c[:-fwd_horizon] - 1.0  # length n-h, aligned to bar i
         lab_valid = labels_stats[: n - fwd_horizon]
+        forward_baseline = _fwd_stats(fwd)
         for lab in REGIME_LABELS:
             mask = lab_valid == lab
             vals = fwd[mask]
             if vals.size:
-                forward_returns.append({
-                    "regime": lab,
-                    "n": int(vals.size),
-                    "avg_fwd_return_pct": _safe(100.0 * float(vals.mean())),
-                    "median_fwd_return_pct": _safe(100.0 * float(np.median(vals))),
-                    "win_rate": _safe(100.0 * float(np.mean(vals > 0))),
-                })
+                forward_returns.append({"regime": lab, **_fwd_stats(vals)})
             else:
                 forward_returns.append({
                     "regime": lab, "n": 0,
@@ -212,6 +223,7 @@ def classify_regimes(symbol, timeframe, start, end, params=None) -> dict:
         "price": _downsample(time_a, c),  # [{time, value=close}] for ribbon alignment
         "distribution": distribution,
         "forward_returns": forward_returns,
+        "forward_baseline": forward_baseline,
         "transitions": {
             "matrix": transitions,
             "n_transitions": int(n_transitions),
@@ -1298,5 +1310,135 @@ def similarity_search(symbol, timeframe, start, end, params=None) -> dict:
                        "normalization": "per-window z-score"},
             "caveat": "Analogy, not prediction: a small sample of look-alike windows, in-sample. "
                       "Treat the aggregate outcome as a weak prior, not a signal.",
+        }),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Module — Weekday Windows (entry day → exit day grid, Weekday Swing V2 fills)
+# --------------------------------------------------------------------------- #
+_WEEK_SEC = 7 * 86400
+
+
+def _window_trades(time_a, sig_idx, hold_s):
+    """Entry/exit fill indices for one window, using Weekday Swing V2's rules.
+
+    Signal on bar s → fill at open[s+1]. Exit is flagged on the first bar x with
+    time[x] - time[s] >= hold → fill at open[x+1]. Only enters when flat, so a
+    signal on or before the previous exit bar is skipped (as V2 does)."""
+    n = len(time_a)
+    xs = np.searchsorted(time_a, time_a[sig_idx] + hold_s, side="left")
+    ent, ext, last_x = [], [], -1
+    for s, x in zip(sig_idx, xs):
+        if s <= last_x:
+            continue
+        if x + 1 >= n:
+            break                       # still open at the end of the data
+        ent.append(s + 1); ext.append(x + 1); last_x = x
+    return np.asarray(ent, dtype=int), np.asarray(ext, dtype=int)
+
+
+def _ww_stats(gross, cost, drift) -> dict:
+    """Per-trade summary. `gross` = trade returns before costs (fractions);
+    `drift` = what holding the same length on random bars made (same side)."""
+    n = int(gross.size)
+    if n == 0:
+        return {"n": 0, "avg_net_pct": None, "win_rate": None, "drift_pct": _safe(drift * 100),
+                "t_vs_zero": None, "t_vs_drift": None, "profit_factor": None}
+    net = gross - cost
+    sd = float(gross.std(ddof=1)) if n >= 2 else 0.0
+    se = sd / math.sqrt(n) if sd > 0 else 0.0
+    ok = n >= 5 and se > 0
+    wins, losses = net[net > 0].sum(), -net[net < 0].sum()
+    return {
+        "n": n,
+        "avg_net_pct": _safe(float(net.mean()) * 100),
+        "win_rate": _safe(float(np.mean(net > 0)) * 100),
+        "drift_pct": _safe(drift * 100),
+        "t_vs_zero": _safe(float(net.mean()) / se) if ok else None,
+        "t_vs_drift": _safe((float(gross.mean()) - drift) / se) if ok else None,
+        "profit_factor": _safe(float(wins / losses)) if losses > 0 else None,
+    }
+
+
+def weekday_windows(symbol, timeframe, start, end, params=None) -> dict:
+    """Every entry-day → exit-day window (7×7) at fixed UTC hours, long and short.
+
+    Each cell is the trade list Weekday Swing V2 would take with the trend filter
+    off: enter at entry_day @ entry_hour, exit at exit_day @ exit_hour (wrapping
+    past Sunday). Split into in-sample (before the holdout) and out-of-sample (the
+    last `holdout_months`). Costs are a flat round trip: 2 × (fee + slippage)."""
+    params = params or {}
+    entry_hour = min(23, max(0, _p(params, "entry_hour", 0)))
+    exit_hour = min(23, max(0, _p(params, "exit_hour", 0)))
+    holdout_months = max(0, _p(params, "holdout_months", 18))
+    fee_pct = max(0.0, _p(params, "fee_pct", 0.04))
+    slippage_bps = max(0.0, _p(params, "slippage_bps", 1.0))
+    cost = 2.0 * (fee_pct / 100.0 + slippage_bps / 10000.0)
+
+    df = _load_window(symbol, timeframe, start, end)
+    time_a = df["time"].to_numpy(dtype="int64")
+    open_ = df["open"].to_numpy(dtype=float)
+    close = df["close"].to_numpy(dtype=float)
+    tf_sec = int(np.median(np.diff(time_a)))
+    if tf_sec > 3600:
+        raise ValueError("Weekday windows need 1h bars or lower — larger bars skip most hours.")
+
+    dt = pd.to_datetime(time_a, unit="s", utc=True)
+    dow = dt.dayofweek.to_numpy() + 1
+    hour, minute, year = dt.hour.to_numpy(), dt.minute.to_numpy(), dt.year.to_numpy()
+
+    last = int(time_a[-1])
+    split = last - int(holdout_months * 30.44 * 86400) if holdout_months > 0 else last + 1
+    r = _log_returns(close)
+    in_is = time_a[1:] < split
+    mu_is = float(r[in_is].mean()) if in_is.any() else 0.0
+    mu_oos = float(r[~in_is].mean()) if (~in_is).any() else 0.0
+
+    n_windows = 49
+    luck_t = float(stats.norm.ppf(1 - 0.05 / (2 * n_windows)))
+    sides = {"long": [], "short": []}
+    for ed in range(1, 8):
+        sig_idx = np.nonzero((dow == ed) & (hour == entry_hour) & (minute == 0))[0]
+        for xd in range(1, 8):
+            hold_s = ((xd - ed) * 86400 + (exit_hour - entry_hour) * 3600) % _WEEK_SEC or _WEEK_SEC
+            ent, ext = _window_trades(time_a, sig_idx, hold_s)
+            gross_long = open_[ext] / open_[ent] - 1.0 if ent.size else np.array([])
+            sig_t = time_a[ent - 1] if ent.size else np.array([], dtype="int64")
+            oos = sig_t >= split
+            hold_bars = hold_s / tf_sec
+            for side, sign in (("long", 1.0), ("short", -1.0)):
+                g = sign * gross_long
+                net = g - cost
+                d_is = sign * math.expm1(mu_is * hold_bars)
+                d_oos = sign * math.expm1(mu_oos * hold_bars)
+                years = []
+                for y in np.unique(year[ent - 1]) if ent.size else []:
+                    m = year[ent - 1] == y
+                    years.append({"year": int(y), "sum_pct": _safe(float(net[m].sum()) * 100),
+                                  "n": int(m.sum()), "has_oos": bool(oos[m].any())})
+                sides[side].append({
+                    "entry_day": ed, "exit_day": xd, "hold_hours": _safe(hold_s / 3600),
+                    "is": _ww_stats(g[~oos], cost, d_is),
+                    "oos": _ww_stats(g[oos], cost, d_oos),
+                    "years": years,
+                    "equity": _downsample(sig_t, np.cumsum(net) * 100, cap=150) if ent.size else [],
+                })
+
+    return {
+        "days": _DOW_NAMES,
+        "sides": sides,
+        "split_time": int(min(split, last)),
+        "luck_t": _safe(luck_t),
+        "n_windows": n_windows,
+        "cost_pct": _safe(cost * 100),
+        "meta": _meta(symbol, timeframe, df, {
+            "timezone": "UTC",
+            "method": {"entry_hour": entry_hour, "exit_hour": exit_hour,
+                       "holdout_months": holdout_months, "fee_pct": fee_pct,
+                       "slippage_bps": slippage_bps},
+            "caveat": "The heatmap is in-sample. Picking the best of 49 windows finds one by luck "
+                      "even in random data — trust a window only if it beats the luck line, is green "
+                      "in most years, AND holds up in the held-out months.",
         }),
     }

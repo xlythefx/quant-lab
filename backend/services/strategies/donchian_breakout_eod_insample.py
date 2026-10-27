@@ -52,6 +52,20 @@ class DonchianBreakoutEodInsampleStrategy(_eod.DonchianBreakoutEodStrategy):
                      "to the 2016-2022 window so the overfit peak is visible on the chart. Compare "
                      "against the robust short-only variant for the honest picture."),
         schema=_INSAMPLE_SCHEMA,
+        guide=(
+            "A frozen copy of Donchian No Stoplosses (crude-oil futures, 1-hour bars, no stops, flat "
+            "by day's end) with the channel length picked as best on 2016-2022 data only. It "
+            "teaches overfitting (settings tuned so closely to past data that they fit its luck); "
+            "don't trade it.\n\n"
+            "- Buys (long) when: price touches the top of the 30-bar Donchian channel (highest high "
+            "of the last 30 bars), with the parent's trend, close-strength and weekly filters.\n"
+            "- Sells short when: price touches the channel bottom (lowest low of 30 bars) and last "
+            "week wasn't a strong one-way week.\n"
+            "- Closes the trade when: 17:00 New York time (end of day).\n"
+            "- Stop loss: none.\n\n"
+            "Good to know: only the channel length differs from the parent (30, not 36). On CL the "
+            "dates default to Aug 29, 2016 – Dec 31, 2022 (changeable)."
+        ),
     )
 
     # Cap the dashboard date window to the in-sample period (UI picker overrides;
