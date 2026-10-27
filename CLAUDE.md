@@ -188,6 +188,14 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
     straight away.
   - Pre-change backups: `/root/quantlab-backups/live_alerts.json.20261027-before-ann-btc`,
     `…-before-ann-alias` and `…-before-ann-rename`.
+- **Live rules 6–8 — `ANN Strategy (Original) ETHUSDT 15m`, `… BNBUSDT 15m`,
+  `… RUNEUSDT 15m`**: RUNNING since Oct 27, 2026 14:16 UTC. Exact copies of the BTC rule
+  (same strategy, params, alias, webhook, SANTOS's secret via `secret_source`, 25x, `live`).
+  The ANN net is a fixed set of weights with nothing per coin, so no tuning was needed.
+  Pixel Alpha refuses a BUY/SELL with **HTTP 400 `asset_not_configured`** when the coin has
+  no enabled Binance asset row there, so the alert history shows straight away whether a
+  new coin is set up on that side. Pre-change backup:
+  `/root/quantlab-backups/live_alerts.json.20261027-before-ann-eth-bnb-rune`.
 - **Every webhook carries `sent_at` (deployed Oct 27, 2026):** UTC ISO with ms
   (`"2026-10-26T14:15:02.812Z"`), stamped once in `build_payload` when the signal is
   dispatched. Retries resend the same value. It's also a `{{sent_at}}` token for
