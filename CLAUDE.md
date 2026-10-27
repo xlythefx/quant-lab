@@ -115,7 +115,7 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
 - **Old `#livealerts` page stays fully working** until the cutover soak completes
   (plans/10) — don't remove it before then.
 
-## Where QuantLab runs live, and the live rules (checked Oct 26, 2026)
+## Where QuantLab runs live, and the live rules (checked Oct 27, 2026)
 
 - **Prod only: ubuntu-prod 191.218.162.171 → `lab.nexafamily.com`** (nginx basic auth,
   unit `quantlab.service`, port 6173). It is **NOT on staging 182** — no unit, no folder, no
@@ -126,6 +126,26 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
   No code change and no deploy needed when the strategy already has the knobs. A deploy
   never overwrites the box's rules: `stage_data` skips `live_alerts.json`,
   `live_terminal.db`, `live_state/`.
+- **Every deploy backs up first (since Oct 27, 2026) — keep it that way.** Each writing
+  stage of `deploy_ubuntu.py` (`full`, `code`, `dash`, `data`, `service`, `nginx`,
+  `restore`) first snapshots the box into `/root/quantlab-backups/<UTC yyyymmdd-hhmmss>/`:
+  backend code (not the `data/` parquet cache), `backend/.env`, `frontend/dist`, `docs`,
+  `scripts`, the unit + nginx files, and the live state (`live_alerts.json`,
+  `live_terminal.db` copied through SQLite's backup API, `live_state/`). ~7 MB each, newest
+  10 kept; `BACKUP_INFO` names the local commit that replaced it. There is no skip flag.
+  - `deploy_ubuntu.py backups` lists them; `deploy_ubuntu.py restore [ts]` (default newest)
+    puts back code, `.env`, `dist`, docs, scripts and the unit, then restarts. It snapshots
+    first, so a restore can be undone too. It never rolls back the live state; copy that
+    from the snapshot by hand if really wanted.
+  - The deployer is gitignored, so this exists only in the local copy. The version before
+    backups is `vps-deployment/deploy_ubuntu.py.bak-10272026`.
+  - Hand edits to the rules file still get their own named copy next to the snapshots
+    (`live_alerts.json.<date>-before-<what>`), which pruning never touches.
+- **The service needs ~11 s to listen after a restart** (strategy registry + imports), so
+  `stage_service`'s check 8 s in can print `port 6173: NOT LISTENING` on a healthy deploy.
+  Re-check with `deploy_ubuntu.py status` before treating it as a failure.
+- **Deploy away from a 15m close.** A restart stops all runners for ~15 s; time it a
+  minute or more after :00/:15/:30/:45 so no bar closes while they warm up.
 - **Live rule 1 — `VWMA Reversion LTCUSDT 15m`** (enabled): `vwma_reversion`, vwma 23,
   z 1.5, rsi 15, **longs only**, **`trade_24_7: true`** (so its session toggles are
   ignored), ATR stop off, 25x, account `live` →
@@ -154,12 +174,21 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
   - Pre-change backup: `/root/quantlab-backups/live_alerts.json.20261026-before-qnt-santos`.
   - The parity script is `vwma_parity.py` (Oct 26 session scratchpad). It's a bar-by-bar Pine
     port vs `on_candle`; rebuild it from this description if needed.
-- **Every webhook carries `sent_at` (since Oct 26, 2026):** UTC ISO with ms
+- **Live rule 5 — `ANN Strategy v2 BTCUSDT 15m`**: added Oct 27, 2026 ~08:03 UTC, enabled.
+  `ann_v2_original` (the faithful port of TradingView "ANN Strategy v2"), Pine defaults:
+  anchor `1D`, longs + shorts. Same webhook and secret as SANTOS (via `secret_source`),
+  25x, account `live`, alias **`ANN Strategy v2 - QuantLab`**. It is **always in the
+  market**: every side change is an exit + opposite entry on the same bar (~3 flips a day
+  on 15m), no pyramiding, no stop. A fresh runner is forced flat after warm-up but keeps
+  the net's side, so its first live bar close sends an entry straight away.
+  Pre-change backup: `/root/quantlab-backups/live_alerts.json.20261027-before-ann-btc`.
+- **Every webhook carries `sent_at` (deployed Oct 27, 2026):** UTC ISO with ms
   (`"2026-10-26T14:15:02.812Z"`), stamped once in `build_payload` when the signal is
   dispatched. Retries resend the same value. It's also a `{{sent_at}}` token for
   `payload_template`. Pixel Alpha's engine reads it to measure signal → fill delay, so the
   box clock must stay NTP-synced (191: `NTPSynchronized=yes`). The frontend token hint
-  text in `AlertsView.jsx` / `LiveAlerts.jsx` doesn't list it yet.
+  text in `AlertsView.jsx` / `LiveAlerts.jsx` doesn't list it yet. It was written Oct 26, but
+  191 kept running Oct 16 code until the Oct 27 deploy, so no webhook carried it before then.
 - To add a rule from a terminal, POST `/api/live/deployments` on the box's loopback
   (`http://127.0.0.1:6173`, which skips nginx basic auth). Send `"secret": "***"` +
   `"secret_source": "<existing rule name>"` so the real secret never leaves the server.
