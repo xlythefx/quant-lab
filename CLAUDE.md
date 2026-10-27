@@ -177,11 +177,14 @@ ui.py / launch.py             # GUI / process launchers (also ui.bat, launch.bat
 - **Live rule 5 — `ANN Strategy v2 BTCUSDT 15m`**: added Oct 27, 2026 ~08:03 UTC, enabled.
   `ann_v2_original` (the faithful port of TradingView "ANN Strategy v2"), Pine defaults:
   anchor `1D`, longs + shorts. Same webhook and secret as SANTOS (via `secret_source`),
-  25x, account `live`, alias **`ANN Strategy v2 - QuantLab`**. It is **always in the
+  25x, account `live`, alias **`ann-strategy-v1`** (the user's name for it — that is the
+  webhook's `"strategy"` value, so Pixel Alpha files its trades under it; set 08:07 UTC,
+  before its first signal). It is **always in the
   market**: every side change is an exit + opposite entry on the same bar (~3 flips a day
   on 15m), no pyramiding, no stop. A fresh runner is forced flat after warm-up but keeps
   the net's side, so its first live bar close sends an entry straight away.
-  Pre-change backup: `/root/quantlab-backups/live_alerts.json.20261027-before-ann-btc`.
+  Pre-change backups: `/root/quantlab-backups/live_alerts.json.20261027-before-ann-btc`
+  and `…20261027-before-ann-alias`.
 - **Every webhook carries `sent_at` (deployed Oct 27, 2026):** UTC ISO with ms
   (`"2026-10-26T14:15:02.812Z"`), stamped once in `build_payload` when the signal is
   dispatched. Retries resend the same value. It's also a `{{sent_at}}` token for
