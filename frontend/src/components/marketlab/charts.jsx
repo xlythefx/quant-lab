@@ -2,6 +2,8 @@
 // Modeled on the hand-rolled SVG idiom used in Analytics.jsx / WalkForward.jsx
 // (fixed viewBox, width="100%", manual xOf/yOf scaling). No chart library.
 
+import { fmtDateLong } from "../../services/format.js";
+
 // Regime → color. Mirrors the app's semantic palette (profit/loss/accent tokens).
 export const REGIME_COLORS = {
   "Trending Up":     "#22c55e",
@@ -227,6 +229,80 @@ export function LineChart({ points = [], height = 200, color = "#f59e0b",
         </g>
       )}
     </svg>
+  );
+}
+
+/**
+ * MultiLineChart — several {time, value} series on one shared scale, plus
+ * optional flat reference lines and point markers. Used by Pair Check.
+ *   series:  [{label, points, color, dashed?, width?, opacity?}]
+ *   hLines:  [{value, color, label?, dashed?}]
+ *   markers: [{time, value, color, title?}]
+ */
+export function MultiLineChart({ series = [], hLines = [], markers = [], height = 220,
+                                 yLabel = "", fmt = (v) => niceNum(v), legend = true }) {
+  const W = 1000;
+  const H = height;
+  const pad = { l: 58, r: 12, t: 14, b: 22 };
+  const innerW = W - pad.l - pad.r;
+  const innerH = H - pad.t - pad.b;
+  const live = series.map((s) => ({ ...s, pts: (s.points || []).filter((p) => Number.isFinite(p.value)) }))
+    .filter((s) => s.pts.length >= 2);
+  if (!live.length) return <Empty height={H} />;
+
+  const ts = live.flatMap((s) => [s.pts[0].time, s.pts[s.pts.length - 1].time]);
+  const tMin = Math.min(...ts), tMax = Math.max(...ts), tSpan = tMax - tMin || 1;
+  let vMin = Infinity, vMax = -Infinity;
+  for (const s of live) for (const p of s.pts) { if (p.value < vMin) vMin = p.value; if (p.value > vMax) vMax = p.value; }
+  for (const h of hLines) { vMin = Math.min(vMin, h.value); vMax = Math.max(vMax, h.value); }
+  if (vMin === vMax) { vMin -= 1; vMax += 1; }
+  const vSpan = vMax - vMin;
+  const xOf = (t) => pad.l + ((t - tMin) / tSpan) * innerW;
+  const yOf = (v) => pad.t + (1 - (v - vMin) / vSpan) * innerH;
+  const ticks = [vMin, (vMin + vMax) / 2, vMax];
+
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}>
+        {ticks.map((tv, i) => (
+          <g key={i}>
+            <line x1={pad.l} x2={W - pad.r} y1={yOf(tv)} y2={yOf(tv)} stroke={GRID} />
+            <text x={pad.l - 6} y={yOf(tv) + 3} textAnchor="end" fontSize="11" fill={AXIS}>{fmt(tv)}</text>
+          </g>
+        ))}
+        {yLabel && <text x={12} y={pad.t + 4} fontSize="10" fill={AXIS}>{yLabel}</text>}
+        {hLines.map((h, i) => (
+          <g key={`h${i}`}>
+            <line x1={pad.l} x2={W - pad.r} y1={yOf(h.value)} y2={yOf(h.value)} stroke={h.color || AXIS}
+                  strokeDasharray={h.dashed === false ? undefined : "4 3"} vectorEffect="non-scaling-stroke" />
+            {h.label && <text x={W - pad.r - 4} y={yOf(h.value) - 3} textAnchor="end" fontSize="10" fill={h.color || AXIS}>{h.label}</text>}
+          </g>
+        ))}
+        {live.map((s, i) => (
+          <path key={i}
+                d={s.pts.map((p, j) => `${j ? "L" : "M"}${xOf(p.time).toFixed(1)},${yOf(p.value).toFixed(1)}`).join(" ")}
+                fill="none" stroke={s.color} strokeWidth={s.width || 1.5} opacity={s.opacity ?? 1}
+                strokeDasharray={s.dashed ? "5 4" : undefined} vectorEffect="non-scaling-stroke" />
+        ))}
+        {markers.filter((m) => Number.isFinite(m.value) && m.time >= tMin && m.time <= tMax).map((m, i) => (
+          <circle key={`m${i}`} cx={xOf(m.time)} cy={yOf(m.value)} r="4" fill={m.color} stroke="#0b1220" strokeWidth="1">
+            {m.title && <title>{m.title}</title>}
+          </circle>
+        ))}
+        <text x={pad.l} y={H - 6} fontSize="10" fill={AXIS}>{fmtDateLong(tMin)}</text>
+        <text x={W - pad.r} y={H - 6} textAnchor="end" fontSize="10" fill={AXIS}>{fmtDateLong(tMax)}</text>
+      </svg>
+      {legend && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-[11px] text-muted">
+          {live.map((s, i) => (
+            <span key={i} className="flex items-center gap-1.5">
+              <span className="inline-block w-4" style={{ borderTop: `2px ${s.dashed ? "dashed" : "solid"} ${s.color}`, opacity: s.opacity ?? 1 }} />
+              {s.label}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

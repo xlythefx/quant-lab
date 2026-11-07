@@ -1,0 +1,110 @@
+symbol,category,binance_first_day,first_year,usd_volume_24h,data_flag,gap_detail,downloaded_tfs,downloaded_15m_from
+BTCUSDT,coin,"Aug 17, 2017",2017,972779287,ok,,15m 1h 1m,"Jan 19, 2020"
+ETHUSDT,coin,"Aug 17, 2017",2017,435505477,ok,,15m,"Jan 23, 2019"
+ZECUSDT,coin,"Mar 21, 2019",2019,228160792,ok,,15m 1m,"Mar 21, 2019"
+SOLUSDT,coin,"Aug 11, 2020",2020,168239424,ok,,15m,"Aug 11, 2020"
+NEARUSDT,coin,"Oct 14, 2020",2020,108707817,ok,,15m 1m,"Oct 14, 2020"
+XRPUSDT,coin,"May 04, 2018",2018,97932709,ok,,15m,"Aug 11, 2020"
+BNBUSDT,coin,"Nov 06, 2017",2017,61500799,ok,,,
+DOGEUSDT,coin,"Jul 05, 2019",2019,48092832,ok,,,
+UNIUSDT,coin,"Sep 17, 2020",2020,30631573,ok,,15m,"Sep 17, 2020"
+HBARUSDT,coin,"Sep 29, 2019",2019,26651355,ok,,15m,"Sep 30, 2019"
+TRXUSDT,coin,"Jun 11, 2018",2018,22939356,ok,,15m,"Jun 11, 2018"
+INJUSDT,coin,"Oct 21, 2020",2020,21695160,ok,,15m,"Dec 09, 2021"
+LTCUSDT,coin,"Dec 13, 2017",2017,19609789,ok,,15m,"Dec 13, 2017"
+LINKUSDT,coin,"Jan 16, 2019",2019,18332128,ok,,15m 1m,"Jan 16, 2019"
+AVAXUSDT,coin,"Sep 22, 2020",2020,16704899,ok,,15m,"Sep 22, 2020"
+ADAUSDT,coin,"Apr 17, 2018",2018,13732257,ok,,15m,"Apr 17, 2018"
+FILUSDT,coin,"Oct 15, 2020",2020,12997354,ok,,1m,
+AVAUSDT,coin,"Nov 24, 2020",2020,12928709,ok,,15m 1m,"Nov 24, 2020"
+FETUSDT,coin,"Feb 28, 2019",2019,12297137,ok,,15m,"Feb 28, 2019"
+SANDUSDT,coin,"Aug 14, 2020",2020,12262220,ok,,,
+AAVEUSDT,coin,"Oct 15, 2020",2020,9616690,ok,,15m,"Oct 15, 2020"
+XLMUSDT,coin,"May 31, 2018",2018,8783756,ok,,,
+DOTUSDT,coin,"Aug 18, 2020",2020,7309434,ok,,15m,"Aug 19, 2020"
+BCHUSDT,coin,"Nov 28, 2019",2019,5586953,ok,,15m,"Nov 28, 2019"
+RUNEUSDT,coin,"Sep 04, 2020",2020,5289690,ok,,,
+OGNUSDT,coin,"Jan 09, 2020",2020,4300437,ok,,15m 1m,"Jan 09, 2020"
+DASHUSDT,coin,"Mar 28, 2019",2019,4114525,ok,,,
+LSKUSDT,coin,"Feb 06, 2020",2020,3393391,ok,,,
+CRVUSDT,coin,"Aug 15, 2020",2020,3363884,ok,,15m,"Aug 15, 2020"
+JSTUSDT,coin,"Aug 11, 2020",2020,2995274,ok,,,
+BATUSDT,coin,"Mar 04, 2019",2019,2796817,ok,,15m 1m,"Mar 04, 2019"
+ALGOUSDT,coin,"Jun 22, 2019",2019,2652623,ok,,15m 1m,"Jun 22, 2019"
+STXUSDT,coin,"Oct 25, 2019",2019,2464210,ok,,15m 1m,"Oct 25, 2019"
+ETCUSDT,coin,"Jun 12, 2018",2018,2417527,ok,,,
+DUSKUSDT,coin,"Jul 22, 2019",2019,2311391,ok,,15m 1m,"Jul 22, 2019"
+RLCUSDT,coin,"Nov 14, 2019",2019,1817719,ok,,,
+ZILUSDT,coin,"Feb 19, 2019",2019,1712613,ok,,15m 1m,"Feb 19, 2019"
+ZENUSDT,coin,"Jul 06, 2020",2020,1682170,ok,,15m 1m,"Jul 06, 2020"
+ATOMUSDT,coin,"Apr 29, 2019",2019,1565389,ok,,15m,"Apr 29, 2019"
+RSRUSDT,coin,"Aug 27, 2020",2020,1422725,ok,,,
+AXSUSDT,coin,"Nov 04, 2020",2020,1342806,ok,,,
+STRAXUSDT,coin,"Nov 18, 2020",2020,1287183,SUSPECT: price jump across gap (ticker reuse / redenomination?),"Mar 20, 2024 -> Mar 28, 2024 (8d, price x0.1026)",,
+NMRUSDT,coin,"Aug 19, 2020",2020,1238012,ok,,15m 1m,"Aug 19, 2020"
+KAVAUSDT,coin,"Oct 25, 2019",2019,1231888,ok,,15m 1m,"Oct 25, 2019"
+JUVUSDT,coin,"Dec 21, 2020",2020,1169024,ok,,,
+ATMUSDT,coin,"Dec 30, 2020",2020,1157726,ok,,,
+LUNAUSDT,coin,"Aug 21, 2020",2020,1096162,SUSPECT: price jump across gap (ticker reuse / redenomination?),"May 13, 2022 -> May 31, 2022 (18d, price x1.774e+05)",15m 1m,"Aug 21, 2020"
+VETUSDT,coin,"Jul 25, 2018",2018,1054177,ok,,15m,"Jul 25, 2018"
+ONEUSDT,coin,"Jun 01, 2019",2019,1048446,ok,,15m 1m,"Jun 01, 2019"
+RVNUSDT,coin,"Sep 25, 2019",2019,876541,ok,,,
+IOTAUSDT,coin,"May 31, 2018",2018,848913,ok,,,
+ROSEUSDT,coin,"Nov 19, 2020",2020,828134,ok,,,
+AUDIOUSDT,coin,"Oct 23, 2020",2020,810558,ok,,,
+PSGUSDT,coin,"Dec 21, 2020",2020,764982,ok,,,
+IOTXUSDT,coin,"Nov 14, 2019",2019,720220,ok,,,
+SKLUSDT,coin,"Dec 01, 2020",2020,662386,ok,,,
+COTIUSDT,coin,"Feb 26, 2020",2020,656356,ok,,15m 1m,"Feb 26, 2020"
+ONTUSDT,coin,"Jun 08, 2018",2018,599865,ok,,,
+CHZUSDT,coin,"Sep 06, 2019",2019,584776,ok,,15m 1m,"Sep 06, 2019"
+ENJUSDT,coin,"Apr 18, 2019",2019,583550,ok,,,
+XTZUSDT,coin,"Sep 24, 2019",2019,540209,ok,,,
+GRTUSDT,coin,"Dec 17, 2020",2020,540015,ok,,15m,"Dec 18, 2020"
+MANAUSDT,coin,"Aug 06, 2020",2020,524762,ok,,,
+THETAUSDT,coin,"Apr 10, 2019",2019,512885,ok,,15m 1m,"Apr 10, 2019"
+CTSIUSDT,coin,"Apr 23, 2020",2020,489042,ok,,15m 1m,"Apr 23, 2020"
+TRBUSDT,coin,"Aug 29, 2020",2020,476975,ok,,,
+1INCHUSDT,coin,"Dec 25, 2020",2020,466428,ok,,,
+NEOUSDT,coin,"Nov 20, 2017",2017,453914,ok,,15m,"Nov 20, 2017"
+COMPUSDT,coin,"Jun 25, 2020",2020,435993,ok,,,
+ONGUSDT,coin,"Feb 16, 2019",2019,376412,ok,,,
+CVCUSDT,coin,"Aug 27, 2019",2019,370149,gap,"Dec 09, 2022 -> May 12, 2023 (154d, price x0.911)",15m 1m,"Aug 27, 2019"
+VTHOUSDT,coin,"Jul 17, 2020",2020,360120,ok,,,
+CHRUSDT,coin,"May 07, 2020",2020,304327,ok,,,
+SUNUSDT,coin,"Sep 21, 2020",2020,295410,SUSPECT: price jump across gap (ticker reuse / redenomination?),"Jun 14, 2021 -> Jun 18, 2021 (4d, price x0.001199)",15m,"Sep 23, 2020"
+EGLDUSDT,coin,"Sep 03, 2020",2020,251526,ok,,15m 1m,"Sep 03, 2020"
+FTTUSDT,coin,"Dec 20, 2019",2019,250644,gap,"Nov 15, 2022 -> Sep 22, 2023 (311d, price x0.7674)",,
+SUSHIUSDT,coin,"Sep 01, 2020",2020,249072,ok,,,
+ZRXUSDT,coin,"Feb 28, 2019",2019,246142,ok,,,
+BELUSDT,coin,"Sep 15, 2020",2020,222834,ok,,,
+SNXUSDT,coin,"Jul 09, 2020",2020,219805,ok,,,
+KSMUSDT,coin,"Sep 04, 2020",2020,218460,ok,,,
+OGUSDT,coin,"Dec 30, 2020",2020,211300,ok,,,
+MBLUSDT,coin,"Feb 21, 2020",2020,207053,ok,,,
+ASRUSDT,coin,"Dec 30, 2020",2020,203513,ok,,,
+ANKRUSDT,coin,"Jul 23, 2019",2019,192428,ok,,15m 1m,"Jul 23, 2019"
+IOSTUSDT,coin,"Mar 22, 2019",2019,184799,ok,,,
+DGBUSDT,coin,"Jul 20, 2020",2020,182795,ok,,,
+SCUSDT,coin,"Jul 06, 2020",2020,175440,ok,,,
+HOTUSDT,coin,"Feb 18, 2019",2019,171908,ok,,15m,"Feb 18, 2019"
+ARPAUSDT,coin,"Nov 06, 2019",2019,171535,ok,,15m 1m,"Nov 06, 2019"
+YFIUSDT,coin,"Aug 10, 2020",2020,170627,ok,,15m 1m,"Aug 10, 2020"
+UMAUSDT,coin,"Sep 09, 2020",2020,169895,ok,,,
+KNCUSDT,coin,"Jun 12, 2020",2020,159843,ok,,,
+CTKUSDT,coin,"Oct 27, 2020",2020,159087,ok,,,
+QTUMUSDT,coin,"Mar 19, 2018",2018,147946,ok,,,
+WINUSDT,coin,"Aug 01, 2019",2019,147089,ok,,,
+DIAUSDT,coin,"Sep 04, 2020",2020,132285,ok,,15m 1m,"Sep 04, 2020"
+XVSUSDT,coin,"Oct 06, 2020",2020,119515,ok,,15m 1m,"Oct 06, 2020"
+BANDUSDT,coin,"Sep 18, 2019",2019,115221,ok,,,
+CELRUSDT,coin,"Mar 25, 2019",2019,112798,ok,,,
+TFUELUSDT,coin,"May 24, 2019",2019,106358,ok,,,
+BNTUSDT,coin,"Feb 06, 2020",2020,105291,ok,,,
+DCRUSDT,coin,"Jul 30, 2020",2020,97034,ok,,15m 1m,"Jul 30, 2020"
+HIVEUSDT,coin,"Apr 27, 2020",2020,79126,ok,,,
+MTLUSDT,coin,"Aug 23, 2019",2019,56258,ok,,,
+USDCUSDT,stable/fiat,"Dec 15, 2018",2018,2626811070,gap,"Sep 26, 2022 -> Mar 11, 2023 (166d, price x0.9593)",,
+PAXGUSDT,gold-backed,"Aug 28, 2020",2020,8495200,ok,,,
+EURUSDT,stable/fiat,"Jan 03, 2020",2020,5859628,ok,,,
+TUSDUSDT,stable/fiat,"May 31, 2018",2018,49721,gap,"Sep 26, 2022 -> Mar 11, 2023 (166d, price x0.9929)",,

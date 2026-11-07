@@ -428,6 +428,30 @@ export async function marketLabWeekdayWindows({ symbol, timeframe, start_time, e
   return data;
 }
 
+export async function marketLabPairCheck({ symbol_y, symbol_x, timeframe, start_time, end_time, params }) {
+  const { data } = await api.post("/api/marketlab/pair-check", {
+    symbol_y, symbol_x, timeframe, start_time, end_time, params,
+  });
+  return data;
+}
+
+// Drift Check scans every coin, so it can run for a minute or more.
+export async function marketLabDriftCheck({ anchor, timeframe, params }) {
+  const { data } = await api.post("/api/marketlab/drift-check", { anchor, timeframe, params }, { timeout: 900_000 });
+  return data;
+}
+
+export async function marketLabDriftUniverse({ anchor, timeframe }) {
+  const { data } = await api.post("/api/marketlab/drift-check/universe", { anchor, timeframe });
+  return data;
+}
+
+export async function marketLabDriftOpenHoldout({ anchor, timeframe, params, confirm }) {
+  const { data } = await api.post("/api/marketlab/drift-check/open-holdout",
+    { anchor, timeframe, params, confirm }, { timeout: 900_000 });
+  return data;
+}
+
 /** Mean-reversion alpha scanner: VWMA z-score + RSI setup edge, by regime, with significance. */
 export async function marketLabScan({ symbol, timeframe, start_time, end_time, params }) {
   const { data } = await api.post("/api/marketlab/scan", {

@@ -19,6 +19,8 @@ import {
 } from "../components/marketlab/charts.jsx";
 import RegimeCandleChart from "../components/marketlab/RegimeCandleChart.jsx";
 import WeekdayWindowsTab from "../components/marketlab/WeekdayWindowsTab.jsx";
+import PairCheckTab from "../components/marketlab/PairCheckTab.jsx";
+import DriftCheckTab from "../components/marketlab/DriftCheckTab.jsx";
 
 // ---- date helpers (same convention as WalkForward) ----
 function dateStrToEpoch(s, endOfDay = false) {
@@ -38,6 +40,8 @@ const TABS = [
   { id: "volatility", label: "Volatility" },
   { id: "statistics", label: "Statistics" },
   { id: "weekdays", label: "Weekday Windows" },
+  { id: "pair", label: "Pair Check" },
+  { id: "drift", label: "Drift Check" },
   { id: "scanner", label: "Alpha Scanner" },
   { id: "fadesafety", label: "Fade Safety" },
   { id: "features", label: "Feature Importance" },
@@ -228,7 +232,7 @@ export default function MarketLab() {
   }[which] || {});
 
   async function runActive() {
-    if (!canRun || tab === "bench") return;
+    if (!canRun || tab === "bench" || tab === "pair" || tab === "drift") return;
     const which = tab;
     setLoading((s) => ({ ...s, [which]: true }));
     setErrors((s) => ({ ...s, [which]: null }));
@@ -260,7 +264,8 @@ export default function MarketLab() {
           </p>
         </header>
 
-        {/* ---- shared setup bar ---- */}
+        {/* ---- shared setup bar (Pair Check and Drift Check have their own) ---- */}
+        {tab !== "pair" && tab !== "drift" && (
         <section className="rounded-xl border border-line bg-bg-panel/60 p-4">
           <div className="flex flex-wrap items-end gap-4">
             <SymbolSelector value={symbol} options={symbols} datasets={datasets} onChange={setSymbol} />
@@ -286,6 +291,7 @@ export default function MarketLab() {
             </div>
           )}
         </section>
+        )}
 
         <TabBar tabs={TABS} active={tab} onSelect={onTab} />
 
@@ -342,6 +348,8 @@ export default function MarketLab() {
         {tab === "volatility" && <VolatilityTab data={results.volatility} loading={loading.volatility} />}
         {tab === "statistics" && <StatisticsTab data={results.statistics} loading={loading.statistics} />}
         {tab === "weekdays" && <WeekdayWindowsTab data={results.weekdays} loading={loading.weekdays} />}
+        {tab === "pair" && <PairCheckTab datasets={datasets} />}
+        {tab === "drift" && <DriftCheckTab datasets={datasets} />}
         {tab === "scanner" && (
           <ScannerTab data={results.scanner} loading={loading.scanner}
             symbol={symbol} scanParams={scanParams} regimeParams={regimeParams}
